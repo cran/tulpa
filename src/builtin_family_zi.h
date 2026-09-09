@@ -1,0 +1,247 @@
+// builtin_family_zi.h
+// Zero-inflation mixture shared by every compiled path, mirroring R/family_zi.R
+// (the R side is the reference the density tests validate against).
+//
+//   pi_i = inv_logit(logit_zi_i)      structural-zero probability
+//   p0_i = P_base(Y = 0 | eta_i)
+//
+//   y = 0:  ll = log(pi + (1 - pi) p0)
+//   y > 0:  ll = log(1 - pi) + ll_base(y | eta)
+//
+// The two compiled backends reach the ZI linear predictor differently, which is
+// why the mixture lives here rather than in either one:
+//
+//   - The generic sampler path carries it as the `logit_zi` callback argument,
+//     built from data.X_zi_flat and the beta_zi parameter block.
+//   - The spec-driven Laplace path has no such channel (its shim passes 0.0),
+//     so it carries the ZI predictor as process 1 and reads eta[1]. Its
+//     curvature contract is a row-major n_processes x n_processes block, which
+//     is exactly what the mixture's 2 x 2 needs.
+//
+// Both call the same mixture below, so there is one implementation of the math
+// regardless of which predictor channel supplied logit_zi.
+//
+// A zero-truncated base has p0 == 0, which collapses the y = 0 branch to
+// log(pi) and zeroes the count-side gradient, count-side curvature and the
+// cross term -- i.e. the hurdle model, with no truncation-specific branch here.
+
+#ifndef TULPA_BUILTIN_FAMILY_ZI_H
+#define TULPA_BUILTIN_FAMILY_ZI_H
+
+#include <cmath>
+#include <string>
+
+#include "autodiff_utils.h"
+#include "laplace_family_link.h"
+
+namespace tulpa {
+namespace zi {
+
+// Families the compiled zero-inflation mixture can be built over. Two
+// independent conditions, both delegated so neither becomes a hand-maintained
+// list that drifts from the branches it describes:
+//
+//   * has_discrete_mass -- log_lik_for_family at y = 0 has to BE log P(Y = 0).
+//     For a continuous family it is a log-density instead: finite and plausible
+//     for gaussian, infinite for gamma or beta, and wrong either way.
+//   * has_observed_curvature -- the y = 0 branch differentiates through
+//     P(Y = 0), so it needs the curvature of the actual log density rather than
+//     the Newton working weight.
+//
+// The R front door gates on this.
+inline bool compiled_zi_supported(const std::string& family) {
+    return has_discrete_mass(family) && has_observed_curvature(family);
+}
+
+// The supported set as text, for the refusal message. Built by running the gate
+// over the discrete bases rather than restating its members, so a family that
+// gains or loses an observed curvature is reported correctly without anyone
+// remembering to edit a string. The candidate list is complete: a base outside
+// discrete_mass_families() fails the gate's first condition.
+inline std::string compiled_zi_supported_families() {
+    std::string out;
+    for (const std::string& base : discrete_mass_families()) {
+        if (!compiled_zi_supported(base)) continue;
+        if (!out.empty()) out += ", ";
+        out += base;
+    }
+    return out;
+}
+
+// ---------------------------------------------------------------------------
+// Templated pieces (double / arena::Var / fwd::Dual), used by the AD path.
+// ---------------------------------------------------------------------------
+
+// log(inv_logit(z)) and log(1 - inv_logit(z)), through the shared softplus,
+// which is exact at both tails and whose derivative is inv_logit itself -- so
+// the mixture's value and its AD gradient are accurate at every z, including
+// the far negative logits a fit with no excess zeros heads for.
+template<typename T>
+inline T log_pi(const T& z) {
+    return T(0.0) - tulpa::math::softplus(T(0.0) - z);
+}
+
+template<typename T>
+inline T log1m_pi(const T& z) { return T(0.0) - tulpa::math::softplus(z); }
+
+// inv_logit(z), branching on the sign so neither exp() overflows: the positive
+// branch exponentiates -z, the negative branch exponentiates z.
+inline double pi_from_logit(double z) {
+    return (z >= 0.0) ? 1.0 / (1.0 + std::exp(-z))
+                      : std::exp(z) / (1.0 + std::exp(z));
+}
+
+// Derivatives of pi = inv_logit(z) in z, up to the fourth: out[n] = pi^(n),
+// with out[0] = pi itself. The logistic block of every zero-inflated mixture
+// needs this same ladder, and it is short enough that a second writing of it
+// is a second thing to keep correct rather than a convenience.
+inline void logit_pi_derivs(double pi_z, double* out) {
+    const double q  = 1.0 - pi_z;
+    const double pq = pi_z * q;
+    const double m1 = 1.0 - 2.0 * pi_z;
+    out[0] = pi_z;
+    out[1] = pq;
+    out[2] = pq * m1;
+    out[3] = pq * (m1 * m1 - 2.0 * pq);
+    out[4] = pq * m1 * (1.0 - 12.0 * pq);
+}
+
+// eta-derivatives of P0 = exp(L), where L is the log-density at y = 0 and
+// (s0, w0, w0p, w0pp) are (L', -L'', -L''', -L''''). The coefficients are the
+// complete Bell polynomials in those log-derivatives; `order` says how many
+// are wanted, so the third-order caller need not supply w0pp. out[0] = P0.
+inline void p0_eta_derivs(double P0, double s0, double w0, double w0p,
+                          double w0pp, int order, double* out) {
+    out[0] = P0;
+    if (order >= 1) out[1] = P0 * s0;
+    if (order >= 2) out[2] = P0 * (s0 * s0 - w0);
+    if (order >= 3) out[3] = P0 * (s0 * s0 * s0 - 3.0 * s0 * w0 - w0p);
+    if (order >= 4) out[4] = P0 * (s0 * s0 * s0 * s0 - 6.0 * s0 * s0 * w0
+                                   + 3.0 * w0 * w0 - 4.0 * s0 * w0p - w0pp);
+}
+
+// log(exp(a) + exp(b)) without intermediate overflow.
+template<typename T>
+inline T logspace_add(const T& a, const T& b) {
+    using tulpa::math::safe_exp;
+    using tulpa::math::log1p_fn;
+    T mx = (a >= b) ? a : b;
+    T mn = (a >= b) ? b : a;
+    return mx + log1p_fn(safe_exp(mn - mx));
+}
+
+// The mixture, given the base log-density evaluated at the realized y and at 0.
+//
+// `base_truncated` marks a base family with no atom at zero (p0 == 0), i.e. the
+// hurdle case. Mathematically the general branch already degenerates there, but
+// it degenerates through base_ll_0 = -Inf, and -Inf times a derivative is NaN
+// under AD rather than the zero the algebra gives. Taking the limit here keeps
+// the hurdle gradient exact instead of merely finite -- and base_ll_0 is then
+// never evaluated, so callers may leave it unset.
+template<typename T>
+inline T mixture_ll(double y, const T& logit_zi,
+                    const T& base_ll_y, const T& base_ll_0,
+                    bool base_truncated = false) {
+    if (y == 0.0) {
+        if (base_truncated) return log_pi(logit_zi);
+        return logspace_add(log_pi(logit_zi), log1m_pi(logit_zi) + base_ll_0);
+    }
+    return log1m_pi(logit_zi) + base_ll_y;
+}
+
+// ---------------------------------------------------------------------------
+// Double path: value and the 2 x 2 eta-space derivative block.
+// ---------------------------------------------------------------------------
+
+inline double mixture_ll_double(
+    double y, int n_trials, double eta_count, double logit_zi,
+    const std::string& family, double phi, double phi2
+) {
+    if (y != 0.0) {
+        return log1m_pi(logit_zi) + log_lik_for_family(y, n_trials, eta_count,
+                                                       family, phi, phi2);
+    }
+    if (is_zero_truncated(family)) return log_pi(logit_zi);   // hurdle
+    const double ll_0 = log_lik_for_family(0.0, n_trials, eta_count, family,
+                                           phi, phi2);
+    return logspace_add(log_pi(logit_zi), log1m_pi(logit_zi) + ll_0);
+}
+
+// Fills grad[0..1] = d ll / d(eta_count, logit_zi) and the row-major 2 x 2
+// negative Hessian. Derivations mirror zi_score_eta() / zi_neg_hessian() in
+// R/family_zi.R; both are validated there against finite differences.
+//
+// At y > 0 the mixture is additively separable, so the count block is the base
+// family's own curvature and the cross term is exactly zero. All coupling lives
+// in the y = 0 branch, where either component can have produced the zero.
+inline void mixture_eta_weights_double(
+    double y, int n_trials, double eta_count, double logit_zi,
+    const std::string& family, double phi, double phi2,
+    double* grad, double* neg_hess
+) {
+    const double pi = (logit_zi >= 0.0)
+        ? 1.0 / (1.0 + std::exp(-logit_zi))
+        : std::exp(logit_zi) / (1.0 + std::exp(logit_zi));
+
+    if (y != 0.0) {
+        const GradHess gh = grad_hess_for_family(y, n_trials, eta_count,
+                                                 family, phi, phi2);
+        grad[0]     = gh.grad;
+        grad[1]     = -pi;
+        neg_hess[0] = gh.neg_hess;
+        neg_hess[1] = 0.0;
+        neg_hess[2] = 0.0;
+        neg_hess[3] = pi * (1.0 - pi);
+        return;
+    }
+
+    if (is_zero_truncated(family)) {
+        // Hurdle: p0 = 0 collapses the y = 0 branch to log(pi), so the count
+        // predictor carries no gradient or curvature here and the cross term
+        // vanishes. Taken as a limit rather than through the -Inf density.
+        grad[0]     = 0.0;
+        grad[1]     = 1.0 - pi;
+        neg_hess[0] = 0.0;
+        neg_hess[1] = 0.0;
+        neg_hess[2] = 0.0;
+        neg_hess[3] = pi * (1.0 - pi);
+        return;
+    }
+
+    // y == 0: differentiate log D, D = pi + (1 - pi) p0, through both
+    // predictors. s0 / w0 are the base score and observed curvature at y = 0 --
+    // observed, not the Newton working weight, because this branch
+    // differentiates the density itself rather than taking an expectation.
+    // A zero-truncated base gives p0 = 0 here, which zeroes D_eta, D_ee and
+    // D_ez and leaves the hurdle model, so s0 and w0 need only be finite.
+    const double p0 = std::exp(log_lik_for_family(0.0, n_trials, eta_count,
+                                                  family, phi, phi2));
+    const GradHess gh0 = obs_grad_hess_for_family(0.0, n_trials, eta_count,
+                                                  family, phi, phi2);
+    const double s0 = gh0.grad;
+    const double w0 = gh0.neg_hess;
+
+    const double D     = pi + (1.0 - pi) * p0;
+    const double D_eta = (1.0 - pi) * p0 * s0;
+    const double D_z   = pi * (1.0 - pi) * (1.0 - p0);
+    const double D_ee  = (1.0 - pi) * p0 * (s0 * s0 - w0);
+    const double D_zz  = (1.0 - p0) * pi * (1.0 - pi) * (1.0 - 2.0 * pi);
+    const double D_ez  = -pi * (1.0 - pi) * p0 * s0;
+
+    grad[0] = D_eta / D;
+    grad[1] = D_z / D;
+
+    const double nh_ee = -(D_ee / D - (D_eta / D) * (D_eta / D));
+    const double nh_zz = -(D_zz / D - (D_z / D) * (D_z / D));
+    const double nh_ez = -(D_ez / D - D_eta * D_z / (D * D));
+
+    neg_hess[0] = nh_ee;
+    neg_hess[1] = nh_ez;
+    neg_hess[2] = nh_ez;
+    neg_hess[3] = nh_zz;
+}
+
+} // namespace zi
+} // namespace tulpa
+
+#endif // TULPA_BUILTIN_FAMILY_ZI_H

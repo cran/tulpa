@@ -1,0 +1,705 @@
+<!DOCTYPE html>
+
+<html>
+
+<head>
+
+<meta charset="utf-8" />
+<meta name="generator" content="pandoc" />
+<meta http-equiv="X-UA-Compatible" content="IE=EDGE" />
+
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+
+
+
+<title>Validating calibration: simulation-based calibration</title>
+
+<script>// Pandoc 2.9 adds attributes on both header and div. We remove the former (to
+// be compatible with the behavior of Pandoc < 2.8).
+document.addEventListener('DOMContentLoaded', function(e) {
+  var hs = document.querySelectorAll("div.section[class*='level'] > :first-child");
+  var i, h, a;
+  for (i = 0; i < hs.length; i++) {
+    h = hs[i];
+    if (!/^h[1-6]$/i.test(h.tagName)) continue;  // it should be a header h1-h6
+    a = h.attributes;
+    while (a.length > 0) h.removeAttribute(a[0].name);
+  }
+});
+</script>
+
+<style type="text/css">
+code{white-space: pre-wrap;}
+span.smallcaps{font-variant: small-caps;}
+span.underline{text-decoration: underline;}
+div.column{display: inline-block; vertical-align: top; width: 50%;}
+div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+ul.task-list{list-style: none;}
+</style>
+
+
+
+<style type="text/css">
+code {
+white-space: pre;
+}
+.sourceCode {
+overflow: visible;
+}
+</style>
+<style type="text/css" data-origin="pandoc">
+html { -webkit-text-size-adjust: 100%; }
+pre > code.sourceCode { white-space: pre; position: relative; }
+pre > code.sourceCode > span { display: inline-block; line-height: 1.25; }
+pre > code.sourceCode > span:empty { height: 1.2em; }
+.sourceCode { overflow: visible; }
+code.sourceCode > span { color: inherit; text-decoration: inherit; }
+div.sourceCode { margin: 1em 0; }
+pre.sourceCode { margin: 0; }
+@media screen {
+div.sourceCode { overflow: auto; }
+}
+@media print {
+pre > code.sourceCode { white-space: pre-wrap; }
+pre > code.sourceCode > span { text-indent: -5em; padding-left: 5em; }
+}
+pre.numberSource code
+{ counter-reset: source-line 0; }
+pre.numberSource code > span
+{ position: relative; left: -4em; counter-increment: source-line; }
+pre.numberSource code > span > a:first-child::before
+{ content: counter(source-line);
+position: relative; left: -1em; text-align: right; vertical-align: baseline;
+border: none; display: inline-block;
+-webkit-touch-callout: none; -webkit-user-select: none;
+-khtml-user-select: none; -moz-user-select: none;
+-ms-user-select: none; user-select: none;
+padding: 0 4px; width: 4em;
+color: #aaaaaa;
+}
+pre.numberSource { margin-left: 3em; border-left: 1px solid #aaaaaa; padding-left: 4px; }
+div.sourceCode
+{ }
+@media screen {
+pre > code.sourceCode > span > a:first-child::before { text-decoration: underline; }
+}
+code span.al { color: #ff0000; font-weight: bold; } 
+code span.an { color: #60a0b0; font-weight: bold; font-style: italic; } 
+code span.at { color: #7d9029; } 
+code span.bn { color: #40a070; } 
+code span.bu { color: #008000; } 
+code span.cf { color: #007020; font-weight: bold; } 
+code span.ch { color: #4070a0; } 
+code span.cn { color: #880000; } 
+code span.co { color: #60a0b0; font-style: italic; } 
+code span.cv { color: #60a0b0; font-weight: bold; font-style: italic; } 
+code span.do { color: #ba2121; font-style: italic; } 
+code span.dt { color: #902000; } 
+code span.dv { color: #40a070; } 
+code span.er { color: #ff0000; font-weight: bold; } 
+code span.ex { } 
+code span.fl { color: #40a070; } 
+code span.fu { color: #06287e; } 
+code span.im { color: #008000; font-weight: bold; } 
+code span.in { color: #60a0b0; font-weight: bold; font-style: italic; } 
+code span.kw { color: #007020; font-weight: bold; } 
+code span.op { color: #666666; } 
+code span.ot { color: #007020; } 
+code span.pp { color: #bc7a00; } 
+code span.sc { color: #4070a0; } 
+code span.ss { color: #bb6688; } 
+code span.st { color: #4070a0; } 
+code span.va { color: #19177c; } 
+code span.vs { color: #4070a0; } 
+code span.wa { color: #60a0b0; font-weight: bold; font-style: italic; } 
+</style>
+<script>
+// apply pandoc div.sourceCode style to pre.sourceCode instead
+(function() {
+  var sheets = document.styleSheets;
+  for (var i = 0; i < sheets.length; i++) {
+    if (sheets[i].ownerNode.dataset["origin"] !== "pandoc") continue;
+    try { var rules = sheets[i].cssRules; } catch (e) { continue; }
+    var j = 0;
+    while (j < rules.length) {
+      var rule = rules[j];
+      // check if there is a div.sourceCode rule
+      if (rule.type !== rule.STYLE_RULE || rule.selectorText !== "div.sourceCode") {
+        j++;
+        continue;
+      }
+      var style = rule.style.cssText;
+      // check if color or background-color is set
+      if (rule.style.color === '' && rule.style.backgroundColor === '') {
+        j++;
+        continue;
+      }
+      // replace div.sourceCode by a pre.sourceCode rule
+      sheets[i].deleteRule(j);
+      sheets[i].insertRule('pre.sourceCode{' + style + '}', j);
+    }
+  }
+})();
+</script>
+
+
+
+
+<style type="text/css">body {
+background-color: #fff;
+margin: 1em auto;
+max-width: 700px;
+overflow: visible;
+padding-left: 2em;
+padding-right: 2em;
+font-family: "Open Sans", "Helvetica Neue", Helvetica, Arial, sans-serif;
+font-size: 14px;
+line-height: 1.35;
+}
+#TOC {
+clear: both;
+margin: 0 0 10px 10px;
+padding: 4px;
+width: 400px;
+border: 1px solid #CCCCCC;
+border-radius: 5px;
+background-color: #f6f6f6;
+font-size: 13px;
+line-height: 1.3;
+}
+#TOC .toctitle {
+font-weight: bold;
+font-size: 15px;
+margin-left: 5px;
+}
+#TOC ul {
+padding-left: 40px;
+margin-left: -1.5em;
+margin-top: 5px;
+margin-bottom: 5px;
+}
+#TOC ul ul {
+margin-left: -2em;
+}
+#TOC li {
+line-height: 16px;
+}
+table {
+margin: 1em auto;
+border-width: 1px;
+border-color: #DDDDDD;
+border-style: outset;
+border-collapse: collapse;
+}
+table th {
+border-width: 2px;
+padding: 5px;
+border-style: inset;
+}
+table td {
+border-width: 1px;
+border-style: inset;
+line-height: 18px;
+padding: 5px 5px;
+}
+table, table th, table td {
+border-left-style: none;
+border-right-style: none;
+}
+table thead, table tr.even {
+background-color: #f7f7f7;
+}
+p {
+margin: 0.5em 0;
+}
+blockquote {
+background-color: #f6f6f6;
+padding: 0.25em 0.75em;
+}
+hr {
+border-style: solid;
+border: none;
+border-top: 1px solid #777;
+margin: 28px 0;
+}
+dl {
+margin-left: 0;
+}
+dl dd {
+margin-bottom: 13px;
+margin-left: 13px;
+}
+dl dt {
+font-weight: bold;
+}
+ul {
+margin-top: 0;
+}
+ul li {
+list-style: circle outside;
+}
+ul ul {
+margin-bottom: 0;
+}
+pre, code {
+background-color: #f7f7f7;
+border-radius: 3px;
+color: #333;
+white-space: pre-wrap; 
+}
+pre {
+border-radius: 3px;
+margin: 5px 0px 10px 0px;
+padding: 10px;
+}
+pre:not([class]) {
+background-color: #f7f7f7;
+}
+code {
+font-family: Consolas, Monaco, 'Courier New', monospace;
+font-size: 85%;
+}
+p > code, li > code {
+padding: 2px 0px;
+}
+div.figure {
+text-align: center;
+}
+img {
+background-color: #FFFFFF;
+padding: 2px;
+border: 1px solid #DDDDDD;
+border-radius: 3px;
+border: 1px solid #CCCCCC;
+margin: 0 5px;
+}
+h1 {
+margin-top: 0;
+font-size: 35px;
+line-height: 40px;
+}
+h2 {
+border-bottom: 4px solid #f7f7f7;
+padding-top: 10px;
+padding-bottom: 2px;
+font-size: 145%;
+}
+h3 {
+border-bottom: 2px solid #f7f7f7;
+padding-top: 10px;
+font-size: 120%;
+}
+h4 {
+border-bottom: 1px solid #f7f7f7;
+margin-left: 8px;
+font-size: 105%;
+}
+h5, h6 {
+border-bottom: 1px solid #ccc;
+font-size: 105%;
+}
+a {
+color: #0033dd;
+text-decoration: none;
+}
+a:hover {
+color: #6666ff; }
+a:visited {
+color: #800080; }
+a:visited:hover {
+color: #BB00BB; }
+a[href^="http:"] {
+text-decoration: underline; }
+a[href^="https:"] {
+text-decoration: underline; }
+
+code > span.kw { color: #555; font-weight: bold; } 
+code > span.dt { color: #902000; } 
+code > span.dv { color: #40a070; } 
+code > span.bn { color: #d14; } 
+code > span.fl { color: #d14; } 
+code > span.ch { color: #d14; } 
+code > span.st { color: #d14; } 
+code > span.co { color: #888888; font-style: italic; } 
+code > span.ot { color: #007020; } 
+code > span.al { color: #ff0000; font-weight: bold; } 
+code > span.fu { color: #900; font-weight: bold; } 
+code > span.er { color: #a61717; background-color: #e3d2d2; } 
+</style>
+
+
+
+
+</head>
+
+<body>
+
+
+
+
+<h1 class="title toc-ignore">Validating calibration: simulation-based
+calibration</h1>
+
+
+
+<div class="sourceCode" id="cb1"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb1-1"><a href="#cb1-1" tabindex="-1"></a><span class="fu">library</span>(tulpa)</span></code></pre></div>
+<div id="what-the-instrument-reads" class="section level2">
+<h2>What the instrument reads</h2>
+<p><code>diagnostics()</code> scores one fit. It asks whether the
+machinery that produced that posterior behaved: whether the chains
+mixed, whether the outer grid covered the hyperparameter posterior,
+whether the inner Gaussian was a reasonable shape for the latent
+conditional. Those are verdicts on the procedure at one data set.</p>
+<p>Calibration is a different question, and no single fit can answer it.
+An inference algorithm is calibrated when its posteriors are
+self-consistent across the whole generative model: simulate a truth,
+simulate data at that truth, fit, and the truth should land at a
+uniformly distributed position inside the posterior it produced. Repeat
+that many times and those positions have a distribution you can
+test.</p>
+<p>The usual way to check this is coverage: count how often a 95%
+interval contains the truth. That reads one point of the marginal CDF,
+or two if you also run a 50% interval. It cannot say whether a posterior
+is biased, over-dispersed, under-dispersed or asymmetric, and it is weak
+enough that two genuinely different reads of the same fit can score
+identically on it. <code>sbc()</code> reads the whole CDF.</p>
+<p>The measurement is the probability integral transform. For a scored
+quantity whose true value is <code>theta_0</code> and whose reported
+posterior CDF is <code>F</code>, take <code>u = F(theta_0)</code>. Under
+exact inference <code>u</code> is exactly Uniform(0, 1), so the entire
+empirical CDF of the <code>u</code> values across simulations is the
+test statistic (Talts et al. 2018).</p>
+</div>
+<div id="a-model-to-validate" class="section level2">
+<h2>A model to validate</h2>
+<p>A balanced Gaussian random-intercept model: six regions of four
+observations each, an intercept and one covariate, a random intercept
+per region whose standard deviation <code>sigma</code> is drawn from a
+seven-point grid.</p>
+<p>The design is small on purpose. The <code>sigma</code> posterior then
+spreads across four or five of the seven grid cells, which is the regime
+where the outer-grid mixture posterior for a fixed effect is farthest
+from the Gaussian matching its first two moments.</p>
+<div class="sourceCode" id="cb2"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb2-1"><a href="#cb2-1" tabindex="-1"></a>GRID <span class="ot">&lt;-</span> <span class="fu">exp</span>(<span class="fu">seq</span>(<span class="fu">log</span>(<span class="fl">0.2</span>), <span class="fu">log</span>(<span class="fl">1.5</span>), <span class="at">length.out =</span> <span class="dv">7</span>))</span>
+<span id="cb2-2"><a href="#cb2-2" tabindex="-1"></a>PHI  <span class="ot">&lt;-</span> <span class="fl">0.7</span></span>
+<span id="cb2-3"><a href="#cb2-3" tabindex="-1"></a>BETA <span class="ot">&lt;-</span> <span class="fu">c</span>(<span class="sc">-</span><span class="fl">0.2</span>, <span class="fl">0.7</span>)</span>
+<span id="cb2-4"><a href="#cb2-4" tabindex="-1"></a></span>
+<span id="cb2-5"><a href="#cb2-5" tabindex="-1"></a>simulate_one <span class="ot">&lt;-</span> <span class="cf">function</span>(seed) {</span>
+<span id="cb2-6"><a href="#cb2-6" tabindex="-1"></a>  <span class="fu">set.seed</span>(seed)</span>
+<span id="cb2-7"><a href="#cb2-7" tabindex="-1"></a>  sigma  <span class="ot">&lt;-</span> GRID[<span class="fu">sample.int</span>(<span class="fu">length</span>(GRID), <span class="dv">1</span><span class="dt">L</span>)]</span>
+<span id="cb2-8"><a href="#cb2-8" tabindex="-1"></a>  region <span class="ot">&lt;-</span> <span class="fu">rep</span>(<span class="fu">seq_len</span>(<span class="dv">6</span><span class="dt">L</span>), <span class="at">each =</span> <span class="dv">4</span><span class="dt">L</span>)</span>
+<span id="cb2-9"><a href="#cb2-9" tabindex="-1"></a>  X      <span class="ot">&lt;-</span> <span class="fu">cbind</span>(<span class="dv">1</span>, <span class="fu">rnorm</span>(<span class="dv">24</span><span class="dt">L</span>))</span>
+<span id="cb2-10"><a href="#cb2-10" tabindex="-1"></a>  u      <span class="ot">&lt;-</span> <span class="fu">rnorm</span>(<span class="dv">6</span><span class="dt">L</span>, <span class="dv">0</span>, sigma)</span>
+<span id="cb2-11"><a href="#cb2-11" tabindex="-1"></a>  <span class="fu">list</span>(<span class="at">y      =</span> <span class="fu">as.numeric</span>(X <span class="sc">%*%</span> BETA) <span class="sc">+</span> u[region] <span class="sc">+</span> <span class="fu">rnorm</span>(<span class="dv">24</span><span class="dt">L</span>, <span class="dv">0</span>, PHI),</span>
+<span id="cb2-12"><a href="#cb2-12" tabindex="-1"></a>       <span class="at">X      =</span> X,</span>
+<span id="cb2-13"><a href="#cb2-13" tabindex="-1"></a>       <span class="at">region =</span> region,</span>
+<span id="cb2-14"><a href="#cb2-14" tabindex="-1"></a>       <span class="at">theta  =</span> <span class="fu">c</span>(<span class="at">beta1 =</span> BETA[<span class="dv">1</span>], <span class="at">beta2 =</span> BETA[<span class="dv">2</span>], <span class="at">sigma =</span> sigma))</span>
+<span id="cb2-15"><a href="#cb2-15" tabindex="-1"></a>}</span>
+<span id="cb2-16"><a href="#cb2-16" tabindex="-1"></a></span>
+<span id="cb2-17"><a href="#cb2-17" tabindex="-1"></a>fit_one <span class="ot">&lt;-</span> <span class="cf">function</span>(d) {</span>
+<span id="cb2-18"><a href="#cb2-18" tabindex="-1"></a>  <span class="fu">tulpa_nested_laplace</span>(</span>
+<span id="cb2-19"><a href="#cb2-19" tabindex="-1"></a>    <span class="at">y =</span> d<span class="sc">$</span>y, <span class="at">n_trials =</span> <span class="fu">rep</span>(<span class="dv">1</span><span class="dt">L</span>, <span class="fu">length</span>(d<span class="sc">$</span>y)), <span class="at">X =</span> d<span class="sc">$</span>X,</span>
+<span id="cb2-20"><a href="#cb2-20" tabindex="-1"></a>    <span class="at">prior =</span> <span class="fu">list</span>(<span class="fu">list</span>(<span class="at">type =</span> <span class="st">&quot;iid&quot;</span>, <span class="at">obs_idx =</span> d<span class="sc">$</span>region,</span>
+<span id="cb2-21"><a href="#cb2-21" tabindex="-1"></a>                      <span class="at">n_units =</span> <span class="fu">max</span>(d<span class="sc">$</span>region), <span class="at">sigma_grid =</span> GRID)),</span>
+<span id="cb2-22"><a href="#cb2-22" tabindex="-1"></a>    <span class="at">family =</span> <span class="st">&quot;gaussian&quot;</span>, <span class="at">phi =</span> PHI,</span>
+<span id="cb2-23"><a href="#cb2-23" tabindex="-1"></a>    <span class="at">control =</span> <span class="fu">list</span>(<span class="at">n_threads =</span> <span class="dv">1</span><span class="dt">L</span>, <span class="at">keep_grid_hessians =</span> <span class="cn">TRUE</span>,</span>
+<span id="cb2-24"><a href="#cb2-24" tabindex="-1"></a>                   <span class="at">auto_recenter =</span> <span class="cn">FALSE</span>, <span class="at">progress =</span> <span class="cn">FALSE</span>))</span>
+<span id="cb2-25"><a href="#cb2-25" tabindex="-1"></a>}</span></code></pre></div>
+<p><code>simulate_one()</code> has to be a pure function of its seed,
+and it returns <code>theta</code>, the named vector of true values the
+PIT is taken against. <code>auto_recenter = FALSE</code> is not a speed
+knob: the argument that the <code>sigma</code> PIT is uniform needs the
+fitted grid to be the same seven points the truth was drawn from, and a
+recentred grid breaks it.</p>
+</div>
+<div id="reporting-a-fit-in-a-shape-sbc-can-read" class="section level2">
+<h2>Reporting a fit in a shape <code>sbc()</code> can read</h2>
+<p>A fitter callback returns a named list of <strong>arms</strong>, each
+a named list over scored quantities, each entry one of the predictive
+shapes in <code>?sbc_predictive</code>. Everything downstream dispatches
+on the shape’s <code>kind</code> tag, so a backend reporting something
+new is one shape rather than a parallel scorer.</p>
+<p>Two of them cover a nested-Laplace fit. What the outer grid defines
+for a fixed effect is a Gaussian mixture over the cells, and
+<code>tulpa_posterior_draws()</code> realizes it: each draw picks a cell
+by its weight, then samples that cell’s inner Gaussian.
+<code>coef()</code> and <code>vcov()</code> report that same mixture’s
+first two moments, so building an <code>sbc_normal()</code> from them is
+the collapsed read of the identical posterior. For the hyperparameter
+the grid defines a distribution on a finite support, which is
+<code>sbc_discrete()</code>.</p>
+<div class="sourceCode" id="cb3"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb3-1"><a href="#cb3-1" tabindex="-1"></a>arms <span class="ot">&lt;-</span> <span class="cf">function</span>(d) {</span>
+<span id="cb3-2"><a href="#cb3-2" tabindex="-1"></a>  fit <span class="ot">&lt;-</span> <span class="fu">fit_one</span>(d)</span>
+<span id="cb3-3"><a href="#cb3-3" tabindex="-1"></a>  m   <span class="ot">&lt;-</span> <span class="fu">coef</span>(fit)</span>
+<span id="cb3-4"><a href="#cb3-4" tabindex="-1"></a>  se  <span class="ot">&lt;-</span> <span class="fu">sqrt</span>(<span class="fu">diag</span>(<span class="fu">vcov</span>(fit)))</span>
+<span id="cb3-5"><a href="#cb3-5" tabindex="-1"></a>  D   <span class="ot">&lt;-</span> <span class="fu">tulpa_posterior_draws</span>(fit, <span class="at">n =</span> <span class="dv">2000</span>)</span>
+<span id="cb3-6"><a href="#cb3-6" tabindex="-1"></a>  w   <span class="ot">&lt;-</span> fit<span class="sc">$</span>weights <span class="sc">/</span> <span class="fu">sum</span>(fit<span class="sc">$</span>weights)</span>
+<span id="cb3-7"><a href="#cb3-7" tabindex="-1"></a></span>
+<span id="cb3-8"><a href="#cb3-8" tabindex="-1"></a>  <span class="fu">list</span>(</span>
+<span id="cb3-9"><a href="#cb3-9" tabindex="-1"></a>    <span class="at">mixture =</span> <span class="fu">list</span>(</span>
+<span id="cb3-10"><a href="#cb3-10" tabindex="-1"></a>      <span class="at">beta1 =</span> <span class="fu">sbc_draws</span>(D[, <span class="dv">1</span>]),</span>
+<span id="cb3-11"><a href="#cb3-11" tabindex="-1"></a>      <span class="at">beta2 =</span> <span class="fu">sbc_draws</span>(D[, <span class="dv">2</span>]),</span>
+<span id="cb3-12"><a href="#cb3-12" tabindex="-1"></a>      <span class="at">sigma =</span> <span class="fu">sbc_discrete</span>(<span class="fu">as.numeric</span>(fit<span class="sc">$</span>theta_grid), w)),</span>
+<span id="cb3-13"><a href="#cb3-13" tabindex="-1"></a>    <span class="at">collapsed =</span> <span class="fu">list</span>(</span>
+<span id="cb3-14"><a href="#cb3-14" tabindex="-1"></a>      <span class="at">beta1 =</span> <span class="fu">sbc_normal</span>(m[<span class="dv">1</span>], se[<span class="dv">1</span>]),</span>
+<span id="cb3-15"><a href="#cb3-15" tabindex="-1"></a>      <span class="at">beta2 =</span> <span class="fu">sbc_normal</span>(m[<span class="dv">2</span>], se[<span class="dv">2</span>])),</span>
+<span id="cb3-16"><a href="#cb3-16" tabindex="-1"></a>    <span class="at">narrow =</span> <span class="fu">list</span>(</span>
+<span id="cb3-17"><a href="#cb3-17" tabindex="-1"></a>      <span class="at">beta1 =</span> <span class="fu">sbc_normal</span>(m[<span class="dv">1</span>], se[<span class="dv">1</span>] <span class="sc">/</span> <span class="fl">1.25</span>),</span>
+<span id="cb3-18"><a href="#cb3-18" tabindex="-1"></a>      <span class="at">beta2 =</span> <span class="fu">sbc_normal</span>(m[<span class="dv">2</span>], se[<span class="dv">2</span>] <span class="sc">/</span> <span class="fl">1.25</span>)))</span>
+<span id="cb3-19"><a href="#cb3-19" tabindex="-1"></a>}</span></code></pre></div>
+<p>Every arm reads off <strong>one solve per seed</strong>, so an
+arm-to-arm difference carries no fit-to-fit noise. <code>narrow</code>
+is a deliberately mis-scaled posterior, the same moments with the
+standard deviation divided by 1.25. A calibration harness that cannot
+fail is worth nothing, so the run below has to put it outside the
+band.</p>
+</div>
+<div id="the-prior-predictive-experiment" class="section level2">
+<h2>The prior-predictive experiment</h2>
+<div class="sourceCode" id="cb4"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb4-1"><a href="#cb4-1" tabindex="-1"></a>res <span class="ot">&lt;-</span> <span class="fu">sbc</span>(<span class="st">&quot;prior_predictive&quot;</span>,</span>
+<span id="cb4-2"><a href="#cb4-2" tabindex="-1"></a>           <span class="at">simulator  =</span> simulate_one,</span>
+<span id="cb4-3"><a href="#cb4-3" tabindex="-1"></a>           <span class="at">fitter     =</span> arms,</span>
+<span id="cb4-4"><a href="#cb4-4" tabindex="-1"></a>           <span class="at">n_sim      =</span> <span class="dv">200</span><span class="dt">L</span>,</span>
+<span id="cb4-5"><a href="#cb4-5" tabindex="-1"></a>           <span class="at">flat_prior =</span> <span class="fu">c</span>(<span class="st">&quot;beta1&quot;</span>, <span class="st">&quot;beta2&quot;</span>))</span>
+<span id="cb4-6"><a href="#cb4-6" tabindex="-1"></a>res</span></code></pre></div>
+<p><code>flat_prior</code> is a guard doing its job. Ordinary SBC draws
+the truth from the prior, so an improper prior has nothing to draw from,
+and the nested-Laplace door puts no prior on the fixed effects.
+<code>sbc()</code> probes the simulator, sees that <code>beta1</code>
+and <code>beta2</code> do not move across simulations, and refuses to
+score them unless the caller names them. Naming them asserts that their
+flat prior leaves the PIT uniform by a structural argument; the
+assertion is checked in both directions and travels on the result in
+<code>res$premises</code>.</p>
+</div>
+<div id="three-reads-of-the-same-pit-sample" class="section level2">
+<h2>Three reads of the same PIT sample</h2>
+<p><code>ks</code> and <code>p_unif</code> read the raw PIT ECDF.
+<code>inside_folded</code> and <code>p_folded</code> read
+<code>2 |u - 1/2|</code>, which is also uniform under correct inference.
+The fold is where a symmetric error shows: a posterior that is too
+narrow pushes PIT mass towards both ends at once, which cancels in the
+raw ECDF and accumulates in the folded one. <code>crps</code> is the
+continuous ranked probability score, closed form for a Gaussian mixture,
+so the nested tier’s own posterior is scored with no Monte Carlo.</p>
+<p><code>inside</code> is the verdict against a
+<strong>simultaneous</strong> band. A pointwise binomial band is not
+one: at n = 100, holding each order statistic inside its own 95%
+interval holds all of them together only 44.71% of the time. The band
+here is calibrated by bisection against the exact crossing probability
+of the uniform order statistics, so an ECDF excursion anywhere along the
+curve is a 0.05-level event.</p>
+<p>Discrete quantities are randomized within their atom,
+<code>u = F(theta^-) + V P(theta)</code>, so <code>sigma</code> on its
+seven-point grid and a continuous coefficient share one uniform
+reference and one band. Reading a rank against a continuous uniform is
+the classic silent SBC bug, and it is not something you can opt into
+here.</p>
+</div>
+<div id="the-proper-score-paired" class="section level2">
+<h2>The proper score, paired</h2>
+<p><code>summary(baseline = )</code> pairs the CRPS seed by seed against
+one arm.</p>
+<div class="sourceCode" id="cb5"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb5-1"><a href="#cb5-1" tabindex="-1"></a><span class="fu">summary</span>(res, <span class="at">baseline =</span> <span class="st">&quot;mixture&quot;</span>)</span></code></pre></div>
+<p><code>delta</code> with its <code>t</code> is the proper-score
+verdict; a negative <code>delta</code> is the arm scoring better.
+<code>p_sign</code> is more powerful at detecting that two arms differ
+at all, but the sign test is not a proper score, so it cannot rank
+them.</p>
+<p>Expect the mixture and collapsed arms to score close together. They
+carry the same first two moments, and the CRPS integrates the whole
+squared CDF difference, which those moments dominate. Where they
+separate is on the ECDF reads above, which is why both instruments are
+worth running.</p>
+<p>The CRPS is a proper posterior score here only because the truth is
+drawn afresh each simulation. Hold the truth fixed across seeds and the
+CRPS-optimal forecast is a point mass at it, so a sharper wrong
+posterior wins. That is enforced rather than documented: a fixed-truth
+sweep is not offered as an experiment, and
+<code>summary(baseline = )</code> refuses to rank one.</p>
+</div>
+<div id="the-picture" class="section level2">
+<h2>The picture</h2>
+<div class="sourceCode" id="cb6"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb6-1"><a href="#cb6-1" tabindex="-1"></a><span class="fu">plot</span>(res, <span class="at">arm =</span> <span class="fu">c</span>(<span class="st">&quot;mixture&quot;</span>, <span class="st">&quot;narrow&quot;</span>), <span class="at">quantity =</span> <span class="st">&quot;beta2&quot;</span>)</span></code></pre></div>
+<div class="sourceCode" id="cb7"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb7-1"><a href="#cb7-1" tabindex="-1"></a><span class="fu">plot</span>(res, <span class="at">arm =</span> <span class="fu">c</span>(<span class="st">&quot;mixture&quot;</span>, <span class="st">&quot;narrow&quot;</span>), <span class="at">quantity =</span> <span class="st">&quot;beta2&quot;</span>, <span class="at">folded =</span> <span class="cn">TRUE</span>)</span></code></pre></div>
+<p>The plot draws the ECDF <strong>difference</strong> from uniform, so
+a calibrated read is a flat line at zero inside the band. The
+under-dispersed arm bows away from it, and the bow is larger folded than
+raw.</p>
+</div>
+<div id="calibration-conditional-on-an-observed-data-set" class="section level2">
+<h2>Calibration conditional on an observed data set</h2>
+<p>The experiment above averages over the prior. A user fitting their
+own data asks something narrower: is the inference reliable in the
+posterior geometry <em>this</em> data set produces. The prior average
+can miss a defect confined to a small region of parameter space, and it
+can flag one the observed data rules out.</p>
+<p><code>experiment = &quot;posterior&quot;</code> answers the narrow question
+(Sailynoja et al. 2026, Algorithm 2). Draw <code>theta&#39;</code> from
+<code>pi(theta | y_obs)</code>, simulate a replicate at
+<code>theta&#39;</code>, and take the PIT under the
+<strong>augmented</strong> posterior <code>pi(theta | y, y_obs)</code>.
+That is ordinary SBC with <code>pi(theta | y_obs)</code> in the role of
+the prior, so the same band, the same folded read and the same proper
+score all carry over, and it needs no proper prior at all.</p>
+<p>It takes six callbacks.</p>
+<div class="sourceCode" id="cb8"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb8-1"><a href="#cb8-1" tabindex="-1"></a>d_obs <span class="ot">&lt;-</span> <span class="fu">simulate_one</span>(<span class="dv">99</span><span class="dt">L</span>)</span>
+<span id="cb8-2"><a href="#cb8-2" tabindex="-1"></a></span>
+<span id="cb8-3"><a href="#cb8-3" tabindex="-1"></a>model <span class="ot">&lt;-</span> <span class="fu">list</span>(</span>
+<span id="cb8-4"><a href="#cb8-4" tabindex="-1"></a>  <span class="at">data_obs =</span> d_obs,</span>
+<span id="cb8-5"><a href="#cb8-5" tabindex="-1"></a></span>
+<span id="cb8-6"><a href="#cb8-6" tabindex="-1"></a>  <span class="at">fit =</span> <span class="cf">function</span>(data) <span class="fu">fit_one</span>(data),</span>
+<span id="cb8-7"><a href="#cb8-7" tabindex="-1"></a></span>
+<span id="cb8-8"><a href="#cb8-8" tabindex="-1"></a>  <span class="at">draw_theta =</span> <span class="cf">function</span>(fit, seed) {</span>
+<span id="cb8-9"><a href="#cb8-9" tabindex="-1"></a>    <span class="fu">set.seed</span>(seed)</span>
+<span id="cb8-10"><a href="#cb8-10" tabindex="-1"></a>    b <span class="ot">&lt;-</span> <span class="fu">tulpa_posterior_draws</span>(fit, <span class="at">n =</span> <span class="dv">1</span><span class="dt">L</span>)</span>
+<span id="cb8-11"><a href="#cb8-11" tabindex="-1"></a>    k <span class="ot">&lt;-</span> <span class="fu">attr</span>(b, <span class="st">&quot;cells&quot;</span>)[<span class="dv">1</span>]</span>
+<span id="cb8-12"><a href="#cb8-12" tabindex="-1"></a>    <span class="fu">c</span>(<span class="at">beta1 =</span> <span class="fu">unname</span>(b[<span class="dv">1</span>, <span class="dv">1</span>]), <span class="at">beta2 =</span> <span class="fu">unname</span>(b[<span class="dv">1</span>, <span class="dv">2</span>]),</span>
+<span id="cb8-13"><a href="#cb8-13" tabindex="-1"></a>      <span class="at">sigma =</span> <span class="fu">as.numeric</span>(fit<span class="sc">$</span>theta_grid)[k])</span>
+<span id="cb8-14"><a href="#cb8-14" tabindex="-1"></a>  },</span>
+<span id="cb8-15"><a href="#cb8-15" tabindex="-1"></a></span>
+<span id="cb8-16"><a href="#cb8-16" tabindex="-1"></a>  <span class="at">simulate =</span> <span class="cf">function</span>(theta, seed) {</span>
+<span id="cb8-17"><a href="#cb8-17" tabindex="-1"></a>    <span class="fu">set.seed</span>(seed)</span>
+<span id="cb8-18"><a href="#cb8-18" tabindex="-1"></a>    region <span class="ot">&lt;-</span> <span class="fu">rep</span>(<span class="fu">seq_len</span>(<span class="dv">6</span><span class="dt">L</span>), <span class="at">each =</span> <span class="dv">4</span><span class="dt">L</span>)</span>
+<span id="cb8-19"><a href="#cb8-19" tabindex="-1"></a>    X      <span class="ot">&lt;-</span> <span class="fu">cbind</span>(<span class="dv">1</span>, <span class="fu">rnorm</span>(<span class="dv">24</span><span class="dt">L</span>))</span>
+<span id="cb8-20"><a href="#cb8-20" tabindex="-1"></a>    u      <span class="ot">&lt;-</span> <span class="fu">rnorm</span>(<span class="dv">6</span><span class="dt">L</span>, <span class="dv">0</span>, theta[[<span class="st">&quot;sigma&quot;</span>]])</span>
+<span id="cb8-21"><a href="#cb8-21" tabindex="-1"></a>    <span class="fu">list</span>(<span class="at">y =</span> <span class="fu">as.numeric</span>(X <span class="sc">%*%</span> theta[<span class="fu">c</span>(<span class="st">&quot;beta1&quot;</span>, <span class="st">&quot;beta2&quot;</span>)]) <span class="sc">+</span></span>
+<span id="cb8-22"><a href="#cb8-22" tabindex="-1"></a>           u[region] <span class="sc">+</span> <span class="fu">rnorm</span>(<span class="dv">24</span><span class="dt">L</span>, <span class="dv">0</span>, PHI),</span>
+<span id="cb8-23"><a href="#cb8-23" tabindex="-1"></a>         <span class="at">X =</span> X, <span class="at">region =</span> region)</span>
+<span id="cb8-24"><a href="#cb8-24" tabindex="-1"></a>  },</span>
+<span id="cb8-25"><a href="#cb8-25" tabindex="-1"></a></span>
+<span id="cb8-26"><a href="#cb8-26" tabindex="-1"></a>  <span class="at">pool =</span> <span class="cf">function</span>(obs, rep) <span class="fu">list</span>(</span>
+<span id="cb8-27"><a href="#cb8-27" tabindex="-1"></a>    <span class="at">y      =</span> <span class="fu">c</span>(obs<span class="sc">$</span>y, rep<span class="sc">$</span>y),</span>
+<span id="cb8-28"><a href="#cb8-28" tabindex="-1"></a>    <span class="at">X      =</span> <span class="fu">rbind</span>(obs<span class="sc">$</span>X, rep<span class="sc">$</span>X),</span>
+<span id="cb8-29"><a href="#cb8-29" tabindex="-1"></a>    <span class="at">region =</span> <span class="fu">as.integer</span>(<span class="fu">c</span>(obs<span class="sc">$</span>region, rep<span class="sc">$</span>region <span class="sc">+</span> <span class="fu">max</span>(obs<span class="sc">$</span>region)))),</span>
+<span id="cb8-30"><a href="#cb8-30" tabindex="-1"></a></span>
+<span id="cb8-31"><a href="#cb8-31" tabindex="-1"></a>  <span class="at">arms =</span> <span class="cf">function</span>(fit, data) {</span>
+<span id="cb8-32"><a href="#cb8-32" tabindex="-1"></a>    m  <span class="ot">&lt;-</span> <span class="fu">coef</span>(fit)</span>
+<span id="cb8-33"><a href="#cb8-33" tabindex="-1"></a>    se <span class="ot">&lt;-</span> <span class="fu">sqrt</span>(<span class="fu">diag</span>(<span class="fu">vcov</span>(fit)))</span>
+<span id="cb8-34"><a href="#cb8-34" tabindex="-1"></a>    D  <span class="ot">&lt;-</span> <span class="fu">tulpa_posterior_draws</span>(fit, <span class="at">n =</span> <span class="dv">2000</span>)</span>
+<span id="cb8-35"><a href="#cb8-35" tabindex="-1"></a>    <span class="fu">list</span>(</span>
+<span id="cb8-36"><a href="#cb8-36" tabindex="-1"></a>      <span class="at">mixture =</span> <span class="fu">list</span>(</span>
+<span id="cb8-37"><a href="#cb8-37" tabindex="-1"></a>        <span class="at">beta1 =</span> <span class="fu">sbc_draws</span>(D[, <span class="dv">1</span>]),</span>
+<span id="cb8-38"><a href="#cb8-38" tabindex="-1"></a>        <span class="at">beta2 =</span> <span class="fu">sbc_draws</span>(D[, <span class="dv">2</span>]),</span>
+<span id="cb8-39"><a href="#cb8-39" tabindex="-1"></a>        <span class="at">sigma =</span> <span class="fu">sbc_discrete</span>(<span class="fu">as.numeric</span>(fit<span class="sc">$</span>theta_grid),</span>
+<span id="cb8-40"><a href="#cb8-40" tabindex="-1"></a>                             fit<span class="sc">$</span>weights <span class="sc">/</span> <span class="fu">sum</span>(fit<span class="sc">$</span>weights))),</span>
+<span id="cb8-41"><a href="#cb8-41" tabindex="-1"></a>      <span class="at">narrow =</span> <span class="fu">list</span>(</span>
+<span id="cb8-42"><a href="#cb8-42" tabindex="-1"></a>        <span class="at">beta1 =</span> <span class="fu">sbc_normal</span>(m[<span class="dv">1</span>], se[<span class="dv">1</span>] <span class="sc">/</span> <span class="fl">1.25</span>),</span>
+<span id="cb8-43"><a href="#cb8-43" tabindex="-1"></a>        <span class="at">beta2 =</span> <span class="fu">sbc_normal</span>(m[<span class="dv">2</span>], se[<span class="dv">2</span>] <span class="sc">/</span> <span class="fl">1.25</span>)))</span>
+<span id="cb8-44"><a href="#cb8-44" tabindex="-1"></a>  },</span>
+<span id="cb8-45"><a href="#cb8-45" tabindex="-1"></a></span>
+<span id="cb8-46"><a href="#cb8-46" tabindex="-1"></a>  <span class="at">group_ids =</span> <span class="cf">function</span>(data) data<span class="sc">$</span>region)</span></code></pre></div>
+<div class="sourceCode" id="cb9"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb9-1"><a href="#cb9-1" tabindex="-1"></a>pres <span class="ot">&lt;-</span> <span class="fu">sbc</span>(<span class="st">&quot;posterior&quot;</span>, <span class="at">model =</span> model, <span class="at">n_sim =</span> <span class="dv">200</span><span class="dt">L</span>)</span>
+<span id="cb9-2"><a href="#cb9-2" tabindex="-1"></a>pres</span></code></pre></div>
+<p>The driver hands <code>draw_theta</code> and <code>simulate</code>
+different seeds, so <code>set.seed(seed)</code> at the top of each is
+the correct fixture. Giving both the same seed makes the replicate’s
+noise a function of the truth, which is not <code>p(y | theta&#39;)</code>,
+and it shows up as a non-uniform PIT with nothing wrong in the inference
+under test.</p>
+</div>
+<div id="two-premises-and-what-checks-them" class="section level2">
+<h2>Two premises, and what checks them</h2>
+<p>Each premise silently turns the construction into something that is
+not SBC, so each has a guard, and each guard’s conclusion travels on the
+result.</p>
+<div class="sourceCode" id="cb10"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb10-1"><a href="#cb10-1" tabindex="-1"></a><span class="fu">str</span>(pres<span class="sc">$</span>premises)</span></code></pre></div>
+<p><strong>The augmented posterior conditions on both data
+sets.</strong> Fitting the replicate alone is ordinary SBC under a
+hand-made prior. <code>sbc()</code> refuses a <code>pool()</code>
+returning no more than the replicate, or no more than the observed
+data.</p>
+<p><strong>The replicate is conditionally independent of
+<code>y_obs</code> given theta.</strong> The nested tier integrates the
+random effects out, so <code>theta</code> carries no per-group value,
+and a replicate drawn on the <em>same</em> regions couples the two data
+sets through the group effects theta does not describe.
+<code>simulate()</code> above draws six fresh regions and
+<code>pool()</code> offsets their labels past the observed ones. Supply
+<code>group_ids</code> and the observable half of that is verified, the
+labels being disjoint. Omit it and the result records the premise as
+unverified rather than assumed. The other half, that the replicate’s
+group effects came from the prior rather than conditionally on
+<code>y_obs</code>, is not visible from outside the callback and is not
+claimed.</p>
+<p>A third requirement is a property of <code>draw_theta</code> rather
+than a guard. <code>theta&#39;</code> has to be a <strong>joint</strong>
+draw from <code>pi(theta | y_obs)</code>. Sampling <code>beta</code>
+from <code>tulpa_posterior_draws()</code> and <code>sigma</code>
+independently from the grid weights gives the right two marginals and
+the wrong joint, and the <code>sigma</code> read leaves the band when
+you do it. Reading <code>attr(b, &quot;cells&quot;)</code> takes the coefficient
+and the hyperparameter from the same cell, which is what makes the draw
+joint.</p>
+</div>
+<div id="where-this-sits-beside-the-single-fit-band" class="section level2">
+<h2>Where this sits beside the single-fit band</h2>
+<p><code>diagnostics()</code> on a nested fit reports the outer
+Pareto-k-hat, the inner skewness estimate <code>gamma_3</code> and the
+inner importance k-hat, combined into one reliability band. That band
+runs on the fit you already have; <code>sbc()</code> costs a few hundred
+fits. So the band is what you read routinely, and this is what you reach
+for when the answer has to hold up.</p>
+<p>The cheap one is not a compressed version of the expensive one, and
+the two disagree in both directions. Measured over fifteen
+configurations at 1000 simulations (<code>dev_notes/issue339/</code>): a
+Poisson configuration carrying an outer k-hat of 0.196 with both inner
+scores in the <code>good</code> band, the cleanest verdict the band can
+give, fails calibration at <code>p = 2.3e-13</code> on its intercept. A
+binomial configuration carrying an outer k-hat of 1.413, well past the
+0.7 escalation threshold, passes at <code>p = 0.17</code>.</p>
+<p>So read the shipped band as a screen. A rejection from
+<code>sbc()</code> is the strong statement: on that same measurement the
+false-positive rate is 0.0117 against a nominal 0.05, and power reaches
+80% at roughly a 10% dispersion error or a 0.14-SD location bias, which
+makes a pass the weaker one.</p>
+<p><code>diagnostics()</code> reads both at once when you hand it the
+calibration result.</p>
+<div class="sourceCode" id="cb11"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb11-1"><a href="#cb11-1" tabindex="-1"></a>fit <span class="ot">&lt;-</span> <span class="fu">fit_one</span>(d_obs)</span>
+<span id="cb11-2"><a href="#cb11-2" tabindex="-1"></a><span class="fu">diagnostics</span>(fit, <span class="at">sbc =</span> res)</span></code></pre></div>
+</div>
+<div id="see-also" class="section level2">
+<h2>See also</h2>
+<ul>
+<li><code>?sbc</code> for the full callback contract, the guards, and
+what each column of the report is.</li>
+<li><code>?sbc_predictive</code> for the predictive shapes, and which
+one a backend should report.</li>
+<li><code>vignette(&quot;reliability-pareto-k&quot;)</code> for the single-fit
+reliability band this screens against: the outer Pareto-k-hat,
+<code>gamma_3</code>, and the combined verdict.</li>
+<li><code>?tulpa_posterior_draws</code> for the mixture sampler the
+fixed-effect arms are built on, and <code>?tulpa_psis</code> for the
+Pareto-smoothing core the k-hat uses.</li>
+</ul>
+</div>
+<div id="references" class="section level2">
+<h2>References</h2>
+<p>Talts, S., Betancourt, M., Simpson, D., Vehtari, A. and Gelman, A.
+(2018). Validating Bayesian inference algorithms with simulation-based
+calibration. arXiv:1804.06788.</p>
+<p>Sailynoja, T., Schmitt, M., Buerkner, P.-C. and Vehtari, A. (2026).
+Posterior SBC: simulation-based calibration checking conditional on
+data. <em>Statistics and Computing</em> <strong>36</strong>, 78. <a href="doi:10.1007/s11222-026-10825-9" class="uri">doi:10.1007/s11222-026-10825-9</a>.</p>
+<p>Gneiting, T. and Raftery, A. E. (2007). Strictly proper scoring
+rules, prediction, and estimation. <em>Journal of the American
+Statistical Association</em> <strong>102</strong>, 359-378.</p>
+</div>
+
+
+
+<!-- code folding -->
+
+
+<!-- dynamically load mathjax for compatibility with self-contained -->
+<script>
+  (function () {
+    var script = document.createElement("script");
+    script.type = "text/javascript";
+    script.src  = "https://mathjax.rstudio.com/latest/MathJax.js?config=TeX-AMS-MML_HTMLorMML";
+    document.getElementsByTagName("head")[0].appendChild(script);
+  })();
+</script>
+
+</body>
+</html>

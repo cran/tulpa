@@ -1,0 +1,578 @@
+// tulpa_sample_glmm.cpp
+// ----------------------------------------------------------------------------
+// Generic GLMM front-door entry for the model-agnostic sampler kernels that
+// drive a tulpa ModelData: NUTS, elliptical slice
+// sampling (ESS), SGHMC, SGLD, MCLMC, SMC, and VI. Every one consumes a tulpa
+// ModelData + ParamLayout, so a single entry builds that model once and
+// dispatches to the chosen kernel by name. No likelihood / link / layout logic
+// is duplicated.
+//
+// Latent structure: random effects (intercept / slopes /
+// correlated / multi-term), areal spatial fields (ICAR / BYM2), and temporal
+// fields (RW1 / RW2 / AR1) are threaded through build_sampler_model_inputs(),
+// which populates the ModelData and derives the layout via compute_param_layout.
+// The kernels then sample the full parameter vector -- fixed effects, latent
+// effects, AND the variance-component hyperparameters jointly (full Bayes over
+// the variance components, not conditioning on them like the Laplace / logpost
+// backends). The four default-link AD-covered families (gaussian / poisson /
+// binomial / neg_binomial_2) get analytic gradients; any other family falls back
+// to the numerical gradient, which still scores the full latent log-posterior.
+// ----------------------------------------------------------------------------
+
+#include <Rcpp.h>
+#include <string>
+#include <vector>
+#include <cmath>
+
+#include "laplace_spec_fit.h"      // as_offset_vec
+#include "sampler_model_data.h"    // build_sampler_model_inputs / sampler_param_names
+#include "hmc_sampler.h"           // tulpa_hmc::run_hmc_parallel_chains_cpp, HMCResultCpp
+#include "hmc_chain_stack.h"       // tulpa_hmc::stack_hmc_chains
+#include "ess_sampler.h"           // tulpa_ess::run_ess_sampler
+#include "sghmc_sampler.h"         // tulpa_sghmc::run_sghmc_sampler / run_sgld_sampler
+#include "mclmc_modeldata.h"       // tulpa_mclmc::run_mclmc_sampler
+#include "smc_modeldata.h"         // tulpa::run_smc_sampler
+#include "vi_types.h"              // tulpa::vi::VIConfig / VIResult / VIVariant
+#include "vi_meanfield.h"          // compute_meanfield_elbo_grad + entropy grad
+#include "vi_lowrank.h"            // compute_lowrank_elbo_grad + entropy grad
+#include "vi_fullrank.h"           // compute_fullrank_elbo_grad + entropy grad
+
+using tulpa_hmc::ModelData;
+using tulpa_hmc::ParamLayout;
+
+// fit_vi is defined in vi_sampler.cpp without a public header declaration; the
+// VI shim reaches it the same way. Forward-declare the exact signature.
+namespace tulpa { namespace vi {
+VIResult fit_vi(const ModelData& data, const ParamLayout& layout, int D,
+                const VIConfig& config, const Eigen::VectorXd* init_mu);
+} }
+
+namespace {
+
+// Build an [n_save x D] R matrix of draws from an Eigen sample matrix, taking
+// the first D columns and naming them with `cn`.
+Rcpp::NumericMatrix eigen_draws_to_r(const Eigen::MatrixXd& S, int D,
+                                     const Rcpp::CharacterVector& cn) {
+    const int n = (int)S.rows();
+    Rcpp::NumericMatrix draws(n, D);
+    for (int s = 0; s < n; s++)
+        for (int j = 0; j < D; j++) draws(s, j) = S(s, j);
+    if (n > 0) Rcpp::colnames(draws) = cn;
+    return draws;
+}
+
+// Pack a variational gradient exactly the way the matching params' flatten()
+// packs the parameters themselves, so a finite difference taken on the packed
+// vector lines up entry for entry with the analytic gradient. One packer per
+// variant, used for both the full ELBO gradient and the entropy-only gradient.
+
+Rcpp::NumericVector vi_pack_meanfield(const Eigen::VectorXd& g_mu,
+                                      const Eigen::VectorXd& g_log_sigma) {
+    const int D = (int)g_mu.size();
+    Rcpp::NumericVector out(2 * D);
+    for (int i = 0; i < D; i++) { out[i] = g_mu(i); out[D + i] = g_log_sigma(i); }
+    return out;
+}
+
+// mu, then the lower triangle of L row by row.
+Rcpp::NumericVector vi_pack_fullrank(const Eigen::VectorXd& g_mu,
+                                     const Eigen::MatrixXd& g_L) {
+    const int D = (int)g_mu.size();
+    Rcpp::NumericVector out(D + D * (D + 1) / 2);
+    for (int i = 0; i < D; i++) out[i] = g_mu(i);
+    int idx = D;
+    for (int i = 0; i < D; i++)
+        for (int j = 0; j <= i; j++) out[idx++] = g_L(i, j);
+    return out;
+}
+
+// mu, then L column-major, then log_d.
+Rcpp::NumericVector vi_pack_lowrank(const Eigen::VectorXd& g_mu,
+                                    const Eigen::MatrixXd& g_L,
+                                    const Eigen::VectorXd& g_log_d) {
+    const int D = (int)g_mu.size();
+    const int r = (int)g_L.cols();
+    Rcpp::NumericVector out(2 * D + D * r);
+    for (int i = 0; i < D; i++) out[i] = g_mu(i);
+    for (int k = 0; k < D * r; k++) out[D + k] = g_L.data()[k];
+    for (int i = 0; i < D; i++) out[D + D * r + i] = g_log_d(i);
+    return out;
+}
+
+Rcpp::NumericVector eigen_to_r(const Eigen::VectorXd& v) {
+    Rcpp::NumericVector out(v.size());
+    for (int i = 0; i < v.size(); i++) out[i] = v(i);
+    return out;
+}
+
+Rcpp::NumericVector col_means(const Rcpp::NumericMatrix& draws) {
+    const int n = draws.nrow(), p = draws.ncol();
+    Rcpp::NumericVector m(p, 0.0);
+    for (int s = 0; s < n; s++)
+        for (int j = 0; j < p; j++) m[j] += draws(s, j) / (n > 0 ? n : 1);
+    if (n > 0) m.names() = Rcpp::colnames(draws);
+    return m;
+}
+
+} // namespace
+
+// ----------------------------------------------------------------------------
+// VI ELBO and its packed gradient at a supplied variational parameter vector.
+//
+// Exists so the reparameterisation gradients can be finite-difference checked.
+// The Monte Carlo draws are taken from a mt19937 seeded here and nowhere else,
+// and their distribution does not depend on the variational parameters, so at a
+// fixed `seed` and `mc_samples` the returned ELBO is a DETERMINISTIC function of
+// `x` and the returned gradient is that function's exact derivative -- a central
+// difference on `x` reproduces it to the difference rule's own accuracy rather
+// than to Monte Carlo error.
+//
+// The `x` argument is the packed variational parameter vector in the variant's
+// own flatten() layout; NULL evaluates at the variant's default initialisation.
+// The `x` element of the result is what was actually evaluated, which differs
+// from the argument only where the parameterization repaired it (the full-rank
+// diagonal floor).
+//
+// `entropy` / `entropy_grad` are H[q] and its gradient alone, with no Monte
+// Carlo in either, so the entropy term can be checked against an independently
+// written log-determinant.
+//
+// [[Rcpp::export]]
+Rcpp::List cpp_vi_elbo_grad(
+    Rcpp::NumericVector y,
+    Rcpp::IntegerVector n_trials,
+    Rcpp::NumericMatrix X,
+    std::string family,
+    int variant,                 // 0 = meanfield, 1 = lowrank, 2 = fullrank
+    int mc_samples,
+    int seed,
+    int rank = 2,
+    Rcpp::Nullable<Rcpp::NumericVector> x = R_NilValue,
+    double phi = 1.0,
+    double sigma_beta = 10.0,
+    Rcpp::Nullable<Rcpp::NumericVector> offset_nullable = R_NilValue
+) {
+    using namespace tulpa::vi;
+
+    if (mc_samples < 1) Rcpp::stop("mc_samples must be at least 1.");
+    if (variant < 0 || variant > 2) {
+        Rcpp::stop("variant must be 0 (meanfield), 1 (lowrank) or 2 (fullrank).");
+    }
+
+    const int N = y.size();
+    tulpa::SamplerModelInputs in;
+    std::vector<double> offset = tulpa::as_offset_vec(offset_nullable, N);
+    tulpa::build_sampler_model_inputs(
+        in, y, n_trials, X, family, phi, sigma_beta, offset, /*sigma_re_scale=*/2.5,
+        R_NilValue, R_NilValue, R_NilValue);
+    const int D = in.layout.total_params;
+
+    std::mt19937 rng((unsigned int)seed);
+
+    Rcpp::NumericVector x_used, grad, entropy_grad;
+    double elbo = 0.0, entropy = 0.0;
+    std::string variant_name;
+
+    if (variant == 0) {
+        MeanFieldParams params(D);
+        if (x.isNotNull()) {
+            Rcpp::NumericVector xv(x);
+            if ((int)xv.size() != params.n_variational_params()) {
+                Rcpp::stop("x has length %d but the mean-field parameterization "
+                           "has %d entries.", (int)xv.size(),
+                           params.n_variational_params());
+            }
+            params.unflatten(Eigen::Map<Eigen::VectorXd>(xv.begin(), xv.size()));
+        }
+        MeanFieldGradients g = compute_meanfield_elbo_grad(
+            params, in.data, in.layout, mc_samples, rng);
+        Eigen::VectorXd e_log_sigma = Eigen::VectorXd::Zero(D);
+        meanfield_add_entropy_grad(params, e_log_sigma);
+        x_used = eigen_to_r(params.flatten());
+        grad = vi_pack_meanfield(g.grad_mu, g.grad_log_sigma);
+        entropy_grad = vi_pack_meanfield(Eigen::VectorXd::Zero(D), e_log_sigma);
+        elbo = g.elbo;
+        entropy = params.entropy();
+        variant_name = "meanfield";
+    } else if (variant == 1) {
+        if (rank < 1) Rcpp::stop("rank must be at least 1 for the low-rank variant.");
+        LowRankParams params(D, rank, (unsigned int)seed);
+        if (x.isNotNull()) {
+            Rcpp::NumericVector xv(x);
+            if ((int)xv.size() != params.n_variational_params()) {
+                Rcpp::stop("x has length %d but the low-rank parameterization "
+                           "has %d entries.", (int)xv.size(),
+                           params.n_variational_params());
+            }
+            params.unflatten(Eigen::Map<Eigen::VectorXd>(xv.begin(), xv.size()));
+        }
+        LowRankGradients g = compute_lowrank_elbo_grad(
+            params, in.data, in.layout, mc_samples, rng);
+        Eigen::MatrixXd e_L = Eigen::MatrixXd::Zero(D, rank);
+        Eigen::VectorXd e_log_d = Eigen::VectorXd::Zero(D);
+        lowrank_add_entropy_grad(params, e_L, e_log_d);
+        x_used = eigen_to_r(params.flatten());
+        grad = vi_pack_lowrank(g.grad_mu, g.grad_L, g.grad_log_d);
+        entropy_grad = vi_pack_lowrank(Eigen::VectorXd::Zero(D), e_L, e_log_d);
+        elbo = g.elbo;
+        entropy = params.entropy();
+        variant_name = "lowrank";
+    } else {
+        FullRankParams params(D);
+        if (x.isNotNull()) {
+            Rcpp::NumericVector xv(x);
+            if ((int)xv.size() != params.n_variational_params()) {
+                Rcpp::stop("x has length %d but the full-rank parameterization "
+                           "has %d entries.", (int)xv.size(),
+                           params.n_variational_params());
+            }
+            params.unflatten(Eigen::Map<Eigen::VectorXd>(xv.begin(), xv.size()));
+        }
+        FullRankGradients g = compute_fullrank_elbo_grad(
+            params, in.data, in.layout, mc_samples, rng);
+        Eigen::MatrixXd e_L = Eigen::MatrixXd::Zero(D, D);
+        fullrank_add_entropy_grad(params, e_L);
+        x_used = eigen_to_r(params.flatten());
+        grad = vi_pack_fullrank(g.grad_mu, g.grad_L);
+        entropy_grad = vi_pack_fullrank(Eigen::VectorXd::Zero(D), e_L);
+        elbo = g.elbo;
+        entropy = params.entropy();
+        variant_name = "fullrank";
+    }
+
+    return Rcpp::List::create(
+        Rcpp::Named("variant")      = variant_name,
+        Rcpp::Named("D")            = D,
+        Rcpp::Named("n_params")     = (int)grad.size(),
+        Rcpp::Named("x")            = x_used,
+        Rcpp::Named("elbo")         = elbo,
+        Rcpp::Named("grad")         = grad,
+        Rcpp::Named("entropy")      = entropy,
+        Rcpp::Named("entropy_grad") = entropy_grad);
+}
+
+// [[Rcpp::export]]
+Rcpp::List cpp_tulpa_sample_glmm(
+    Rcpp::NumericVector y,
+    Rcpp::IntegerVector n_trials,
+    Rcpp::NumericMatrix X,
+    std::string family,
+    std::string backend,
+    double phi = 1.0,
+    double sigma_beta = 10.0,
+    int n_iter = 2000,
+    int n_warmup = 1000,
+    int seed = 42,
+    bool verbose = false,
+    int n_chains = 4,
+    int max_treedepth = 10,
+    double adapt_delta = 0.8,
+    double epsilon = 0.0,
+    int L = 10,
+    int batch_size = 0,
+    double alpha = 0.1,
+    int mclmc_adjusted = 0,
+    int n_particles = 1000,
+    int n_mcmc_steps = 5,
+    double ess_threshold = 0.5,
+    int vi_variant = 3,
+    int vi_mc_samples = 10,
+    int vi_max_iter = 10000,
+    int vi_n_draws = 2000,
+    double vi_max_grad_norm = 10.0,
+    Rcpp::Nullable<Rcpp::NumericVector> offset_nullable = R_NilValue,
+    Rcpp::Nullable<Rcpp::List> re_spec = R_NilValue,
+    Rcpp::Nullable<Rcpp::List> spatial_spec = R_NilValue,
+    Rcpp::Nullable<Rcpp::List> temporal_spec = R_NilValue,
+    double sigma_re_scale = 2.5,
+    Rcpp::Nullable<Rcpp::CharacterVector> fixed_names = R_NilValue,
+    double phi2 = NA_REAL,
+    Rcpp::Nullable<Rcpp::List> svc_spec = R_NilValue,
+    Rcpp::Nullable<Rcpp::List> tvc_spec = R_NilValue,
+    Rcpp::Nullable<Rcpp::List> zi_spec = R_NilValue,
+    Rcpp::Nullable<Rcpp::NumericMatrix> init_nullable = R_NilValue,
+    Rcpp::Nullable<Rcpp::NumericVector> inv_metric_diag_nullable = R_NilValue,
+    std::string mass_matrix = "diag",
+    bool ess_adapt_during_warmup = false,
+    int ess_adapt_interval = 50,
+    int ess_joint_sigma_re = -1,
+    double ess_joint_proposal_sd = 0.1
+) {
+    // Argument groups (kept out of the signature so Rcpp::compileAttributes does
+    // not fold the comments into the generated wrapper):
+    //   NUTS:  n_chains, max_treedepth, adapt_delta
+    //   SGHMC/SGLD/MCLMC: epsilon (0 => kernel default/adaptation), L,
+    //       batch_size (0 => full-data gradient), alpha (SGHMC friction),
+    //       mclmc_adjusted
+    //   SMC:   n_particles, n_mcmc_steps, ess_threshold
+    //   VI:    vi_variant (0=meanfield,1=lowrank,2=fullrank,3=auto),
+    //       vi_mc_samples, vi_max_iter, vi_n_draws, vi_max_grad_norm
+    //   Structure: re_spec / spatial_spec / temporal_spec (null => absent),
+    //       sigma_re_scale (half-Cauchy scale on the RE / BYM2 SDs).
+    const int N = y.size();
+
+    // Build the full ModelData + ParamLayout (fixed effects + any RE / spatial /
+    // temporal structure) once; the kernels sample the full vector it lays out.
+    tulpa::SamplerModelInputs in;
+    std::vector<double> offset = tulpa::as_offset_vec(offset_nullable, N);
+    tulpa::build_sampler_model_inputs(
+        in, y, n_trials, X, family, phi, sigma_beta, offset, sigma_re_scale,
+        re_spec, spatial_spec, temporal_spec, svc_spec, tvc_spec, zi_spec);
+    in.resp.phi2 = phi2;   // NA_REAL is a NaN => family default (e.g. t df = 4)
+    const int D = in.layout.total_params;
+    std::vector<double> init(D, 0.0);
+    tulpa::init_bounded_support_params(init, in.data, in.layout);
+    Rcpp::CharacterVector cn = tulpa::sampler_param_names(in.data, in.layout, fixed_names);
+
+    // A warm start is only wired into the NUTS/HMC kernel, which is the one that
+    // takes both an initial position and an inverse-mass diagonal. Refuse it on
+    // any other backend rather than drop it: silently sampling from the default
+    // start would answer a different question than the caller asked.
+    const bool is_nuts = (backend == "nuts" || backend == "hmc");
+    // The metric is the NUTS/HMC kernel's own knob. Parsed for every backend so
+    // an unrecognised name is rejected wherever it is written, and refused on
+    // the backends that have no metric rather than accepted and ignored.
+    const tulpa::MassMatrixType metric = tulpa_hmc::parse_metric_type(mass_matrix);
+    if (!is_nuts && metric != tulpa::MassMatrixType::DIAG) {
+        Rcpp::stop("mass_matrix = '%s' is a NUTS/HMC knob; backend '%s' "
+                   "carries no mass matrix.", mass_matrix.c_str(),
+                   backend.c_str());
+    }
+    if (!is_nuts && (init_nullable.isNotNull() ||
+                     inv_metric_diag_nullable.isNotNull())) {
+        Rcpp::stop("a warm start is only carried by the NUTS/HMC kernel; "
+                   "backend '%s' takes neither an initial position nor an "
+                   "inverse-mass diagonal.", backend.c_str());
+    }
+
+    Rcpp::List out;
+
+    if (is_nuts) {
+        if (n_chains < 1) Rcpp::stop("n_chains must be >= 1");
+        std::vector<std::vector<double>> q_init(n_chains, init);
+        std::vector<std::vector<double>> inv_metric;   // empty -> structural default
+
+        // Caller-supplied initial positions, one row per chain. A matrix rather
+        // than a vector so the chains can be dispersed around the warm-start
+        // mode: seeding every chain at the same point would leave the
+        // between-chain variance that Rhat compares against reflecting only the
+        // sampler's own drift.
+        if (init_nullable.isNotNull()) {
+            Rcpp::NumericMatrix im(init_nullable);
+            if (im.ncol() != D) {
+                Rcpp::stop("init has %d columns but the model lays out %d "
+                           "parameters.", (int)im.ncol(), D);
+            }
+            if (im.nrow() != n_chains) {
+                Rcpp::stop("init has %d rows but n_chains is %d (one initial "
+                           "position per chain).", (int)im.nrow(), n_chains);
+            }
+            for (int c = 0; c < n_chains; c++) {
+                for (int j = 0; j < D; j++) {
+                    const double v = im(c, j);
+                    if (!R_finite(v)) {
+                        Rcpp::stop("init[%d, %d] is not finite.", c + 1, j + 1);
+                    }
+                    q_init[c][j] = v;
+                }
+            }
+        }
+
+        // Caller-supplied inverse-mass diagonal, shared across chains: it is a
+        // property of the posterior's scaling, not of a chain. Warmup adaptation
+        // still runs and refines it from here.
+        if (inv_metric_diag_nullable.isNotNull()) {
+            Rcpp::NumericVector iv(inv_metric_diag_nullable);
+            if (iv.size() != D) {
+                Rcpp::stop("inv_metric_diag has length %d but the model lays "
+                           "out %d parameters.", (int)iv.size(), D);
+            }
+            for (int j = 0; j < D; j++) {
+                if (!R_finite(iv[j]) || iv[j] <= 0.0) {
+                    Rcpp::stop("inv_metric_diag[%d] must be finite and positive "
+                               "(it is a variance).", j + 1);
+                }
+            }
+            inv_metric.assign(n_chains, std::vector<double>(iv.begin(), iv.end()));
+        }
+        std::vector<tulpa_hmc::HMCResultCpp> chains = tulpa_hmc::run_hmc_parallel_chains_cpp(
+            q_init, inv_metric, in.data, n_iter, n_warmup, /*L=*/0, n_chains,
+            (unsigned int)seed, verbose, max_treedepth,
+            metric, adapt_delta, /*riemannian=*/0, "");
+        tulpa_hmc::StackedChains st = tulpa_hmc::stack_hmc_chains(chains, n_chains, D);
+        if (st.n_total > 0) Rcpp::colnames(st.draws) = cn;
+        out = Rcpp::List::create(
+            Rcpp::Named("draws") = st.draws,
+            Rcpp::Named("means") = col_means(st.draws),
+            Rcpp::Named("chain_id") = st.chain_id,
+            Rcpp::Named("n_chains") = n_chains,
+            Rcpp::Named("n_samples") = st.n_sample_per_chain,
+            Rcpp::Named("n_params") = D,
+            Rcpp::Named("log_prob") = st.log_prob,
+            Rcpp::Named("accept_prob") = st.accept_prob,
+            Rcpp::Named("divergent") = st.divergent,
+            Rcpp::Named("treedepth") = st.treedepth,
+            Rcpp::Named("epsilon") = st.epsilon,
+            Rcpp::Named("sampler") = "nuts");
+        return out;
+    }
+
+    if (backend == "ess") {
+        // No seed: the ESS kernel draws from R's RNG, so set.seed() in R is
+        // what reproduces a run (the Rcpp wrapper holds the RNGScope).
+        tulpa_ess::ESSConfig cfg;
+        cfg.n_iter = n_iter; cfg.n_warmup = n_warmup; cfg.n_thin = 1;
+        cfg.verbose = verbose; cfg.print_every = 500;
+        cfg.adapt_during_warmup = ess_adapt_during_warmup;
+        if (ess_adapt_interval <= 0) {
+            Rcpp::stop("ess_adapt_interval must be positive (it is how many "
+                       "sweeps sit between random-walk proposal-SD updates).");
+        }
+        cfg.adapt_interval = ess_adapt_interval;
+        // Joint (log_sigma_re, re) rescaling move: needed when an RE term is
+        // present so log_sigma_re and the RE block mix (they are strongly
+        // anti-correlated under the prior). -1 keeps that rule; 0 / 1 override
+        // it, which is worth allowing because forcing it OFF under an RE term
+        // is how one demonstrates that the move is what makes the chain mix.
+        cfg.joint_sigma_re = (ess_joint_sigma_re < 0)
+            ? in.layout.has_re : (ess_joint_sigma_re != 0);
+        if (!(ess_joint_proposal_sd > 0.0)) {
+            Rcpp::stop("ess_joint_proposal_sd must be positive.");
+        }
+        cfg.joint_sigma_proposal_sd = ess_joint_proposal_sd;
+        tulpa_ess::ESSResult res = tulpa_ess::run_ess_sampler(init, in.data, in.layout, cfg);
+        if (!res.success) Rcpp::stop("ess sampler failed: %s", res.error_msg);
+        Rcpp::NumericMatrix draws = eigen_draws_to_r(res.samples, D, cn);
+        out = Rcpp::List::create(
+            Rcpp::Named("draws") = draws,
+            Rcpp::Named("means") = col_means(draws),
+            Rcpp::Named("n_samples") = draws.nrow(),
+            Rcpp::Named("n_params") = D,
+            Rcpp::Named("avg_slice_evals") = res.avg_slice_evals,
+            Rcpp::Named("n_slice_exhausted") = res.n_slice_exhausted,
+            Rcpp::Named("n_degenerate_scale") = res.n_degenerate_scale,
+            Rcpp::Named("sampler") = "ess");
+        return out;
+    }
+
+    if (backend == "sghmc") {
+        tulpa_sghmc::SGHMCConfig cfg;
+        cfg.n_iter = n_iter; cfg.n_warmup = n_warmup; cfg.n_thin = 1;
+        cfg.batch_size = (batch_size > 0) ? batch_size : N;
+        cfg.alpha = alpha; cfg.L = L; cfg.verbose = verbose;
+        cfg.print_every = 500; cfg.seed = (unsigned int)seed;
+        // A supplied step size is the step size the chain runs at. The warmup
+        // adapter walks toward an acceptance statistic that SGHMC never accepts
+        // or rejects on, so it is not tied to the discretisation error that
+        // actually bounds this scheme, and letting it overwrite the caller's
+        // value leaves the backend with no controllable step size at all. With
+        // no value supplied the adapter runs from the default seed.
+        cfg.adapt_epsilon = !(epsilon > 0);
+        cfg.epsilon = (epsilon > 0) ? epsilon : 0.01;
+        tulpa_sghmc::SGHMCResult res = tulpa_sghmc::run_sghmc_sampler(init, in.data, in.layout, cfg);
+        if (!res.success) Rcpp::stop("sghmc sampler failed: %s", res.error_msg);
+        Rcpp::NumericMatrix draws = eigen_draws_to_r(res.samples, D, cn);
+        out = Rcpp::List::create(
+            Rcpp::Named("draws") = draws, Rcpp::Named("means") = col_means(draws),
+            Rcpp::Named("n_samples") = draws.nrow(), Rcpp::Named("n_params") = D,
+            Rcpp::Named("final_epsilon") = res.epsilon_history.empty() ? 0.0
+                                            : res.epsilon_history.back(),
+            Rcpp::Named("sampler") = "sghmc");
+        return out;
+    }
+
+    if (backend == "sgld") {
+        tulpa_sghmc::SGLDConfig cfg;
+        cfg.n_iter = n_iter; cfg.n_warmup = n_warmup; cfg.n_thin = 1;
+        cfg.batch_size = (batch_size > 0) ? batch_size : N;
+        cfg.verbose = verbose; cfg.print_every = 500; cfg.seed = (unsigned int)seed;
+        // A supplied step size pins the SGLD step for the whole run; with none
+        // supplied the polynomial decay a * (b + t)^-gamma runs from the
+        // defaults. The two are exclusive: the schedule overwrites epsilon on
+        // every iteration, so leaving it on would discard the caller's value.
+        cfg.use_schedule = !(epsilon > 0);
+        cfg.epsilon = (epsilon > 0) ? epsilon : 0.001;
+        tulpa_sghmc::SGLDResult res = tulpa_sghmc::run_sgld_sampler(init, in.data, in.layout, cfg);
+        if (!res.success) Rcpp::stop("sgld sampler failed: %s", res.error_msg);
+        Rcpp::NumericMatrix draws = eigen_draws_to_r(res.samples, D, cn);
+        out = Rcpp::List::create(
+            Rcpp::Named("draws") = draws, Rcpp::Named("means") = col_means(draws),
+            Rcpp::Named("n_samples") = draws.nrow(), Rcpp::Named("n_params") = D,
+            Rcpp::Named("sampler") = "sgld");
+        return out;
+    }
+
+    if (backend == "mclmc") {
+        tulpa_mclmc::MCLMCConfig cfg;
+        cfg.n_iter = n_iter; cfg.n_warmup = n_warmup;
+        cfg.step_size = epsilon;          // <= 0 -> internal adaptation
+        cfg.L = (L > 0) ? L : 0;          // <= 0 -> auto
+        cfg.adjusted = mclmc_adjusted;
+        cfg.seed = (unsigned int)seed; cfg.verbose = verbose;
+        tulpa_mclmc::MCLMCFitResult res = tulpa_mclmc::run_mclmc_sampler(init, in.data, in.layout, cfg);
+        if (!res.success) Rcpp::stop("mclmc sampler failed: %s", res.error_msg);
+        Rcpp::NumericMatrix draws = eigen_draws_to_r(res.samples, D, cn);
+        out = Rcpp::List::create(
+            Rcpp::Named("draws") = draws, Rcpp::Named("means") = col_means(draws),
+            Rcpp::Named("n_samples") = draws.nrow(), Rcpp::Named("n_params") = D,
+            Rcpp::Named("sampler") = mclmc_adjusted ? "mamclmc" : "mclmc");
+        return out;
+    }
+
+    if (backend == "smc") {
+        tulpa::SMCConfig cfg;
+        cfg.n_particles = n_particles; cfg.n_mcmc_steps = n_mcmc_steps;
+        cfg.ess_threshold = ess_threshold; cfg.prior_sigma = sigma_beta;
+        cfg.seed = (unsigned int)seed; cfg.verbose = verbose;
+        tulpa::SMCDriverResult res = tulpa::run_smc_sampler(
+            init, in.data, in.layout, cfg, nullptr, nullptr);
+        if (!res.success) Rcpp::stop("smc sampler failed: %s", res.error_msg);
+        const int M = (int)res.particles.size();
+        Rcpp::NumericMatrix draws(M, D);
+        for (int s = 0; s < M; s++)
+            for (int j = 0; j < D; j++) draws(s, j) = res.particles[s][j];
+        if (M > 0) Rcpp::colnames(draws) = cn;
+        out = Rcpp::List::create(
+            Rcpp::Named("draws") = draws, Rcpp::Named("means") = col_means(draws),
+            Rcpp::Named("n_samples") = M, Rcpp::Named("n_params") = D,
+            Rcpp::Named("log_weights") = Rcpp::wrap(res.log_weights),
+            Rcpp::Named("log_evidence") =
+                res.log_evidence_valid ? res.log_evidence : NA_REAL,
+            Rcpp::Named("sampler") = "smc");
+        return out;
+    }
+
+    if (backend == "vi") {
+        tulpa::vi::VIConfig cfg;
+        cfg.variant = static_cast<tulpa::vi::VIVariant>(vi_variant);
+        cfg.max_iter = vi_max_iter; cfg.mc_samples = vi_mc_samples;
+        cfg.max_grad_norm = vi_max_grad_norm;
+        cfg.seed = (unsigned int)seed; cfg.verbose = verbose;
+        tulpa::vi::validate_vi_config(cfg);
+        tulpa::vi::VIResult res = tulpa::vi::fit_vi(in.data, in.layout, D, cfg, nullptr);
+        // Posterior draws for downstream summaries: prefer the kernel's own
+        // sample matrix; fall back to sampling the fitted Gaussian when empty.
+        Eigen::MatrixXd S = res.samples;
+        if (S.rows() == 0 && res.mu.size() == D) {
+            // Diagonal-Gaussian draws from (mu, diag(Sigma)) as a minimal fallback.
+            Rcpp::RNGScope scope;
+            S.resize(vi_n_draws, D);
+            for (int s = 0; s < vi_n_draws; s++)
+                for (int j = 0; j < D; j++) {
+                    double sd = (res.Sigma.rows() == D) ? std::sqrt(std::max(1e-12, res.Sigma(j, j))) : 1.0;
+                    S(s, j) = res.mu(j) + sd * R::norm_rand();
+                }
+        }
+        Rcpp::NumericMatrix draws = eigen_draws_to_r(S, D, cn);
+        out = Rcpp::List::create(
+            Rcpp::Named("draws") = draws, Rcpp::Named("means") = col_means(draws),
+            Rcpp::Named("n_samples") = draws.nrow(), Rcpp::Named("n_params") = D,
+            Rcpp::Named("elbo") = res.final_elbo,
+            Rcpp::Named("pareto_k") = res.psis_k,
+            Rcpp::Named("converged") = res.converged,
+            Rcpp::Named("sampler") = "vi");
+        return out;
+    }
+
+    Rcpp::stop("Unknown backend '%s' for cpp_tulpa_sample_glmm.", backend);
+}

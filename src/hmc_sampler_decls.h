@@ -1,0 +1,296 @@
+// hmc_sampler_decls.h
+// Fragment of hmc_sampler.h. Self-contained: defines symbols inside
+// namespace tulpa_hmc and aliases tulpa:: types into that namespace.
+// using-decls for tulpa:: types, enum parsers, ParamLayout / log-post /
+// gradient function declarations.
+#ifndef TULPA_HMC_SAMPLER_DECLS_H
+#define TULPA_HMC_SAMPLER_DECLS_H
+
+#include <memory>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+#include "tulpa/model_data.h"
+#include "tulpa/param_layout.h"
+#include "tulpa/types.h"
+
+#include "simp/scheme.h"  // symplectic integrator scheme registry, vendored
+                          // from gcol33/SIMP (see vendor_simp.sh). Only the
+                          // scheme ops are needed here; the NUTS loop applies
+                          // them itself. The step-adapted, harmonic-analysis,
+                          // and multiple-time-stepping headers ship in src/simp
+                          // too but are not pulled into this widely-included
+                          // decls header.
+
+// Forward declaration so the progress-reporter handles below can be declared
+// without pulling the full GridProgress header (tulpa/nested_progress.h) into
+// this widely-included fragment.
+namespace tulpa_progress { class GridProgress; }
+
+namespace tulpa_hmc {
+
+// Import all canonical types from exported tulpa:: headers
+using tulpa::ModelData;
+using tulpa::ParamLayout;
+using tulpa::ProcessData;
+using tulpa::SharingSpec;
+using tulpa::TemporalType;
+using tulpa::TemporalData;
+using tulpa::MultiscaleTemporalData;
+using tulpa::TemporalGPData;
+using tulpa::TemporalCovType;
+using tulpa::ZIType;
+using tulpa::GPData;
+using tulpa::MultiscaleGPData;
+using tulpa::CovType;
+using tulpa::STType;
+using tulpa::SpatiotemporalData;
+using tulpa::NonsepType;
+using tulpa::SVCData;
+using tulpa::HSGPData;
+using tulpa::TVCData;
+using tulpa::SpatialType;
+using tulpa::GradientMode;
+using tulpa::MassMatrixType;
+using tulpa::GPSolverConfig;
+using tulpa::GPSolver;
+using tulpa::MSGPSampler;
+
+// Parse gradient mode from string
+inline GradientMode parse_gradient_mode(const std::string& mode_str) {
+    static const tulpa::EnumEntry<GradientMode> table[] = {
+        {"auto", GradientMode::AUTO}, {"AUTO", GradientMode::AUTO},
+        {"N", GradientMode::NUMERICAL}, {"numerical", GradientMode::NUMERICAL},
+        {"A_t", GradientMode::AUTODIFF_TAPE}, {"autodiff_tape", GradientMode::AUTODIFF_TAPE},
+        {"A_r", GradientMode::AUTODIFF_ARENA}, {"arena", GradientMode::AUTODIFF_ARENA},
+        {"autodiff_arena", GradientMode::AUTODIFF_ARENA},
+        {"A", GradientMode::AUTODIFF_FWD}, {"autodiff", GradientMode::AUTODIFF_FWD},
+        {"forward", GradientMode::AUTODIFF_FWD},
+        {"H", GradientMode::HANDCODED}, {"handcoded", GradientMode::HANDCODED},
+        {"analytical", GradientMode::HANDCODED}
+    };
+    return tulpa::parse_enum(mode_str, table, GradientMode::AUTO);
+}
+
+// Human-readable metric name for verbose logging
+inline const char* metric_name(MassMatrixType t) {
+    switch (t) {
+        case MassMatrixType::DIAG: return "DIAG";
+        case MassMatrixType::DENSE: return "DENSE";
+        case MassMatrixType::BLOCK_DIAG: return "BLOCK_DIAG";
+        case MassMatrixType::AUTO: return "AUTO";
+        case MassMatrixType::GMRF: return "GMRF";
+        case MassMatrixType::GMRF_MARGIN: return "GMRF_MARGIN";
+    }
+    return "UNKNOWN";
+}
+
+// The one string -> MassMatrixType map. Every sampler entry point that exposes
+// a `mass_matrix` control takes the name and comes through here, so the spelling
+// a user writes cannot resolve differently at two doors. An unrecognised name is
+// rejected rather than defaulted: silently sampling under DIAG when the caller
+// asked for something else is the failure this replaces.
+inline MassMatrixType parse_metric_type(const std::string& name) {
+    static const tulpa::EnumEntry<MassMatrixType> table[] = {
+        {"diag", MassMatrixType::DIAG},
+        {"dense", MassMatrixType::DENSE},
+        {"block_diag", MassMatrixType::BLOCK_DIAG},
+        {"auto", MassMatrixType::AUTO},
+        {"gmrf", MassMatrixType::GMRF},
+        {"gmrf_margin", MassMatrixType::GMRF_MARGIN}
+    };
+    for (const auto& e : table) {
+        if (name == e.name) return e.value;
+    }
+    throw std::invalid_argument(
+        "mass_matrix must be one of \"diag\", \"dense\", \"block_diag\", "
+        "\"auto\", \"gmrf\", \"gmrf_margin\"; got \"" + name + "\".");
+}
+
+// Global gradient mode + accessors. Defined in hmc_gradient_fallback.cpp.
+// Direct access is reserved for the dispatcher and the per-chain warmup
+// fallback path; everywhere else should go through set/get.
+extern GradientMode g_gradient_mode;
+void set_gradient_mode(GradientMode mode);
+GradientMode get_gradient_mode();
+
+// Scopes a warmup gradient-check fallback to a single fit. A failed check flips
+// g_gradient_mode to NUMERICAL so every chain of THIS fit uses the safe path;
+// this guard restores the entry mode on scope exit so the fallback does not leak
+// into the next, unrelated fit (whose gradient may be correct). A mode the
+// caller set explicitly via set_gradient_mode is the entry value and is
+// therefore preserved.
+struct GradientModeFitScope {
+    GradientMode saved;
+    GradientModeFitScope() : saved(g_gradient_mode) {}
+    ~GradientModeFitScope() { g_gradient_mode = saved; }
+    GradientModeFitScope(const GradientModeFitScope&) = delete;
+    GradientModeFitScope& operator=(const GradientModeFitScope&) = delete;
+};
+
+// Active symplectic integrator for the HMC/NUTS trajectory. Set once on the
+// main thread (like g_gradient_mode) before sampling; read-only during. The
+// leapfrog steppers walk this scheme's op sequence, so leapfrog and the
+// higher-order Yoshida members share one integrator source of truth (SIMP).
+// For an adaptive selection this holds the fixed placeholder scheme (same stage
+// count as the resolved coefficient) used during warmup and on the
+// fixed-trajectory HMC path. Defined in simp_integrator.cpp.
+extern simp::Scheme g_integrator_scheme;
+void set_integrator_scheme(const std::string& name, int mts_substeps = 4);
+const simp::Scheme& get_integrator_scheme();
+
+// Multiple-time-stepping (RESPA) selection. When set, each NUTS leaf splits the
+// stiff prior force (mts_substeps inner substeps) from the smooth likelihood
+// force (one full gradient per leaf); see the RESPA leaf in
+// hmc_nuts_optimized.cpp. Orthogonal to the scheme/adaptive selection.
+bool get_integrator_mts();
+int get_mts_substeps();
+
+// Adaptive integrator selection. When not NONE, each NUTS chain replaces its
+// per-chain scheme at warmup end with the step-size-adapted minimum-error
+// coefficient resolved from the adapted mass matrix and the local curvature
+// (see compute_adaptive_nu_max): the nested-approximation-informs-the-sampler
+// synthesis. TWO_STAGE / THREE_STAGE pick the two- or three-stage family.
+enum class IntegratorAdaptive { NONE, TWO_STAGE, THREE_STAGE };
+IntegratorAdaptive get_integrator_adaptive();
+
+// User-facing name of the current integrator selection ("leapfrog", "minerror2",
+// "yoshida4", "adaptive2", ...). Distinct from g_integrator_scheme.name, which
+// for an adaptive selection reports the resolved placeholder/coefficient.
+const std::string& get_integrator_name();
+
+// Active NUTS progress reporter + ETA. Set by the sampling
+// orchestrator on the main thread; ticked once per iteration by every
+// run_hmc_chain_cpp. Under the across-chain OpenMP region each chain ticks the
+// same pointer (serialised by an omp critical); the console line auto-suppresses
+// in parallel and the heartbeat file is the parallel/detached channel. nullptr
+// -> no progress. Defined in hmc_nuts_parallel.cpp.
+extern ::tulpa_progress::GridProgress* g_active_grid_progress;
+
+// Build a progress reporter for a NUTS run from the scoped `tulpa.nl_progress`
+// R option. MUST be called on the main thread (it reads an R option). Returns
+// nullptr when neither the console nor a heartbeat file is wanted. `total` is
+// the iteration denominator (n_iter, or n_iter*n_chains for an across-chain
+// run); `width` is the chain concurrency for the ETA. Defined in
+// hmc_nuts_parallel.cpp.
+std::unique_ptr<::tulpa_progress::GridProgress> make_nuts_progress(int total, int width);
+
+// Function pointer type for gradient computation (eliminates per-call dispatch overhead)
+using GradientFn = void(*)(
+    const std::vector<double>&, const ModelData&, const ParamLayout&,
+    std::vector<double>&, double*);
+
+// Resolve the gradient function pointer once based on mode + model config
+GradientFn resolve_gradient_fn(GradientMode mode, const ModelData& data, const ParamLayout& layout);
+
+// Prior-only gradient (skip_obs_loop = true): the "fast" force for the
+// multiple-time-stepping integrator. resolve_prior_gradient_fn mirrors
+// resolve_gradient_fn but never returns the hand-coded full-gradient hook
+// (which cannot yield a prior-only gradient) -- it picks the arena-AD prior
+// path when available, else central differences. Both variants match the
+// GradientFn signature. Defined in hmc_gradient_fallback.cpp / dispatch.
+GradientFn resolve_prior_gradient_fn(GradientMode mode, const ModelData& data, const ParamLayout& layout);
+void compute_gradient_prior_numerical(
+    const std::vector<double>& params, const ModelData& data,
+    const ParamLayout& layout, std::vector<double>& grad, double* log_post_out = nullptr);
+void compute_gradient_prior_arena(
+    const std::vector<double>& params, const ModelData& data,
+    const ParamLayout& layout, std::vector<double>& grad, double* log_post_out = nullptr);
+
+// ModelData and ParamLayout are now defined in exported headers:
+//   inst/include/tulpa/model_data.h   (tulpa::ModelData)
+//   inst/include/tulpa/param_layout.h (tulpa::ParamLayout)
+// Imported into tulpa_hmc namespace via using declarations above.
+
+ParamLayout compute_param_layout(const ModelData& data);
+int get_n_params(const ModelData& data);
+
+// Errors unless (U, alpha) is a usable PC range anchor, i.e. P(range < U) =
+// alpha with U > 0 and alpha in (0, 1). Called once per fit from
+// compute_param_layout for every NNGP block that carries a sampled range.
+void require_range_prior_anchors(double U, double alpha, const char* term);
+
+// Errors unless the areal field's component partition describes its adjacency.
+// Called once per fit from compute_param_layout for every ICAR / BYM2 /
+// CAR_proper field.
+void require_spatial_partition(const ModelData& data);
+
+// =====================================================================
+// Log-posterior computation (with OpenMP parallelization)
+// =====================================================================
+
+// Main log-posterior function
+// When skip_obs_loop=true, returns only prior+structural terms (O(p+S+T)),
+// skipping the O(N) observation loop. Used by fused gradient+log_post computation.
+double compute_log_post(
+    const std::vector<double>& params,
+    const ModelData& data,
+    const ParamLayout& layout,
+    bool skip_obs_loop = false,
+    const double* precomputed_st_log_prior = nullptr,
+    const double* precomputed_tgp_log_prior = nullptr
+);
+
+// Separable prior + likelihood (prereq).
+// Contract: compute_log_post == compute_log_prior + compute_log_lik_only
+// to within numerical tolerance for any well-defined params.
+// SMC and other tempered samplers consume these as independent callables
+// (target = log_prior + beta * log_lik).
+double compute_log_prior(
+    const std::vector<double>& params,
+    const ModelData& data,
+    const ParamLayout& layout
+);
+double compute_log_lik_only(
+    const std::vector<double>& params,
+    const ModelData& data,
+    const ParamLayout& layout
+);
+
+// Gradient computation (with optional fused log-posterior)
+// When log_post_out is non-null, the log-posterior is computed alongside
+// the gradient in a single pass, avoiding redundant O(N) computation.
+void compute_gradient(
+    const std::vector<double>& params,
+    const ModelData& data,
+    const ParamLayout& layout,
+    std::vector<double>& grad,
+    double* log_post_out = nullptr
+);
+
+// Generic (multi-process) gradient drivers used by the dispatch when the
+// model plugs a LikelihoodSpec. Defined in hmc_gradient_fallback.cpp. Every
+// model routes through `data.likelihood_spec`; there is no per-structure
+// specialized kernel behind this dispatch.
+void compute_gradient_generic_numerical(
+    const std::vector<double>& params,
+    const ModelData& data,
+    const ParamLayout& layout,
+    std::vector<double>& grad,
+    double* log_post_out = nullptr
+);
+
+void compute_gradient_generic_arena(
+    const std::vector<double>& params,
+    const ModelData& data,
+    const ParamLayout& layout,
+    std::vector<double>& grad,
+    double* log_post_out = nullptr
+);
+
+// Get RE value for observation (handles non-centered re_param=1 -> sigma*z transform).
+inline double re_value_for_eta(
+    const double* re,
+    int g,
+    double sigma_re,
+    int re_parameterization
+) {
+    double val = re[g];
+    if (re_parameterization == 1) val *= sigma_re;
+    return val;
+}
+
+}  // namespace tulpa_hmc
+
+#endif  // TULPA_HMC_SAMPLER_DECLS_H

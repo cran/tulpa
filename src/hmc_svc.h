@@ -1,0 +1,266 @@
+// hmc_svc.h
+// Spatially-Varying Coefficients (SVC) with NNGP approximation
+// Implements Nearest Neighbor Gaussian Process for scalable GP inference
+
+#ifndef TULPA_HMC_SVC_H
+#define TULPA_HMC_SVC_H
+
+#define _USE_MATH_DEFINES  // For M_PI on Windows
+#include <vector>
+#include <cmath>
+#include <algorithm>
+#include <Rcpp.h>
+#include "tulpa/sum_to_zero.h"  // s2z_centre_blocks
+#include "tulpa/svc_data.h"
+#include "tulpa/types.h"
+#include "linalg_fast.h"  // shared small-dense Cholesky / NNGP solve core
+#include "nngp_cond.h"    // shared Vecchia conditional kernel (factor/krige/floor)
+
+// Fallback definition of M_PI if not provided by <cmath>
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
+namespace tulpa_svc {
+
+using tulpa::CovType;
+using tulpa::SVCData;
+
+// Conditioning constants for the SVC NNGP kernel. The SVC kernel deliberately
+// runs a looser diagonal nugget / conditional-variance floor than the GP one
+// (kGpJitter / kGpVarFloor in hmc_gp_autodiff.h) to reduce HMC divergences on
+// near-duplicate coordinates. They live here so the double kernel below and its
+// autodiff twin in hmc_svc_autodiff.h read the SAME values: those two are the
+// same function and must agree, whatever the value is.
+constexpr double kSvcJitter = 1e-4;
+constexpr double kSvcVarFloor = 1e-4;
+
+// -----------------------------------------------------------------------------
+// Covariance functions
+// -----------------------------------------------------------------------------
+
+// Exponential covariance: sigma^2 * exp(-d / phi)
+inline double cov_exponential(double d, double sigma2, double phi) {
+  return sigma2 * std::exp(-d / phi);
+}
+
+// Matern 3/2 covariance: sigma^2 * (1 + sqrt(3)*d/phi) * exp(-sqrt(3)*d/phi)
+inline double cov_matern32(double d, double sigma2, double phi) {
+  double r = std::sqrt(3.0) * d / phi;
+  return sigma2 * (1.0 + r) * std::exp(-r);
+}
+
+// Gaussian (squared exponential) covariance: sigma^2 * exp(-(d/phi)^2)
+inline double cov_gaussian(double d, double sigma2, double phi) {
+  double r = d / phi;
+  return sigma2 * std::exp(-r * r);
+}
+
+// Spherical covariance
+inline double cov_spherical(double d, double sigma2, double phi) {
+  if (d >= phi) return 0.0;
+  double r = d / phi;
+  return sigma2 * (1.0 - 1.5 * r + 0.5 * r * r * r);
+}
+
+// Generic covariance function dispatcher.
+//
+// NOTE: CovType::MATERN is fixed at smoothness nu = 3/2 -- this dispatch has no
+// nu argument. spatial_gp(cov = "matern", nu = ) accepts any positive nu and
+// the Laplace path honours nu in {1.5, 2.5} (gp_cov_type_for_laplace), so a
+// consumer filling GPData.cov_type from a user's nu must reject anything other
+// than 1.5 rather than let it be silently rounded to 3/2 here.
+inline double compute_cov(double d, double sigma2, double phi, CovType cov_type) {
+  switch (cov_type) {
+    case CovType::EXPONENTIAL:
+      return cov_exponential(d, sigma2, phi);
+    case CovType::MATERN:
+      return cov_matern32(d, sigma2, phi);
+    case CovType::GAUSSIAN:
+      return cov_gaussian(d, sigma2, phi);
+    case CovType::SPHERICAL:
+      return cov_spherical(d, sigma2, phi);
+    default:
+      return cov_exponential(d, sigma2, phi);
+  }
+}
+
+// -----------------------------------------------------------------------------
+// NNGP likelihood computation
+// -----------------------------------------------------------------------------
+
+// Compute NNGP log-likelihood for a single SVC term
+// w: vector of SVC values at each location (length n_obs)
+// sigma2: spatial variance
+// phi: spatial range parameter
+// Returns log p(w | sigma2, phi) under NNGP approximation
+inline double nngp_log_lik(
+    const std::vector<double>& w,
+    double sigma2,
+    double phi,
+    const SVCData& svc_data
+) {
+  int N = svc_data.n_obs;
+  int nn = svc_data.nn;
+
+  // Size validation, matching the GP kernels and the SVC analytic gradient: the
+  // neighbour tables arrive from R and are indexed below as raw offsets.
+  if ((int)svc_data.nn_order.size() < N) return -INFINITY;
+  if ((int)svc_data.nn_idx.size() < N * nn) return -INFINITY;
+  if ((int)svc_data.nn_dist.size() < N * nn) return -INFINITY;
+  if ((int)w.size() < N) return -INFINITY;
+  if ((int)svc_data.coords.size() < 2 * N) return -INFINITY;
+
+  double log_lik = 0.0;
+
+  // First observation: marginal N(0, sigma2)
+  int first_idx = svc_data.nn_order[0];
+  if (first_idx < 0 || first_idx >= N) return -INFINITY;
+  log_lik += tulpa_nngp::marginal_log_density(w[first_idx], sigma2);
+
+  // Remaining observations: conditional on neighbors
+  for (int i = 1; i < N; i++) {
+    int obs_idx = svc_data.nn_order[i];
+    if (obs_idx < 0 || obs_idx >= N) return -INFINITY;
+
+    // Count actual neighbors (early observations have fewer), through the
+    // shared left-packed scan every NNGP kernel runs.
+    const int n_neighbors = tulpa_nngp::nngp_row_neighbours(
+        svc_data.nn_idx.data() + (std::size_t)i * nn, /*stride=*/1, nn,
+        (int)svc_data.nn_order.size());
+
+    if (n_neighbors == 0) {
+      // No neighbors: marginal
+      log_lik += tulpa_nngp::marginal_log_density(w[obs_idx], sigma2);
+      continue;
+    }
+
+    // Build covariance vector c(s_i, s_{N(i)}) and matrix C(s_{N(i)}, s_{N(i)})
+    std::vector<double> c_vec(n_neighbors);
+    std::vector<double> C_mat(n_neighbors * n_neighbors);
+
+    // c_vec: covariances between obs i and its neighbors
+    for (int j = 0; j < n_neighbors; j++) {
+      int nn_flat_idx = i * nn + j;
+      double d = svc_data.nn_dist[nn_flat_idx];
+      c_vec[j] = compute_cov(d, sigma2, phi, svc_data.cov_type);
+    }
+
+    // Resolve each neighbour slot to its location once. nngp_row_neighbours has
+    // already bounded the nn_order lookup; what remains to check is the value
+    // it returns, which indexes coords and w.
+    std::vector<int> nb_loc(n_neighbors);
+    for (int j = 0; j < n_neighbors; j++) {
+      const int loc = svc_data.nn_order[svc_data.nn_idx[i * nn + j] - 1];
+      if (loc < 0 || loc >= N) return -INFINITY;
+      nb_loc[j] = loc;
+    }
+
+    // C_mat: covariances among neighbors
+    for (int j1 = 0; j1 < n_neighbors; j1++) {
+      for (int j2 = 0; j2 < n_neighbors; j2++) {
+        if (j1 == j2) {
+          C_mat[j1 * n_neighbors + j2] = sigma2;
+        } else {
+          // Compute distance between neighbors. SVCData::coords is a flat
+          // stride-2 buffer, so the two columns are the whole domain here.
+          double dx = svc_data.coords[nb_loc[j1] * 2] -
+                      svc_data.coords[nb_loc[j2] * 2];
+          double dy = svc_data.coords[nb_loc[j1] * 2 + 1] -
+                      svc_data.coords[nb_loc[j2] * 2 + 1];
+          double d12 = std::sqrt(dx * dx + dy * dy);
+          C_mat[j1 * n_neighbors + j2] = compute_cov(d12, sigma2, phi, svc_data.cov_type);
+        }
+      }
+    }
+
+    // Gather neighbor values in c_vec order, then the shared NNGP kernel at
+    // T = double. This is the double twin of tulpa_svc_ad::nngp_log_lik and must
+    // agree with it, so it takes the SAME constants (kSvcJitter / kSvcVarFloor,
+    // the deliberately looser SVC conditioning) and the same blended floor.
+    std::vector<double> w_nb(n_neighbors);
+    for (int j = 0; j < n_neighbors; j++) w_nb[j] = w[nb_loc[j]];
+    double cond_mean, cond_var;
+    if (!tulpa_nngp::cond_moments(C_mat, c_vec, w_nb, n_neighbors, sigma2,
+                                  kSvcJitter,
+                                  kSvcVarFloor,
+                                  tulpa_nngp::VarFloor::Blend,
+                                  cond_mean, cond_var)) {
+      return -INFINITY;
+    }
+    log_lik += tulpa_nngp::cond_log_density(w[obs_idx], cond_mean, cond_var);
+  }
+
+  return log_lik;
+}
+
+// -----------------------------------------------------------------------------
+// SVC contribution to linear predictor
+// -----------------------------------------------------------------------------
+
+// The linear predictor contribution and the level identification that goes with
+// it are templated in hmc_svc_autodiff.h (compute_svc_eta / svc_center_eta):
+// (sigma2, phi) are sampled, so every path through them carries an AD scalar
+// and a plain-double copy would only be a second version of the same function.
+
+// -----------------------------------------------------------------------------
+// Prior on GP hyperparameters
+// -----------------------------------------------------------------------------
+
+// Log prior for phi (range parameter): Uniform or exponential
+inline double log_prior_phi(double phi, double lower, double upper) {
+  // Uniform(lower, upper)
+  if (phi < lower || phi > upper) return -INFINITY;
+  return -std::log(upper - lower);
+}
+
+// Parse covariance type from string
+inline CovType parse_cov_type(const std::string& cov_str) {
+  static const tulpa::EnumEntry<CovType> table[] = {
+    {"exponential", CovType::EXPONENTIAL}, {"matern", CovType::MATERN},
+    {"gaussian", CovType::GAUSSIAN}, {"spherical", CovType::SPHERICAL}
+  };
+  return tulpa::parse_enum(cov_str, table, CovType::EXPONENTIAL);
+}
+
+// -----------------------------------------------------------------------------
+// Gradient computation for SVC parameters (for hand-coded HMC gradients)
+// -----------------------------------------------------------------------------
+
+// Covariance derivative w.r.t. phi: dk(d)/dphi. Single source of truth for
+// every NNGP gradient path (SVC and GP); see dcov_dphi in hmc_gp_gradients.h,
+// which delegates here.
+//
+// sigma2 is needed for SPHERICAL alone: the other kernels' derivatives are
+// proportional to k(d), so they can be written from cov_val, but the spherical
+// polynomial's is not, so it takes sigma2 explicitly.
+inline double dcov_dphi_svc(double d, double phi, double cov_val, double sigma2,
+                            CovType cov_type) {
+  if (d < 1e-10) return 0.0;
+  switch (cov_type) {
+    case CovType::EXPONENTIAL:
+      // k = s2*exp(-d/phi) -> dk/dphi = k*d/phi^2
+      return cov_val * d / (phi * phi);
+    case CovType::MATERN: {
+      // k = s2*(1+u)*exp(-u), u = sqrt(3)*d/phi -> dk/dphi = k*u^2/(phi*(1+u))
+      double u = 1.732050808 * d / phi;  // sqrt(3) * d / phi
+      return (1.0 + u > 1e-10) ? cov_val * u * u / (phi * (1.0 + u)) : 0.0;
+    }
+    case CovType::GAUSSIAN:
+      // k = s2*exp(-(d/phi)^2) -> dk/dphi = k*2*d^2/phi^3
+      return cov_val * 2.0 * d * d / (phi * phi * phi);
+    case CovType::SPHERICAL: {
+      // k = s2*(1 - 1.5r + 0.5r^3) for r = d/phi < 1, else 0 (and flat there)
+      // -> dk/dphi = s2 * 1.5 * r * (1 - r^2) / phi
+      if (d >= phi) return 0.0;
+      double r = d / phi;
+      return sigma2 * 1.5 * r * (1.0 - r * r) / phi;
+    }
+    default:
+      return cov_val * d / (phi * phi);
+  }
+}
+
+} // namespace tulpa_svc
+
+#endif // TULPA_HMC_SVC_H

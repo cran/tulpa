@@ -1,0 +1,516 @@
+// laplace_family_curvature.h
+//
+// d w / d eta, where w is the per-observation curvature that
+// grad_hess_for_family() returns in GradHess::neg_hess.
+//
+// WHY THIS IS NOT "the third derivative of the log-likelihood". The exact
+// gradient of the Laplace objective needs d log|H| / d theta, and H is built
+// from the curvature the fitting path ACTUALLY uses:
+//
+//     H = A' diag(w) A + P,     w_i = grad_hess_for_family(...).neg_hess
+//
+// Where working_weight_is_observed() holds -- poisson, binomial,
+// neg_binomial_2, truncated_poisson, and the canonical-link and
+// constant-curvature members of the generic route -- that w IS the true
+// observed -l''(eta), so dw/deta is the true -l'''(eta). Everywhere else
+// (neg_binomial_1, truncated_neg_binomial_2, beta_binomial, t, tweedie, and any
+// non-canonical link on the generic route) w is a working / expected weight
+// that is deliberately NOT the second derivative -- see the notes on each
+// branch of grad_hess_for_family. Differentiating the true log density there
+// would produce a gradient of an objective nobody optimizes.
+//
+// So the contract is: this returns the eta-derivative of whatever
+// grad_hess_for_family returns, and it is exact for that. Naming it d3 would be
+// a false label for more than half the families; has_curvature_derivative()
+// below is the gate. The observed curvature and ITS derivatives are separate,
+// and live under obs_grad_hess_for_family / obs_curvature_delta_deta_for_family.
+
+#ifndef TULPA_LAPLACE_FAMILY_CURVATURE_H
+#define TULPA_LAPLACE_FAMILY_CURVATURE_H
+
+#include "laplace_family_link.h"
+#include <string>
+#include <cmath>
+#include <limits>
+
+namespace tulpa {
+
+// d V / d mu, the companion to variance_fn() at laplace_family_link.h:141.
+inline double dvariance_dmu(double mu, double phi, const std::string& family,
+                            int n_trials) {
+    if (family == "gaussian") return 0.0;
+    if (family == "lognormal") return 0.0;
+    // d/dmu of variance_fn's mu (1-mu) / n. Must track that arm exactly: the two
+    // are the numerator and denominator of the same quotient rule in
+    // curvature_deta_for_family, so a mismatch is a silently wrong gradient.
+    if (family == "binomial") return (1.0 - 2.0 * mu) / n_trials;
+    if (family == "poisson") return 1.0;
+    if (family == "neg_binomial_2") return 1.0 + 2.0 * mu / phi;
+    if (family == "gamma") return 2.0 * mu / phi;
+    if (family == "inverse_gaussian") return 3.0 * phi * mu * mu;
+    if (family == "beta") {
+        // V = 1 / (phi^2 tg), tg = trigamma(mu phi) + trigamma((1-mu) phi).
+        // d tg / d mu = phi (psi''(mu phi) - psi''((1-mu) phi)), psi'' = tetragamma.
+        const double tg = tulpa::math::portable_trigamma(mu * phi) + tulpa::math::portable_trigamma((1.0 - mu) * phi);
+        const double dtg = phi * (tulpa::math::portable_tetragamma(mu * phi)
+                                  - tulpa::math::portable_tetragamma((1.0 - mu) * phi));
+        const double V = 1.0 / (phi * phi * tg);
+        return -V * dtg / tg;
+    }
+    unknown_family_stop("dvariance_dmu", family);
+}
+
+// d2 V / d mu2, the companion to dvariance_dmu() above. Same family arms.
+inline double d2variance_dmu2(double mu, double phi, const std::string& family,
+                              int n_trials) {
+    if (family == "gaussian") return 0.0;
+    if (family == "lognormal") return 0.0;
+    if (family == "binomial") return -2.0 / n_trials;
+    if (family == "poisson") return 0.0;
+    if (family == "neg_binomial_2") return 2.0 / phi;
+    if (family == "gamma") return 2.0 / phi;
+    if (family == "inverse_gaussian") return 6.0 * phi * mu;
+    if (family == "beta") {
+        // V = 1 / (phi^2 tg); reuse dvariance_dmu's tg, tg1 and add the next
+        // pentagamma rung tg2 = d2 tg / d mu2.
+        const double tg  = tulpa::math::portable_trigamma(mu * phi) + tulpa::math::portable_trigamma((1.0 - mu) * phi);
+        const double tg1 = phi * (tulpa::math::portable_tetragamma(mu * phi)
+                                  - tulpa::math::portable_tetragamma((1.0 - mu) * phi));
+        const double tg2 = phi * phi * (tulpa::math::portable_pentagamma(mu * phi)
+                                        + tulpa::math::portable_pentagamma((1.0 - mu) * phi));
+        const double cc = 1.0 / (phi * phi);
+        return -cc * tg2 / (tg * tg) + 2.0 * cc * tg1 * tg1 / (tg * tg * tg);
+    }
+    unknown_family_stop("d2variance_dmu2", family);
+}
+
+// Whether curvature_deta_for_family() is exact for this family. Everything
+// listed here has a closed-form eta-derivative of the weight the Newton system
+// uses; anything else must not silently receive a plausible-looking number.
+inline bool has_curvature_derivative(const std::string& family) {
+    if (family == "binomial" || family == "poisson" ||
+        family == "neg_binomial_2" || family == "neg_binomial_1" ||
+        family == "truncated_poisson" || family == "truncated_neg_binomial_2" ||
+        family == "beta_binomial" || family == "t" || family == "tweedie") {
+        return true;
+    }
+    // Generic mu-space route: exact whenever both derivative ladders cover the
+    // parsed family and link.
+    return generic_mu_route_exact(family);
+}
+
+// Whether curvature_deta2_for_family() is exact for this family. The mirror of
+// has_curvature_derivative(): the truncated pair carry the third truncation-shape
+// derivative d3a from truncation_shape(), so their second eta derivative is
+// closed-form alongside every other family that has the first.
+inline bool has_curvature_2nd_derivative(const std::string& family) {
+    return has_curvature_derivative(family);
+}
+
+// Whether the exact analytic mode Jacobian dx_hat/dtheta can be formed for this
+// family. From the true score stationarity of the inner solve the Jacobian is
+// -(A' diag(W_obs) A + P)^-1 (dP/dtheta) x_hat, governed by the OBSERVED
+// curvature W_obs = -l''(eta) -- NOT the Newton working weight H is built from,
+// which only equals it for canonical or constant-curvature families. It is exact
+// when W_obs is available: either explicitly (has_observed_curvature) or because
+// the working weight already is it (gaussian/lognormal constant curvature, or a
+// canonical link). Families where the two differ and no exact observed form
+// exists -- beta_binomial, t, tweedie, non-canonical generic -- return false, so
+// the marginal correction differences the mode instead of trusting a working-
+// weight Jacobian.
+inline bool has_exact_mode_jacobian(const std::string& family) {
+    return has_observed_curvature(family) || working_weight_is_observed(family);
+}
+
+// d(neg_hess)/d eta. Branch order mirrors grad_hess_for_family exactly, so the
+// two stay aligned when a family is added.
+inline double curvature_deta_for_family(
+    double y, int n_trials, double eta,
+    const std::string& family, double phi,
+    double phi2 = std::numeric_limits<double>::quiet_NaN()
+) {
+    if (family == "binomial") {
+        // w = n p (1-p);  dp/deta = p(1-p)
+        double p;
+        if (eta > 0) { double e = std::exp(-eta); p = 1.0 / (1.0 + e); }
+        else         { double e = std::exp(eta);  p = e / (1.0 + e); }
+        return n_trials * p * (1.0 - p) * (1.0 - 2.0 * p);
+    }
+    if (family == "poisson") {
+        // w = mu
+        return tulpa_linalg::safe_exp(eta);
+    }
+    if (family == "neg_binomial_2") {
+        // w = mu phi (y + phi) / (mu + phi)^2
+        const double mu = tulpa_linalg::safe_exp(eta);
+        const double s  = mu + phi;
+        return mu * phi * (y + phi) * (phi - mu) / (s * s * s);
+    }
+    if (family == "neg_binomial_1") {
+        // w = mu / (1 + phi)  (quasi-likelihood IRLS weight, log link)
+        const double mu = std::max(tulpa_linalg::safe_exp(eta), 1e-15);
+        return mu / (1.0 + phi);
+    }
+    if (family == "truncated_poisson" || family == "truncated_neg_binomial_2") {
+        // w = e_weight = da/p - q da^2 / p^2, with q = exp(-a), p = 1 - q,
+        // dq/deta = -q da, dp/deta = q da, d(da)/deta = d2a. Only (a, da, d2a)
+        // are needed; no third shape derivative appears.
+        const double mu = std::max(tulpa_linalg::safe_exp(eta), 1e-15);
+        double a, da, d2a;
+        truncation_shape(family, mu, phi, &a, &da, &d2a);
+        const TruncationTerm t = truncation_term(a, da, d2a);
+        const double q = t.q, ps = t.p_safe;
+        const double p2 = ps * ps, p3 = p2 * ps;
+        const double term1 = d2a / ps - q * da * da / p2;
+        const double term2 = q * da * (2.0 * d2a - da * da) / p2
+                             - 2.0 * q * q * da * da * da / p3;
+        return term1 - term2;
+    }
+    if (family == "beta_binomial") {
+        // w = n mu (1-mu) / D, D independent of mu; logit link.
+        double mu = linkinv(eta, "logit");
+        mu = clamp_mu_unit(mu);
+        const double n = (double)n_trials;
+        const double D = 1.0 + (n - 1.0) / (phi + 1.0);
+        return n * (1.0 - 2.0 * mu) * mu * (1.0 - mu) / D;
+    }
+    if (family == "t") {
+        // w = (nu+1) / ((nu+3) phi^2), constant in eta.
+        return 0.0;
+    }
+    if (family == "tweedie") {
+        // w = mu^(2-p) / phi, log link
+        const TweedieParams tw = tweedie_params(phi2, eta);
+        return (2.0 - tw.p) * std::pow(tw.mu, 2.0 - tw.p) / phi;
+    }
+
+    // Generic mu-space route: w = dmu^2 / V(mu), so
+    //   dw/deta = (2 dmu mu_eta2 V - dmu^3 V'(mu)) / V^2.
+    FamilyLink fl = parse_family_link(family);
+    double mu = linkinv(eta, fl.link);
+    const double dmu  = mu_eta(eta, fl.link);
+    const double d2mu = mu_eta2(eta, fl.link);
+    mu = clamp_mu_for_family(mu, fl.family);
+    const double V  = variance_fn(mu, phi, fl.family, n_trials);
+    const double dV = dvariance_dmu(mu, phi, fl.family, n_trials);
+    return (2.0 * dmu * d2mu * V - dmu * dmu * dmu * dV) / (V * V);
+}
+
+// d2(neg_hess)/d eta2, the sibling of curvature_deta_for_family. Branch order
+// mirrors it exactly, including the truncated pair, whose second eta derivative
+// is assembled from the shape derivatives (a, da, d2a, d3a).
+inline double curvature_deta2_for_family(
+    double y, int n_trials, double eta,
+    const std::string& family, double phi,
+    double phi2 = std::numeric_limits<double>::quiet_NaN()
+) {
+    if (family == "binomial") {
+        // dw/deta = n p(1-p)(1-2p);  d/deta of that = n (1-6p+6p^2) p(1-p)
+        double p;
+        if (eta > 0) { double e = std::exp(-eta); p = 1.0 / (1.0 + e); }
+        else         { double e = std::exp(eta);  p = e / (1.0 + e); }
+        return n_trials * (1.0 - 6.0 * p + 6.0 * p * p) * p * (1.0 - p);
+    }
+    if (family == "poisson") {
+        // dw/deta = mu, so d2w/deta2 = mu
+        return tulpa_linalg::safe_exp(eta);
+    }
+    if (family == "neg_binomial_2") {
+        // dw/deta = mu phi (y+phi)(phi-mu)/s^3, s = mu+phi
+        const double mu = tulpa_linalg::safe_exp(eta);
+        const double s  = mu + phi;
+        return phi * (y + phi) * mu * (mu * mu - 4.0 * mu * phi + phi * phi)
+               / (s * s * s * s);
+    }
+    if (family == "neg_binomial_1") {
+        // dw/deta = mu / (1+phi), so d2w/deta2 = mu / (1+phi)
+        const double mu = std::max(tulpa_linalg::safe_exp(eta), 1e-15);
+        return mu / (1.0 + phi);
+    }
+    if (family == "truncated_poisson" || family == "truncated_neg_binomial_2") {
+        // w = f(a, da) = da/p - q da^2/p^2, q = e^{-a}, p = 1 - q, so w depends
+        // on eta only through the shape a and its derivatives. The composite
+        // second derivative (dev_notes/proto_truncated_curvature.R):
+        //   d2w = f_aa da^2 + 2 f_ada da d2a + f_dada d2a^2 + f_a d2a + f_da d3a
+        const double mu = std::max(tulpa_linalg::safe_exp(eta), 1e-15);
+        double a, da, d2a, d3a;
+        truncation_shape(family, mu, phi, &a, &da, &d2a, &d3a);
+        const TruncationTerm t = truncation_term(a, da, d2a);
+        const double q = t.q, p = t.p, ps = t.p_safe;
+        const double p2 = ps * ps, p3 = p2 * ps, p4 = p3 * ps;
+        const double f_a    = -da * q / p2 + da * da * q * (p + 2.0 * q) / p3;
+        const double f_da   = 1.0 / ps - 2.0 * q * da / p2;
+        const double f_dada = -2.0 * q / p2;
+        const double f_ada  = -q / p2 + 2.0 * da * q * (p + 2.0 * q) / p3;
+        const double R_a    = -q * (p + 2.0 * q) / p3
+                              - 2.0 * q * q * (2.0 * p + 3.0 * q) / p4;
+        const double f_aa   = da * q * (p + 2.0 * q) / p3 + da * da * R_a;
+        return f_aa * da * da + 2.0 * f_ada * da * d2a + f_dada * d2a * d2a
+               + f_a * d2a + f_da * d3a;
+    }
+    if (family == "beta_binomial") {
+        // same logit shape as binomial, with n -> n/D
+        double mu = linkinv(eta, "logit");
+        mu = clamp_mu_unit(mu);
+        const double n = (double)n_trials;
+        const double D = 1.0 + (n - 1.0) / (phi + 1.0);
+        return n * (1.0 - 6.0 * mu + 6.0 * mu * mu) * mu * (1.0 - mu) / D;
+    }
+    if (family == "t") {
+        // w constant in eta
+        return 0.0;
+    }
+    if (family == "tweedie") {
+        // dw/deta = (2-p) mu^(2-p)/phi, so d2w/deta2 = (2-p)^2 mu^(2-p)/phi
+        const TweedieParams tw = tweedie_params(phi2, eta);
+        const double a = 2.0 - tw.p;
+        return a * a * std::pow(tw.mu, a) / phi;
+    }
+
+    // Generic mu-space route: w = dmu^2 / V(mu). With u = mu_eta, u1 = mu_eta2,
+    // u2 = mu_eta3, Vm = dvariance_dmu, Vmm = d2variance_dmu2,
+    //   d2w/deta2 = 2(u1^2 + u u2)/V - (5 u^2 u1 Vm + u^4 Vmm)/V^2
+    //               + 2 u^4 Vm^2 / V^3.
+    FamilyLink fl = parse_family_link(family);
+    double mu = linkinv(eta, fl.link);
+    const double u  = mu_eta(eta, fl.link);
+    const double u1 = mu_eta2(eta, fl.link);
+    const double u2 = mu_eta3(eta, fl.link);
+    mu = clamp_mu_for_family(mu, fl.family);
+    const double V   = variance_fn(mu, phi, fl.family, n_trials);
+    const double Vm  = dvariance_dmu(mu, phi, fl.family, n_trials);
+    const double Vmm = d2variance_dmu2(mu, phi, fl.family, n_trials);
+    const double u2p = u * u, u4 = u2p * u2p;
+    return 2.0 * (u1 * u1 + u * u2) / V
+           - (5.0 * u2p * u1 * Vm + u4 * Vmm) / (V * V)
+           + 2.0 * u4 * Vm * Vm / (V * V * V);
+}
+
+// ---------------------------------------------------------------------------
+// d(W_obs - w)/deta: the eta-derivative of the observed-minus-working curvature.
+//
+// The closed outer Hessian needs it because the mode motion is governed by the
+// TRUE curvature H_true = H + A' diag(W_obs - w) A while log|H| is the working
+// one. Differentiating a quantity formed on H_true^-1 therefore needs
+// dH_true/dtheta, which is dH/dtheta plus A' diag(d(W_obs - w)/deta * eta_dot) A.
+//
+// The difference is identically zero only where the Newton weight already IS
+// the observed curvature -- a canonical link or a curvature carrying no y. Every
+// other family reaching the ladders has a genuine difference, and the branches
+// below carry it.
+inline bool has_obs_curvature_delta_derivative(const std::string& family) {
+    return has_curvature_derivative(family);
+}
+
+// The same for the SECOND eta-derivative of the difference, which the coupled
+// y = 0 branch of an untruncated mixture needs (it differentiates log P(Y = 0)
+// a fourth time). Narrower than the first derivative: only where the difference
+// is the zero FUNCTION, so a zero second derivative is exact rather than
+// unwritten, plus neg_binomial_1, which carries it explicitly through the
+// pentagamma rung.
+//
+// beta_binomial is the family that separates this gate from the one above. Its
+// first-order difference is registered, so the mixture's third-derivative branch
+// is available; the fourth would need a further trigamma rung that is not.
+//
+// The truncated pair is the other gap: d2 log p / deta2 differentiated twice
+// more would need a fourth truncation-shape derivative, and truncation_shape()
+// stops at d3a. Unreachable in practice -- a zero-truncated base makes the
+// mixture a hurdle, whose y = 0 branch never forms this.
+inline bool has_obs_curvature_delta_2nd_derivative(const std::string& family) {
+    if (family == "truncated_neg_binomial_2") return false;
+    if (family == "neg_binomial_1") return has_curvature_2nd_derivative(family);
+    return working_weight_is_observed(family) &&
+           has_curvature_2nd_derivative(family);
+}
+
+inline double obs_curvature_delta_deta_for_family(
+    double y, int n_trials, double eta,
+    const std::string& family, double phi,
+    double phi2 = std::numeric_limits<double>::quiet_NaN()
+) {
+    if (family == "neg_binomial_1") {
+        // W_obs = -s + r^2 T1 with r = mu/phi, dr/deta = r,
+        //   s  = r (psi(y+r) - psi(r) - log1p(phi)),  ds/deta = s - r^2 T1,
+        //   T1 = psi'(r) - psi'(y+r),  T2 = psi''(r) - psi''(y+r),
+        // so d(r^2 T1)/deta = 2 r^2 T1 + r^3 T2 and
+        //   dW_obs/deta = -s + 3 r^2 T1 + r^3 T2.
+        // The working weight mu/(1+phi) is subtracted through its own registered
+        // derivative, so the two halves of the difference cannot drift apart.
+        const double mu = std::max(tulpa_linalg::safe_exp(eta), 1e-15);
+        const double r  = mu / phi;
+        const double s  = r * (tulpa::math::portable_digamma(y + r)
+                               - tulpa::math::portable_digamma(r)
+                               - std::log1p(phi));
+        const double T1 = tulpa::math::portable_trigamma(r)
+                          - tulpa::math::portable_trigamma(y + r);
+        const double T2 = tulpa::math::portable_tetragamma(r)
+                          - tulpa::math::portable_tetragamma(y + r);
+        return -s + 3.0 * r * r * T1 + r * r * r * T2
+             - curvature_deta_for_family(y, n_trials, eta, family, phi, phi2);
+    }
+    if (family == "truncated_neg_binomial_2") {
+        // W_obs = (untruncated NB2 observed curvature) + d2 log p, and
+        // w = e_weight, so the difference differentiates to the NB2 curvature
+        // derivative plus d3 log p minus the truncated working one. Both
+        // curvature derivatives are already registered above; only d3 log p is
+        // new, and truncation_shape() already supplies the d3a it needs.
+        const double mu = std::max(tulpa_linalg::safe_exp(eta), 1e-15);
+        double a, da, d2a, d3a;
+        truncation_shape(family, mu, phi, &a, &da, &d2a, &d3a);
+        const double d3log_p = truncation_d3log_p(
+            truncation_term(a, da, d2a), da, d2a, d3a);
+        return curvature_deta_for_family(y, n_trials, eta, "neg_binomial_2",
+                                         phi, phi2)
+             + d3log_p
+             - curvature_deta_for_family(y, n_trials, eta, family, phi, phi2);
+    }
+    if (generic_mu_route_exact(family) && !working_weight_is_observed(family)) {
+        // -l''' = -(L''' u^3 + 3 L'' u u1 + L' u2), minus the working weight's
+        // own registered derivative. Both halves come from the ladders rather
+        // than a second hand-written expression, so they cannot drift.
+        FamilyLink fl = parse_family_link(family);
+        double mu = linkinv(eta, fl.link);
+        mu = clamp_mu_for_family(mu, fl.family);
+        const double u   = mu_eta(eta, fl.link);
+        const double u1  = mu_eta2(eta, fl.link);
+        const double u2  = mu_eta3(eta, fl.link);
+        const double g   = grad_mu(y, mu, phi, fl.family, n_trials);
+        const double gp  = dgrad_mu_dmu(y, mu, phi, fl.family, n_trials);
+        const double gpp = d2grad_mu_dmu2(y, mu, phi, fl.family, n_trials);
+        return -(gpp * u * u * u + 3.0 * gp * u * u1 + g * u2)
+             - curvature_deta_for_family(y, n_trials, eta, family, phi, phi2);
+    }
+    if (family == "beta_binomial") {
+        // W_obs = phi^2 T dmu^2 - (1 - 2mu) s, with T the trigamma difference and
+        // s the exact score; dT/dmu = phi (psi''(a) - psi''(b) - psi''(y+a)
+        // + psi''(n-y+b)) and ds/deta = -W_obs close it.
+        double mu = linkinv(eta, "logit");
+        mu = clamp_mu_unit(mu);
+        const double a = mu * phi, b = (1.0 - mu) * phi;
+        const double dmu = mu * (1.0 - mu), n = (double)n_trials;
+        const double s = phi * (tulpa::math::portable_digamma(y + a) - tulpa::math::portable_digamma(a)
+                                - tulpa::math::portable_digamma(n - y + b) + tulpa::math::portable_digamma(b)) * dmu;
+        const double T = tulpa::math::portable_trigamma(a) + tulpa::math::portable_trigamma(b)
+                         - tulpa::math::portable_trigamma(y + a) - tulpa::math::portable_trigamma(n - y + b);
+        const double dT_dmu = phi * (tulpa::math::portable_tetragamma(a) - tulpa::math::portable_tetragamma(b)
+                                     - tulpa::math::portable_tetragamma(y + a)
+                                     + tulpa::math::portable_tetragamma(n - y + b));
+        const double w_obs = phi * phi * T * dmu * dmu - (1.0 - 2.0 * mu) * s;
+        const double dw_obs = phi * phi * dmu * dmu
+                                * (dT_dmu * dmu + 2.0 * T * (1.0 - 2.0 * mu))
+                            + 2.0 * dmu * s + (1.0 - 2.0 * mu) * w_obs;
+        return dw_obs
+             - curvature_deta_for_family(y, n_trials, eta, family, phi, phi2);
+    }
+    if (family == "t") {
+        // dW_obs/deta = 2 d (nu+1)(3 nu phi^2 - d^2) / D^3. The working weight
+        // is constant in eta, so its own derivative contributes nothing and the
+        // difference's derivative is W_obs's alone.
+        const double nu = student_t_df(phi2);
+        const double d = y - eta;
+        const double D = nu * phi * phi + d * d;
+        return 2.0 * d * (nu + 1.0) * (3.0 * nu * phi * phi - d * d)
+               / (D * D * D);
+    }
+    if (family == "tweedie") {
+        // W_obs = mu^(1-p) [mu (2-p) + (p-1) y] / phi, whose eta-derivative
+        // through dmu/deta = mu is mu^(1-p) [mu (2-p)^2 + (p-1)(1-p) y] / phi.
+        const TweedieParams tw = tweedie_params(phi2, eta);
+        const double p = tw.p, mu = tw.mu;
+        const double m1p = std::pow(mu, 1.0 - p);
+        const double dw_obs = m1p * (mu * (2.0 - p) * (2.0 - p)
+                                     + (p - 1.0) * (1.0 - p) * y) / phi;
+        return dw_obs
+             - curvature_deta_for_family(y, n_trials, eta, family, phi, phi2);
+    }
+    // W_obs == w identically: the difference is the zero function.
+    return 0.0;
+}
+
+// d2(W_obs - w)/deta2, the next rung. Same contract as above: zero wherever the
+// two weights coincide, and gated by has_obs_curvature_delta_2nd_derivative().
+inline double obs_curvature_delta_deta2_for_family(
+    double y, int n_trials, double eta,
+    const std::string& family, double phi,
+    double phi2 = std::numeric_limits<double>::quiet_NaN()
+) {
+    if (family == "neg_binomial_1") {
+        // Differentiating dW_obs/deta = -s + 3 r^2 T1 + r^3 T2 once more, with
+        // dr/deta = r, ds/deta = s - r^2 T1 and T3 = psi'''(r) - psi'''(y+r):
+        //   d2W_obs/deta2 = -s + 7 r^2 T1 + 6 r^3 T2 + r^4 T3.
+        const double mu = std::max(tulpa_linalg::safe_exp(eta), 1e-15);
+        const double r  = mu / phi;
+        const double s  = r * (tulpa::math::portable_digamma(y + r)
+                               - tulpa::math::portable_digamma(r)
+                               - std::log1p(phi));
+        const double T1 = tulpa::math::portable_trigamma(r)
+                          - tulpa::math::portable_trigamma(y + r);
+        const double T2 = tulpa::math::portable_tetragamma(r)
+                          - tulpa::math::portable_tetragamma(y + r);
+        const double T3 = tulpa::math::portable_pentagamma(r)
+                          - tulpa::math::portable_pentagamma(y + r);
+        const double r2 = r * r;
+        return -s + 7.0 * r2 * T1 + 6.0 * r2 * r * T2 + r2 * r2 * T3
+             - curvature_deta2_for_family(y, n_trials, eta, family, phi, phi2);
+    }
+    return 0.0;
+}
+
+// The TRUE eta-derivatives of the observed curvature, as opposed to the working
+// weight's. H is built from the working weight, so the objective's log|H| moves
+// with curvature_deta_for_family; but a mixture's y = 0 branch differentiates
+// the DENSITY (through P(Y = 0)), and that needs these. The two coincide for
+// every family whose Newton weight already is the observed curvature, which is
+// why this distinction stayed invisible until neg_binomial_1.
+inline double obs_curvature_deta_for_family(
+    double y, int n_trials, double eta,
+    const std::string& family, double phi,
+    double phi2 = std::numeric_limits<double>::quiet_NaN()
+) {
+    return curvature_deta_for_family(y, n_trials, eta, family, phi, phi2)
+         + obs_curvature_delta_deta_for_family(y, n_trials, eta, family, phi,
+                                               phi2);
+}
+
+// Returns NaN, not a silently wrong number, for any family where either half is
+// unregistered. Without the gate a family whose observed and working curvature
+// differ but whose second-order delta is unwritten gets 0 from the second term,
+// so the sum is the WORKING curvature's second derivative presented as the
+// observed one -- a plausible finite value where the exact answer does not
+// exist.
+inline double obs_curvature_deta2_for_family(
+    double y, int n_trials, double eta,
+    const std::string& family, double phi,
+    double phi2 = std::numeric_limits<double>::quiet_NaN()
+) {
+    if (!has_curvature_2nd_derivative(family) ||
+        !has_obs_curvature_delta_2nd_derivative(family)) {
+        return std::numeric_limits<double>::quiet_NaN();
+    }
+    return curvature_deta2_for_family(y, n_trials, eta, family, phi, phi2)
+         + obs_curvature_delta_deta2_for_family(y, n_trials, eta, family, phi,
+                                                phi2);
+}
+
+// Third derivative of a single observation's log-likelihood, l_j'''(eta_j),
+// for the inner-Laplace skewness diagnostic (inner_laplace_skew.h). The
+// observed curvature is w_obs = -l'', so d(w_obs)/d(eta) = -l''' exactly;
+// has_curvature_derivative() gates both halves of obs_curvature_deta_for_family
+// (see its own doc comment), so it is the single correctness gate here too.
+// Returns NaN -- not a silently wrong number -- for any family without a
+// registered third derivative.
+inline double curvature3_obs_for_family(
+    double y, int n_trials, double eta,
+    const std::string& family, double phi,
+    double phi2 = std::numeric_limits<double>::quiet_NaN()
+) {
+    if (!has_curvature_derivative(family)) {
+        return std::numeric_limits<double>::quiet_NaN();
+    }
+    return -obs_curvature_deta_for_family(y, n_trials, eta, family, phi, phi2);
+}
+
+} // namespace tulpa
+
+#endif // TULPA_LAPLACE_FAMILY_CURVATURE_H

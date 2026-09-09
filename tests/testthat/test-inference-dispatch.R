@@ -1,0 +1,92 @@
+# test-inference-dispatch.R
+# Contract for the backend registry (single source of truth) and the
+# dispatch spine: tier derivation, R-reachability, and fail-loud routing.
+
+test_that("BACKEND_REGISTRY is the single source of truth for tiers", {
+  # Every registry tier key is a known tier.
+  for (b in names(BACKEND_REGISTRY)) {
+    expect_true(BACKEND_REGISTRY[[b]]$tier %in% names(TIER_META),
+                info = b)
+  }
+  # INFERENCE_TIERS membership is derived from the registry.
+  for (tk in names(TIER_META)) {
+    expect_setequal(INFERENCE_TIERS[[tk]]$backends, .tier_backends(tk))
+  }
+  # ALL_BACKENDS is exactly the registry keys.
+  expect_setequal(ALL_BACKENDS, names(BACKEND_REGISTRY))
+})
+
+test_that("smc is Tier 1 (exact); sgld/sghmc/mclmc are Tier 3 (approximate)", {
+  # SMC (properly resampled) targets the exact posterior. SGLD/SGHMC carry
+  # fixed-step + minibatch bias and MCLMC's default is unadjusted, so they are
+  # approximate MCMC -- tier "optimized", not "exact".
+  expect_true("smc" %in% INFERENCE_TIERS$exact$backends)
+  expect_equal(get_backend_tier("smc")$tier, 1L)
+  for (b in c("sgld", "sghmc", "mclmc")) {
+    expect_false(b %in% INFERENCE_TIERS$exact$backends)
+    expect_true(b %in% INFERENCE_TIERS$optimized$backends)
+    expect_equal(get_backend_tier(b)$tier, 3L)
+  }
+})
+
+test_that("get_backend_tier preserves its shape and errors on unknown", {
+  ti <- get_backend_tier("laplace")
+  expect_equal(ti$tier, 2L)
+  expect_equal(ti$name, "Structured")
+  expect_equal(ti$mode, "structured")
+  expect_true(nzchar(ti$guarantee))
+  expect_error(get_backend_tier("nope"), "Unknown backend")
+})
+
+test_that("reachability reflects whether an R fitter exists", {
+  # The ModelData sampler kernels are now reachable through tulpa_sample_glmm
+  # (gcol33/tulpa#54, #55). `pg` remains C-ABI-only (reached via tulpa_gibbs).
+  reachable <- c("gibbs", "imh_laplace", "mala", "laplace", "pathfinder", "agq",
+                 "hmc", "ess", "sghmc", "sgld", "mclmc", "smc", "vi")
+  cabi_only <- c("pg")
+  for (b in reachable) expect_true(backend_is_reachable(b), info = b)
+  for (b in cabi_only) expect_false(backend_is_reachable(b), info = b)
+})
+
+test_that("selecting a C-ABI-only backend fails loudly, naming the kernel", {
+  err <- expect_error(assert_backend_reachable("pg"))
+  expect_match(conditionMessage(err), "no R-level fitter")
+  expect_match(conditionMessage(err), "tulpa_pg_binomial_gibbs")
+
+  err2 <- expect_error(tulpa_dispatch("pg", fitter_args = list()))
+  expect_match(conditionMessage(err2), "tulpa_pg_binomial_gibbs")
+})
+
+test_that("resolve_backend_fitter returns the real function for reachable backends", {
+  expect_identical(resolve_backend_fitter("laplace"), tulpa_laplace)
+  expect_identical(resolve_backend_fitter("mala"), mala)
+  expect_identical(resolve_backend_fitter("pathfinder"), pathfinder)
+})
+
+test_that("tulpa_dispatch routes to the chosen backend and stamps the contract", {
+  skip_on_cran()
+  # mala consumes a log_posterior closure; a trivial isotropic Gaussian target.
+  lp  <- function(theta) -0.5 * sum(theta^2)
+  glp <- function(theta) -theta
+  fit <- tulpa_dispatch(
+    "mala",
+    fitter_args = list(
+      log_posterior = lp, grad_log_posterior = glp, init = c(0, 0),
+      n_iter = 400L, warmup = 200L, epsilon = 0.3
+    )
+  )
+  expect_s3_class(fit, "tulpa_fit")
+  expect_equal(fit$backend, "mala")
+  expect_equal(fit$inference_tier, 1L)
+  expect_equal(fit$inference_mode, "exact")
+  expect_true(nzchar(fit$selection_reason))
+})
+
+test_that("family support is derived from the registry", {
+  binom <- list(name = "binomial", distribution = "binomial")
+  gauss <- list(name = "gaussian", distribution = "gaussian")
+  expect_true(backend_supports_family("gibbs", binom))
+  expect_false(backend_supports_family("gibbs", gauss))
+  # unrestricted backend accepts anything
+  expect_true(backend_supports_family("laplace", gauss))
+})

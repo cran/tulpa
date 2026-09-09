@@ -1,0 +1,251 @@
+#' Fit a custom tgmrf latent block
+#'
+#' @description
+#' One front door for inference over a user-defined [tgmrf()] latent block's
+#' hyperparameter vector `theta`. `mode` selects the inference engine, all of
+#' which share the same Laplace body for `(beta, z) | theta`:
+#'
+#' * `"imh"` (default) -- Tier-1 exact MCMC: the Laplace body plus an
+#' independence-Metropolis bias correction over `theta` (the
+#' "Laplace + MH debias" composition).
+#' * `"nuts"` -- Tier-1 exact MCMC: NUTS over the marginal `theta` posterior.
+#' * `"vi"` -- Tier-2 structured: a single-path Pathfinder Gaussian fit of the
+#' `theta` posterior (no bias correction).
+#' * `"nuts_joint"` -- Tier-1 exact MCMC sampling the FULL joint
+#' `(beta, z, theta)` rather than the Laplace-marginalized `theta` (requires a
+#' C++-backend block, see [tgmrf_cpp()]).
+#'
+#' The inference method is an argument, not a parallel verb.
+#'
+#' @param y,n_trials,X Response, binomial trial counts (or `NULL`), and the
+#' fixed-effect design matrix.
+#' @param block A [tgmrf()] latent block.
+#' @param family,phi Observation family and its dispersion.
+#' @param re_idx,n_re_groups,sigma_re Optional scalar random-intercept structure.
+#' @param mode Inference engine: `"imh"`, `"nuts"`, `"vi"`, or `"nuts_joint"`.
+#' @param control A list of numerical / tuning knobs for the chosen `mode`
+#' (e.g. `n_iter`, `warmup`, `thin`, `scale` for `"imh"`; `epsilon`,
+#' `max_depth`, `target_accept` for the NUTS modes; `n_draws`, `max_lbfgs`,
+#' `lbfgs_tol` for `"vi"`; plus the shared `pilot_axis_points`, `max_iter`,
+#' `tol`, `n_threads`, `verbose`). An unknown knob for the chosen `mode`
+#' errors rather than being silently ignored.
+#' @param ... Individual `control` knobs may also be passed directly by name;
+#' they are merged into `control` (a named argument here wins over the same
+#' name inside `control`).
+#' @return A `tulpa_tgmrf` / `tulpa_fit` object; `$backend` and `$mode` record
+#' the engine used.
+#' @seealso [tgmrf()] for the block, [tgmrf_cpp()] for the compiled-block form.
+#' @examples
+#' \dontrun{
+#' # `block` is a tgmrf latent block (from tgmrf() / tgmrf_cpp()); the inference
+#' # method is an argument, not a parallel verb. See vignette("tgmrf").
+#' fit <- tulpa_tgmrf(y, rep(1L, length(y)), X, block = blk, mode = "imh")
+#' }
+#' @export
+tulpa_tgmrf <- function(y, n_trials, X, block,
+                        family = "binomial", phi = 1.0,
+                        re_idx = NULL, n_re_groups = 0L, sigma_re = 1.0,
+                        mode = c("imh", "nuts", "vi", "nuts_joint"),
+                        control = list(), ...) {
+  mode <- match.arg(mode)
+  if (!is.list(control)) stop("`control` must be a list.", call. = FALSE)
+  impl <- switch(mode,
+                 imh        = .tgmrf_fit_imh,
+                 nuts       = .tgmrf_fit_nuts,
+                 vi         = .tgmrf_fit_vi,
+                 nuts_joint = .tgmrf_fit_nuts_joint)
+  base  <- list(y = y, n_trials = n_trials, X = X, block = block,
+                family = family, phi = phi, re_idx = re_idx,
+                n_re_groups = n_re_groups, sigma_re = sigma_re)
+  knobs <- utils::modifyList(control, list(...))
+  # The knobs carry the per-mode numerical settings; reject names the chosen
+  # mode's fitter does not accept so a typo is not silently dropped.
+  allowed <- setdiff(names(formals(impl)), names(base))
+  bad <- setdiff(names(knobs), allowed)
+  if (length(bad)) {
+    stop(sprintf("Unknown control knob(s) for mode = '%s': %s.\n  Allowed: %s.",
+                 mode, paste(bad, collapse = ", "),
+                 paste(allowed, collapse = ", ")), call. = FALSE)
+  }
+  fit <- do.call(impl, c(base, knobs))
+  fit$mode <- mode
+  fit
+}
+
+#' IMH-Laplace MCMC over a tgmrf block's hyperparameters
+#'
+#' @description
+#' Composes the Laplace adapter (`tulpa_nested_laplace()`) with the
+#' generic [imh_laplace()] independence-Metropolis sampler to obtain
+#' asymptotically-correct posterior draws for the tgmrf block's
+#' hyperparameter vector `theta`.
+#'
+#' The pipeline is the canonical "Laplace body + MH bias correction" used
+#' throughout tulpa's debias philosophy:
+#'   1. Pilot grid fit to get a coarse `log_marginal(theta_k)` landscape.
+#'   2. Localise the mode in theta-space (grid argmax) and estimate a
+#'      finite-difference Hessian around it.
+#'   3. Run IMH-Laplace with proposals
+#'      `theta' ~ N(mode, scale^2 * H^{-1})` and exact MH accept/reject
+#'      against the target
+#'      `log p(theta | y) = log_marginal(theta) + log p(theta)`
+#'      (the user prior is already embedded in `log_marginal` via the
+#'      `prior` closure attached to the block).
+#'   4. Each proposal `theta'` is evaluated by a single-point inner
+#'      Laplace solve through `cpp_nested_laplace_multi` -- `n_iter`
+#'      inner solves total.
+#'
+#' Because the body (Laplace approximation of `(beta, z) | theta`) is
+#' Gaussian and the bias is corrected by MH, the resulting draws are
+#' exact in the limit. For posteriors that are nearly Laplace-Gaussian
+#' the acceptance rate is high and the sampler is dramatically cheaper
+#' than full NUTS over the joint `(beta, z, theta)`.
+#'
+#' @param y,n_trials,X Response, trials per obs (1L vector for non-binomial),
+#'   and fixed-effects design matrix -- same arguments as
+#'   [tulpa_nested_laplace()].
+#' @param block A `tgmrf` object.
+#' @param family,phi Likelihood family and dispersion.
+#' @param re_idx,n_re_groups,sigma_re Optional RE wiring (forwarded to
+#'   the inner Laplace).
+#' @param n_iter,warmup,thin,scale MCMC arguments forwarded to
+#'   [imh_laplace()].
+#' @param pilot_axis_points Per-axis grid resolution for the pilot fit
+#'   (default 5).
+#' @param fd_step Step size for the finite-difference Hessian on
+#'   `log_marginal(theta)` (default 0.05; in the block's theta units).
+#' @param max_iter,tol Inner-Newton budget per proposal.
+#' @param verbose Forwarded to [imh_laplace()].
+#' @param n_threads OpenMP threads inside each inner Laplace solve.
+#'
+#' @return A list with class `c("tulpa_tgmrf_imh", "tulpa_fit")`:
+#'   * `draws`: posterior draws of `theta` (rows = post-warmup samples,
+#'     cols = `theta_dim`).
+#'   * `means`, `sds`: posterior moments.
+#'   * `mean_accept`: post-warmup acceptance rate.
+#'   * `pilot`: the pilot `tulpa_nested_laplace` object (for diagnostics).
+#'   * `mode_theta`, `hessian_theta`: pilot-derived mode + FD Hessian.
+#'   * `inference_mode`: `"exact"`.
+#'   * `inference_tier`: `1L` (MH-corrected).
+#'   * `backend`: `"tgmrf_imh"`.
+#'
+#' @seealso [tulpa_nested_laplace()] for the grid-only Laplace,
+#'   [imh_laplace()] for the generic MH wrapper.
+#' @noRd
+.tgmrf_fit_imh <- function(y, n_trials, X, block,
+                            family = "binomial",
+                            phi = 1.0,
+                            re_idx = NULL, n_re_groups = 0L, sigma_re = 1.0,
+                            n_iter = 2000L, warmup = n_iter %/% 2L,
+                            thin = 1L, scale = 1.0,
+                            pilot_axis_points = 5L,
+                            fd_step = 0.05,
+                            max_iter = 50L, tol = 1e-7,
+                            n_threads = 1L,
+                            verbose = FALSE) {
+
+  if (!inherits(block, "tgmrf")) {
+    stop("`block` must be a tgmrf object.", call. = FALSE)
+  }
+
+  d <- block$theta_dim
+  N <- length(y)
+  obs_idx <- .tgmrf_obs_idx(block, N)
+
+  # --- 1. Pilot grid fit ----------------------------------------------------
+  pl <- .tgmrf_pilot(
+    y = y, n_trials = n_trials, X = X, block = block, obs_idx = obs_idx,
+    pilot_axis_points = pilot_axis_points,
+    re_idx = re_idx, n_re_groups = n_re_groups, sigma_re = sigma_re,
+    family = family, phi = phi,
+    max_iter = max_iter, tol = tol, n_threads = n_threads
+  )
+  pilot      <- pl$fit
+  theta_mode <- pl$theta_init
+
+  # --- 2. FD Hessian on log_marginal(theta) ---------------------------------
+  # Evaluate log_marginal at theta_mode +/- fd_step * e_j and cross-terms.
+  # log_marginal at a single theta is one inner Laplace solve. Shared builder
+  # (see .tgmrf_make_log_marginal); no bounds wall here -- the +/- fd_step
+  # steps stay near the interior pilot mode.
+  .lm <- .tgmrf_make_log_marginal(
+    y = y, n_trials = n_trials, X = X, block = block, obs_idx = obs_idx,
+    re_idx = re_idx, n_re_groups = n_re_groups, sigma_re = sigma_re,
+    family = family, phi = phi,
+    max_iter = max_iter, tol = tol, n_threads = n_threads
+  )
+  log_marginal_at <- .lm$eval
+
+  H_theta <- matrix(0, nrow = d, ncol = d,
+                    dimnames = list(block$theta_names, block$theta_names))
+  # Eager structural check at the feasible pilot mode (non-swallowing): a
+  # failure here is a bug, not numerical infeasibility -- surface it.
+  lm_centre <- .lm$raw(theta_mode)
+  if (!is.finite(lm_centre)) {
+    stop("Pilot log_marginal at the grid argmax is not finite -- ",
+         "tighten `bounds` or check the user `Q()`/`prior()`.", call. = FALSE)
+  }
+
+  for (j in seq_len(d)) {
+    e_j <- numeric(d); e_j[j] <- fd_step
+    lm_p <- log_marginal_at(theta_mode + e_j)
+    lm_m <- log_marginal_at(theta_mode - e_j)
+    # -log_marginal'' = -(lm_p - 2 lm_centre + lm_m) / h^2
+    H_theta[j, j] <- -(lm_p - 2 * lm_centre + lm_m) / fd_step^2
+  }
+  for (j in seq_len(d - 1L)) {
+    for (k in (j + 1L):d) {
+      e_j <- numeric(d); e_j[j] <- fd_step
+      e_k <- numeric(d); e_k[k] <- fd_step
+      lm_pp <- log_marginal_at(theta_mode + e_j + e_k)
+      lm_pm <- log_marginal_at(theta_mode + e_j - e_k)
+      lm_mp <- log_marginal_at(theta_mode - e_j + e_k)
+      lm_mm <- log_marginal_at(theta_mode - e_j - e_k)
+      # Mixed second derivative.
+      mixed <- (lm_pp - lm_pm - lm_mp + lm_mm) / (4 * fd_step^2)
+      H_theta[j, k] <- -mixed
+      H_theta[k, j] <- -mixed
+    }
+  }
+  H_theta <- 0.5 * (H_theta + t(H_theta))   # numerically symmetrise
+
+  # If the FD Hessian is not PD, ridge-regularise. Small positive jitter on
+  # the diagonal; for tgmrf the typical issue is grid coarseness, not the
+  # Hessian itself being non-existent.
+  ev <- eigen(H_theta, symmetric = TRUE, only.values = TRUE)$values
+  if (min(ev) < 1e-6) {
+    H_theta <- H_theta + diag(max(1e-3, 1e-3 - min(ev)), d)
+  }
+
+  # --- 3. IMH-Laplace over theta -------------------------------------------
+  mh <- imh_laplace(
+    log_posterior = log_marginal_at,
+    mode    = theta_mode,
+    hessian = H_theta,
+    n_iter  = n_iter,
+    warmup  = warmup,
+    thin    = thin,
+    scale   = scale,
+    verbose = verbose
+  )
+
+  draws <- mh$draws
+  colnames(draws) <- block$theta_names
+
+  fit <- list(
+    draws          = draws,
+    means          = colMeans(draws),
+    sds            = apply(draws, 2L, stats::sd),
+    n_params       = d,
+    n_samples      = nrow(draws),
+    mean_accept    = mh$mean_accept,
+    log_prob       = mh$log_prob,
+    pilot          = pilot,
+    mode_theta     = theta_mode,
+    hessian_theta  = H_theta,
+    inference_mode = "exact",
+    inference_tier = 1L,
+    backend        = "tgmrf_imh"
+  )
+  .finalize_fit(fit, draws_kind = "chain", extra_class = "tulpa_tgmrf")
+}

@@ -1,0 +1,832 @@
+<!DOCTYPE html>
+
+<html>
+
+<head>
+
+<meta charset="utf-8" />
+<meta name="generator" content="pandoc" />
+<meta http-equiv="X-UA-Compatible" content="IE=EDGE" />
+
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+
+
+
+<title>Inference modes: the three tiers and how to choose one</title>
+
+<script>// Pandoc 2.9 adds attributes on both header and div. We remove the former (to
+// be compatible with the behavior of Pandoc < 2.8).
+document.addEventListener('DOMContentLoaded', function(e) {
+  var hs = document.querySelectorAll("div.section[class*='level'] > :first-child");
+  var i, h, a;
+  for (i = 0; i < hs.length; i++) {
+    h = hs[i];
+    if (!/^h[1-6]$/i.test(h.tagName)) continue;  // it should be a header h1-h6
+    a = h.attributes;
+    while (a.length > 0) h.removeAttribute(a[0].name);
+  }
+});
+</script>
+
+<style type="text/css">
+code{white-space: pre-wrap;}
+span.smallcaps{font-variant: small-caps;}
+span.underline{text-decoration: underline;}
+div.column{display: inline-block; vertical-align: top; width: 50%;}
+div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+ul.task-list{list-style: none;}
+</style>
+
+
+
+<style type="text/css">
+code {
+white-space: pre;
+}
+.sourceCode {
+overflow: visible;
+}
+</style>
+<style type="text/css" data-origin="pandoc">
+html { -webkit-text-size-adjust: 100%; }
+pre > code.sourceCode { white-space: pre; position: relative; }
+pre > code.sourceCode > span { display: inline-block; line-height: 1.25; }
+pre > code.sourceCode > span:empty { height: 1.2em; }
+.sourceCode { overflow: visible; }
+code.sourceCode > span { color: inherit; text-decoration: inherit; }
+div.sourceCode { margin: 1em 0; }
+pre.sourceCode { margin: 0; }
+@media screen {
+div.sourceCode { overflow: auto; }
+}
+@media print {
+pre > code.sourceCode { white-space: pre-wrap; }
+pre > code.sourceCode > span { text-indent: -5em; padding-left: 5em; }
+}
+pre.numberSource code
+{ counter-reset: source-line 0; }
+pre.numberSource code > span
+{ position: relative; left: -4em; counter-increment: source-line; }
+pre.numberSource code > span > a:first-child::before
+{ content: counter(source-line);
+position: relative; left: -1em; text-align: right; vertical-align: baseline;
+border: none; display: inline-block;
+-webkit-touch-callout: none; -webkit-user-select: none;
+-khtml-user-select: none; -moz-user-select: none;
+-ms-user-select: none; user-select: none;
+padding: 0 4px; width: 4em;
+color: #aaaaaa;
+}
+pre.numberSource { margin-left: 3em; border-left: 1px solid #aaaaaa; padding-left: 4px; }
+div.sourceCode
+{ }
+@media screen {
+pre > code.sourceCode > span > a:first-child::before { text-decoration: underline; }
+}
+code span.al { color: #ff0000; font-weight: bold; } 
+code span.an { color: #60a0b0; font-weight: bold; font-style: italic; } 
+code span.at { color: #7d9029; } 
+code span.bn { color: #40a070; } 
+code span.bu { color: #008000; } 
+code span.cf { color: #007020; font-weight: bold; } 
+code span.ch { color: #4070a0; } 
+code span.cn { color: #880000; } 
+code span.co { color: #60a0b0; font-style: italic; } 
+code span.cv { color: #60a0b0; font-weight: bold; font-style: italic; } 
+code span.do { color: #ba2121; font-style: italic; } 
+code span.dt { color: #902000; } 
+code span.dv { color: #40a070; } 
+code span.er { color: #ff0000; font-weight: bold; } 
+code span.ex { } 
+code span.fl { color: #40a070; } 
+code span.fu { color: #06287e; } 
+code span.im { color: #008000; font-weight: bold; } 
+code span.in { color: #60a0b0; font-weight: bold; font-style: italic; } 
+code span.kw { color: #007020; font-weight: bold; } 
+code span.op { color: #666666; } 
+code span.ot { color: #007020; } 
+code span.pp { color: #bc7a00; } 
+code span.sc { color: #4070a0; } 
+code span.ss { color: #bb6688; } 
+code span.st { color: #4070a0; } 
+code span.va { color: #19177c; } 
+code span.vs { color: #4070a0; } 
+code span.wa { color: #60a0b0; font-weight: bold; font-style: italic; } 
+</style>
+<script>
+// apply pandoc div.sourceCode style to pre.sourceCode instead
+(function() {
+  var sheets = document.styleSheets;
+  for (var i = 0; i < sheets.length; i++) {
+    if (sheets[i].ownerNode.dataset["origin"] !== "pandoc") continue;
+    try { var rules = sheets[i].cssRules; } catch (e) { continue; }
+    var j = 0;
+    while (j < rules.length) {
+      var rule = rules[j];
+      // check if there is a div.sourceCode rule
+      if (rule.type !== rule.STYLE_RULE || rule.selectorText !== "div.sourceCode") {
+        j++;
+        continue;
+      }
+      var style = rule.style.cssText;
+      // check if color or background-color is set
+      if (rule.style.color === '' && rule.style.backgroundColor === '') {
+        j++;
+        continue;
+      }
+      // replace div.sourceCode by a pre.sourceCode rule
+      sheets[i].deleteRule(j);
+      sheets[i].insertRule('pre.sourceCode{' + style + '}', j);
+    }
+  }
+})();
+</script>
+
+
+
+
+<style type="text/css">body {
+background-color: #fff;
+margin: 1em auto;
+max-width: 700px;
+overflow: visible;
+padding-left: 2em;
+padding-right: 2em;
+font-family: "Open Sans", "Helvetica Neue", Helvetica, Arial, sans-serif;
+font-size: 14px;
+line-height: 1.35;
+}
+#TOC {
+clear: both;
+margin: 0 0 10px 10px;
+padding: 4px;
+width: 400px;
+border: 1px solid #CCCCCC;
+border-radius: 5px;
+background-color: #f6f6f6;
+font-size: 13px;
+line-height: 1.3;
+}
+#TOC .toctitle {
+font-weight: bold;
+font-size: 15px;
+margin-left: 5px;
+}
+#TOC ul {
+padding-left: 40px;
+margin-left: -1.5em;
+margin-top: 5px;
+margin-bottom: 5px;
+}
+#TOC ul ul {
+margin-left: -2em;
+}
+#TOC li {
+line-height: 16px;
+}
+table {
+margin: 1em auto;
+border-width: 1px;
+border-color: #DDDDDD;
+border-style: outset;
+border-collapse: collapse;
+}
+table th {
+border-width: 2px;
+padding: 5px;
+border-style: inset;
+}
+table td {
+border-width: 1px;
+border-style: inset;
+line-height: 18px;
+padding: 5px 5px;
+}
+table, table th, table td {
+border-left-style: none;
+border-right-style: none;
+}
+table thead, table tr.even {
+background-color: #f7f7f7;
+}
+p {
+margin: 0.5em 0;
+}
+blockquote {
+background-color: #f6f6f6;
+padding: 0.25em 0.75em;
+}
+hr {
+border-style: solid;
+border: none;
+border-top: 1px solid #777;
+margin: 28px 0;
+}
+dl {
+margin-left: 0;
+}
+dl dd {
+margin-bottom: 13px;
+margin-left: 13px;
+}
+dl dt {
+font-weight: bold;
+}
+ul {
+margin-top: 0;
+}
+ul li {
+list-style: circle outside;
+}
+ul ul {
+margin-bottom: 0;
+}
+pre, code {
+background-color: #f7f7f7;
+border-radius: 3px;
+color: #333;
+white-space: pre-wrap; 
+}
+pre {
+border-radius: 3px;
+margin: 5px 0px 10px 0px;
+padding: 10px;
+}
+pre:not([class]) {
+background-color: #f7f7f7;
+}
+code {
+font-family: Consolas, Monaco, 'Courier New', monospace;
+font-size: 85%;
+}
+p > code, li > code {
+padding: 2px 0px;
+}
+div.figure {
+text-align: center;
+}
+img {
+background-color: #FFFFFF;
+padding: 2px;
+border: 1px solid #DDDDDD;
+border-radius: 3px;
+border: 1px solid #CCCCCC;
+margin: 0 5px;
+}
+h1 {
+margin-top: 0;
+font-size: 35px;
+line-height: 40px;
+}
+h2 {
+border-bottom: 4px solid #f7f7f7;
+padding-top: 10px;
+padding-bottom: 2px;
+font-size: 145%;
+}
+h3 {
+border-bottom: 2px solid #f7f7f7;
+padding-top: 10px;
+font-size: 120%;
+}
+h4 {
+border-bottom: 1px solid #f7f7f7;
+margin-left: 8px;
+font-size: 105%;
+}
+h5, h6 {
+border-bottom: 1px solid #ccc;
+font-size: 105%;
+}
+a {
+color: #0033dd;
+text-decoration: none;
+}
+a:hover {
+color: #6666ff; }
+a:visited {
+color: #800080; }
+a:visited:hover {
+color: #BB00BB; }
+a[href^="http:"] {
+text-decoration: underline; }
+a[href^="https:"] {
+text-decoration: underline; }
+
+code > span.kw { color: #555; font-weight: bold; } 
+code > span.dt { color: #902000; } 
+code > span.dv { color: #40a070; } 
+code > span.bn { color: #d14; } 
+code > span.fl { color: #d14; } 
+code > span.ch { color: #d14; } 
+code > span.st { color: #d14; } 
+code > span.co { color: #888888; font-style: italic; } 
+code > span.ot { color: #007020; } 
+code > span.al { color: #ff0000; font-weight: bold; } 
+code > span.fu { color: #900; font-weight: bold; } 
+code > span.er { color: #a61717; background-color: #e3d2d2; } 
+</style>
+
+
+
+
+</head>
+
+<body>
+
+
+
+
+<h1 class="title toc-ignore">Inference modes: the three tiers and how to
+choose one</h1>
+
+
+
+<div class="sourceCode" id="cb1"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb1-1"><a href="#cb1-1" tabindex="-1"></a><span class="fu">library</span>(tulpa)</span></code></pre></div>
+<div id="why-the-inference-choice-matters" class="section level2">
+<h2>Why the inference choice matters</h2>
+<p>A fitted model is two things at once: a set of parameter estimates
+and a claim about how certain those estimates are. The estimates often
+agree across methods. The uncertainty does not. A Laplace approximation,
+a gradient sampler, and a variational fit can return the same posterior
+mean for a slope and still disagree about the width of its credible
+interval, the shape of its tail, and whether two parameters are
+correlated. The number you report as a 95% interval depends on which
+method produced it, and the methods do not all mean the same thing by
+“95%”.</p>
+<p>Most fitting interfaces hide this. You call a fit function, a default
+runs, and the output looks identical no matter which numerical engine
+did the work. The default is usually a reasonable one. The problem is
+that it is silent: when the default is wrong for your model, nothing in
+the output tells you, and the failure shows up downstream as an interval
+that is too narrow or a correlation that was never there.</p>
+<p>tulpa makes the choice explicit. Every fit carries the mode it ran,
+the tier that mode belongs to, and a recorded reason for the selection.
+The tier carries the weight, because it pins down what the credible
+intervals mean. Two backends sharing a tier offer the same epistemic
+warranty; a backend one rung higher offers a weaker one. That warranty
+reads straight off the fitted object, and <code>mode = &quot;auto&quot;</code>
+picks among tiers by a rule you can inspect rather than by a buried
+heuristic.</p>
+<p>This vignette walks through the tier system, the automatic selection
+rule, and the backends you can drive from R. It fits one model three
+ways and compares the estimates and the timing, so the
+cost-versus-guarantee trade is concrete rather than abstract. It closes
+with practical guidance: which mode to reach for, and at what point to
+move up a tier.</p>
+</div>
+<div id="the-three-tiers" class="section level2">
+<h2>The three tiers</h2>
+<p>tulpa sorts every inference backend into one of three tiers. The tier
+is not a speed label. The tier states how correct the uncertainty a
+backend reports actually is. <code>inference_mode_info()</code> prints
+the full map, tier by tier, with the guarantee attached to each.</p>
+<div class="sourceCode" id="cb2"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb2-1"><a href="#cb2-1" tabindex="-1"></a><span class="fu">inference_mode_info</span>()</span></code></pre></div>
+<p>The output names three tiers. Read them as a ladder of promises.</p>
+<p><strong>Tier 1, Exact.</strong> A Tier 1 backend draws from the
+posterior and its credible intervals are interpretable as posterior
+uncertainty, up to Monte Carlo error that shrinks as you draw more
+samples. This is the reference standard: if you want an interval you can
+quote without an asterisk, a Tier 1 fit gives it to you. The cost is
+iteration. Every draw is a likelihood evaluation, sometimes a gradient
+evaluation, and you need many of them. MALA and the independence-MH
+samplers live here, along with the Polya-Gamma Gibbs sampler for the
+families that admit it.</p>
+<p><strong>Tier 2, Structured.</strong> A Tier 2 backend is accurate
+conditional on an explicit structural assumption. The Laplace
+approximation assumes the posterior is Gaussian near its mode.
+Pathfinder fits a Gaussian along an optimisation path. When the
+assumption holds, and for a latent Gaussian model with enough data it
+usually does, the fit is fast and its intervals are close to the exact
+ones. When the assumption fails, the failure is predictable: a skewed
+posterior gets symmetrised, a heavy tail gets clipped. You can see it
+coming from the model, and you can check it by comparing against a Tier
+1 fit. The promise is conditional, and the condition is stated.</p>
+<p><strong>Tier 3, Optimized.</strong> A Tier 3 backend gives a point
+estimate and a covariance from an optimisation objective with no general
+correctness guarantee on the uncertainty. The mode is usually good. The
+spread is often too small, the tails unreliable, the correlations
+approximate, and the failure is typically silent. Generic variational
+inference sits here. Tier 3 is optimisation, not sampling, and tulpa
+treats it as a deliberate choice rather than a fallback, reachable only
+by asking for it by name.</p>
+<p>The ladder runs from a promise you can quote, through a promise with
+a stated condition, to a tool with no promise on its uncertainty. Moving
+up a tier costs computation and buys a stronger guarantee. The point of
+the system is that the guarantee is never traded away without a record
+of the trade.</p>
+<p>The design follows four rules, and they are worth stating because
+they explain why the tier shows up on every fit. First, a mode changes
+the meaning of the output, not just its runtime: an interval from the
+optimised tier does not mean what an interval from the exact tier means,
+so the two must be distinguishable. Second, the mode is always visible
+in the result. Third, there is no silent upgrading or downgrading
+between tiers; if an exact fit fails, the call errors rather than
+quietly substituting a structured approximation and handing back numbers
+that look the same but promise less. Fourth, adding a backend slots it
+into an existing tier and never invents a new kind of promise, so the
+three guarantees above are the whole vocabulary. Tier membership for
+each backend is derived from a single registry, which is why
+<code>inference_mode_info()</code> and the field on a fit can never
+drift apart.</p>
+</div>
+<div id="how-mode-auto-chooses" class="section level2">
+<h2>How <code>mode = &quot;auto&quot;</code> chooses</h2>
+<p>The default mode is <code>&quot;auto&quot;</code>. Its contract is one
+sentence: use the most reliable method that is expected to finish for
+this model. Two parts of that sentence carry weight. “Most reliable”
+means it prefers Tier 1 over Tier 2 when both are feasible. “Expected to
+finish” means it steps down to Tier 2 when a Tier 1 sampler would be too
+slow to be practical. The rule never reaches Tier 3. The optimisation
+tier is never selected on your behalf, because its silent under-coverage
+is exactly the failure an automatic default should not introduce.</p>
+<p>The decision is deterministic and depends on the model, not on
+chance. Two properties drive it: structure and size. A latent prior
+block goes to nested Laplace, the designed Tier 2 hot path for latent
+Gaussian structure. A spatial field branches by its kind, with a
+binomial areal field handed to the exact component-wise Polya-Gamma
+Gibbs sampler (Tier 1) and most other fields sent to nested-Laplace
+integration of the spatial hyperparameter (Tier 2). An ordinary model
+carrying neither spatial nor latent structure heads for a full sampler,
+unless the dataset grows past tens of thousands of rows, where the
+Laplace path takes over because a sampler would no longer finish quickly
+enough to serve as a default.</p>
+<p>Every fit records the reason. The <code>selection_reason</code> field
+is a short string explaining the branch that was taken, and
+<code>backend</code> and <code>inference_tier</code> report the result.
+Take a binomial areal model: twenty regions on a ring, each adjacent to
+its two neighbours, with a latent field that varies smoothly around the
+loop.</p>
+<div class="sourceCode" id="cb3"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb3-1"><a href="#cb3-1" tabindex="-1"></a>n <span class="ot">&lt;-</span> <span class="dv">400</span><span class="dt">L</span>; K <span class="ot">&lt;-</span> <span class="dv">20</span><span class="dt">L</span></span>
+<span id="cb3-2"><a href="#cb3-2" tabindex="-1"></a>W <span class="ot">&lt;-</span> <span class="fu">matrix</span>(<span class="dv">0</span>, K, K)</span>
+<span id="cb3-3"><a href="#cb3-3" tabindex="-1"></a><span class="cf">for</span> (i <span class="cf">in</span> <span class="dv">1</span><span class="sc">:</span>K) { j <span class="ot">&lt;-</span> <span class="cf">if</span> (i <span class="sc">&lt;</span> K) i <span class="sc">+</span> <span class="dv">1</span><span class="dt">L</span> <span class="cf">else</span> <span class="dv">1</span><span class="dt">L</span>; W[i, j] <span class="ot">&lt;-</span> W[j, i] <span class="ot">&lt;-</span> <span class="dv">1</span> }</span>
+<span id="cb3-4"><a href="#cb3-4" tabindex="-1"></a>x      <span class="ot">&lt;-</span> <span class="fu">rnorm</span>(n)</span>
+<span id="cb3-5"><a href="#cb3-5" tabindex="-1"></a>region <span class="ot">&lt;-</span> <span class="fu">factor</span>(<span class="fu">sample</span>(<span class="dv">1</span><span class="sc">:</span>K, n, <span class="at">replace =</span> <span class="cn">TRUE</span>))</span>
+<span id="cb3-6"><a href="#cb3-6" tabindex="-1"></a>field  <span class="ot">&lt;-</span> <span class="fu">as.numeric</span>(<span class="fu">scale</span>(<span class="fu">sin</span>(<span class="dv">2</span> <span class="sc">*</span> pi <span class="sc">*</span> (<span class="dv">1</span><span class="sc">:</span>K) <span class="sc">/</span> K)))[region]</span>
+<span id="cb3-7"><a href="#cb3-7" tabindex="-1"></a>ds <span class="ot">&lt;-</span> <span class="fu">data.frame</span>(<span class="at">y =</span> <span class="fu">rbinom</span>(n, <span class="dv">1</span>, <span class="fu">plogis</span>(<span class="sc">-</span><span class="fl">0.2</span> <span class="sc">+</span> <span class="fl">0.7</span> <span class="sc">*</span> x <span class="sc">+</span> field)),</span>
+<span id="cb3-8"><a href="#cb3-8" tabindex="-1"></a>                 <span class="at">x =</span> x, <span class="at">region =</span> region)</span></code></pre></div>
+<p>Fitting with <code>mode = &quot;auto&quot;</code> lets the rule pick. For a
+binomial ICAR field it selects the exact Polya-Gamma Gibbs sampler, a
+Tier 1 backend, and says so.</p>
+<div class="sourceCode" id="cb4"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb4-1"><a href="#cb4-1" tabindex="-1"></a>fit_auto <span class="ot">&lt;-</span> <span class="fu">tulpa</span>(y <span class="sc">~</span> x <span class="sc">+</span> <span class="fu">spatial</span>(region), <span class="at">data =</span> ds, <span class="at">family =</span> <span class="st">&quot;binomial&quot;</span>,</span>
+<span id="cb4-2"><a href="#cb4-2" tabindex="-1"></a>                  <span class="at">spatial =</span> <span class="fu">list</span>(<span class="at">type =</span> <span class="st">&quot;icar&quot;</span>, <span class="at">adjacency =</span> W), <span class="at">mode =</span> <span class="st">&quot;auto&quot;</span>)</span>
+<span id="cb4-3"><a href="#cb4-3" tabindex="-1"></a><span class="fu">c</span>(<span class="at">backend =</span> fit_auto<span class="sc">$</span>backend, <span class="at">tier =</span> fit_auto<span class="sc">$</span>inference_tier)</span>
+<span id="cb4-4"><a href="#cb4-4" tabindex="-1"></a>fit_auto<span class="sc">$</span>selection_reason</span></code></pre></div>
+<p>Auto reached for the most reliable method, Tier 1, because for this
+model class an exact sampler is both available and fast. A binomial
+likelihood with an areal field admits the Polya-Gamma data augmentation,
+which turns each conditional update into a Gaussian draw, and the field
+components update one at a time. Those component-wise updates sidestep
+the dimensionality that would slow a general gradient sampler on a field
+of this size, so the exact route is also the practical one. The rule saw
+a case where the strongest guarantee was affordable and took it. Now
+change the situation to a large, plain Gaussian model where a full
+sampler would be slow.</p>
+<div class="sourceCode" id="cb5"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb5-1"><a href="#cb5-1" tabindex="-1"></a>nL <span class="ot">&lt;-</span> <span class="dv">60000</span><span class="dt">L</span></span>
+<span id="cb5-2"><a href="#cb5-2" tabindex="-1"></a>xL <span class="ot">&lt;-</span> <span class="fu">rnorm</span>(nL)</span>
+<span id="cb5-3"><a href="#cb5-3" tabindex="-1"></a>dL <span class="ot">&lt;-</span> <span class="fu">data.frame</span>(<span class="at">y =</span> <span class="fl">0.5</span> <span class="sc">+</span> <span class="fl">1.2</span> <span class="sc">*</span> xL <span class="sc">+</span> <span class="fu">rnorm</span>(nL, <span class="at">sd =</span> <span class="fl">0.8</span>), <span class="at">x =</span> xL)</span>
+<span id="cb5-4"><a href="#cb5-4" tabindex="-1"></a>fit_big <span class="ot">&lt;-</span> <span class="fu">tulpa</span>(y <span class="sc">~</span> x, <span class="at">data =</span> dL, <span class="at">family =</span> <span class="st">&quot;gaussian&quot;</span>, <span class="at">mode =</span> <span class="st">&quot;auto&quot;</span>,</span>
+<span id="cb5-5"><a href="#cb5-5" tabindex="-1"></a>                 <span class="at">phi =</span> <span class="fl">0.8</span>)</span>
+<span id="cb5-6"><a href="#cb5-6" tabindex="-1"></a><span class="fu">c</span>(<span class="at">backend =</span> fit_big<span class="sc">$</span>backend, <span class="at">tier =</span> fit_big<span class="sc">$</span>inference_tier)</span>
+<span id="cb5-7"><a href="#cb5-7" tabindex="-1"></a>fit_big<span class="sc">$</span>selection_reason</span></code></pre></div>
+<p>Here auto stepped down to the Laplace path. The reason names the
+dataset size: at sixty thousand rows the rule judges a full sampler too
+slow to be the sensible default and takes the Tier 2 route instead,
+which for a Gaussian likelihood is exact anyway. The estimates land on
+the truth.</p>
+<div class="sourceCode" id="cb6"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb6-1"><a href="#cb6-1" tabindex="-1"></a><span class="fu">coef</span>(fit_big)</span></code></pre></div>
+<p>Two models, two different branches, each recorded. The same rule that
+picked an exact sampler for the small spatial model picked the
+structured approximation for the large plain one, and in both cases the
+choice traces to a property of the model you can name in advance. That
+predictability is the whole point. You are never left guessing which
+engine ran, and you can reason about what auto will do before you call
+it. When you disagree with the choice, override it by passing a tier
+(<code>&quot;exact&quot;</code> or <code>&quot;structured&quot;</code>) or a backend name
+directly, and the fit records that you overrode it rather than papering
+over the change.</p>
+</div>
+<div id="the-r-callable-backends" class="section level2">
+<h2>The R-callable backends</h2>
+<p>A backend is the concrete algorithm a mode resolves to. tulpa
+registers more backends than it exposes from R: several ship a C++
+kernel reachable by model packages that link against tulpa, with no R
+entry point yet. The <code>inference_mode_info()</code> map tags each
+one, <code>[R]</code> for callable from R and <code>[C-ABI]</code> for
+the kernel-only ones. Asking for a C-ABI backend by name from R errors
+with a message that names the missing entry point rather than pretending
+to dispatch. This section covers the backends you can drive from R
+today.</p>
+<div id="laplace-tier-2" class="section level3">
+<h3>laplace (Tier 2)</h3>
+<p>The workhorse. <code>mode = &quot;laplace&quot;</code> finds the posterior mode
+and the curvature there, then reports a Gaussian centred at the mode
+with that curvature as its precision. For a Gaussian likelihood this is
+exact and returns immediately. For other families it is the Gaussian
+approximation to the posterior, accurate when the posterior is close to
+Gaussian.</p>
+<div class="sourceCode" id="cb7"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb7-1"><a href="#cb7-1" tabindex="-1"></a><span class="fu">set.seed</span>(<span class="dv">101</span>)</span>
+<span id="cb7-2"><a href="#cb7-2" tabindex="-1"></a>g  <span class="ot">&lt;-</span> <span class="fu">factor</span>(<span class="fu">sample</span>(<span class="dv">1</span><span class="sc">:</span><span class="dv">12</span>, n, <span class="at">replace =</span> <span class="cn">TRUE</span>))</span>
+<span id="cb7-3"><a href="#cb7-3" tabindex="-1"></a>u  <span class="ot">&lt;-</span> <span class="fu">rnorm</span>(<span class="dv">12</span>, <span class="at">sd =</span> <span class="fl">0.6</span>)</span>
+<span id="cb7-4"><a href="#cb7-4" tabindex="-1"></a>db <span class="ot">&lt;-</span> <span class="fu">data.frame</span>(<span class="at">y =</span> <span class="fu">rbinom</span>(n, <span class="dv">1</span>, <span class="fu">plogis</span>(<span class="sc">-</span><span class="fl">0.3</span> <span class="sc">+</span> <span class="fl">1.0</span> <span class="sc">*</span> x <span class="sc">+</span> u[g])),</span>
+<span id="cb7-5"><a href="#cb7-5" tabindex="-1"></a>                 <span class="at">x =</span> x, <span class="at">g =</span> g)</span>
+<span id="cb7-6"><a href="#cb7-6" tabindex="-1"></a>fit_lap <span class="ot">&lt;-</span> <span class="fu">tulpa</span>(y <span class="sc">~</span> x <span class="sc">+</span> (<span class="dv">1</span> <span class="sc">|</span> g), <span class="at">data =</span> db, <span class="at">family =</span> <span class="st">&quot;binomial&quot;</span>,</span>
+<span id="cb7-7"><a href="#cb7-7" tabindex="-1"></a>                 <span class="at">mode =</span> <span class="st">&quot;laplace&quot;</span>, <span class="at">sigma_re =</span> <span class="fl">0.6</span>)</span>
+<span id="cb7-8"><a href="#cb7-8" tabindex="-1"></a><span class="fu">coef</span>(fit_lap)</span></code></pre></div>
+<p>The Laplace fit is deterministic, carries no Monte Carlo error, and
+its <code>logLik()</code> is the approximate log marginal likelihood,
+the model evidence that <code>compare_models()</code> uses. This is the
+first fit to run, every time, as the fast sanity check and the
+comparison baseline.</p>
+</div>
+<div id="pathfinder-tier-2" class="section level3">
+<h3>pathfinder (Tier 2)</h3>
+<p>Pathfinder runs a quasi-Newton optimiser toward the mode, fits a
+Gaussian at the optimum from the inverse-Hessian estimate it accumulates
+along the way, and returns draws from that Gaussian plus an ELBO score.
+It sits in the same tier as Laplace: the output is a Gaussian
+approximation, not exact samples. What it adds over a plain Laplace fit
+is a set of draws and a diagnostic. The draws make it a drop-in where
+downstream code expects samples, and the ELBO gauges how well the
+Gaussian fits.</p>
+<div class="sourceCode" id="cb8"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb8-1"><a href="#cb8-1" tabindex="-1"></a>fit_pf <span class="ot">&lt;-</span> <span class="fu">tulpa</span>(y <span class="sc">~</span> x <span class="sc">+</span> (<span class="dv">1</span> <span class="sc">|</span> g), <span class="at">data =</span> db, <span class="at">family =</span> <span class="st">&quot;binomial&quot;</span>,</span>
+<span id="cb8-2"><a href="#cb8-2" tabindex="-1"></a>                <span class="at">mode =</span> <span class="st">&quot;pathfinder&quot;</span>, <span class="at">sigma_re =</span> <span class="fl">0.6</span>,</span>
+<span id="cb8-3"><a href="#cb8-3" tabindex="-1"></a>                <span class="at">control =</span> <span class="fu">list</span>(<span class="at">n_draws =</span> <span class="dv">450</span>))</span>
+<span id="cb8-4"><a href="#cb8-4" tabindex="-1"></a><span class="fu">coef</span>(fit_pf)</span>
+<span id="cb8-5"><a href="#cb8-5" tabindex="-1"></a>fit_pf<span class="sc">$</span>elbo</span></code></pre></div>
+<p>Pathfinder fits three situations well: you want draws but not the
+cost of full MCMC, you need a warm start for a sampler, or you want a
+quick check on whether the Laplace Gaussian is reasonable.</p>
+</div>
+<div id="mala-tier-1" class="section level3">
+<h3>mala (Tier 1)</h3>
+<p>The Metropolis-adjusted Langevin algorithm is a gradient sampler.
+Each step proposes a move along the gradient of the log posterior and
+accepts or rejects it with a Metropolis step, which makes the chain
+asymptotically correct. Each iteration runs cheaper than full
+Hamiltonian Monte Carlo because no leapfrog trajectory needs
+integrating, and mixing beats a random walk because the drift term
+nudges proposals toward higher density. The step size adapts during
+warmup toward an acceptance rate near 0.574.</p>
+<div class="sourceCode" id="cb9"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb9-1"><a href="#cb9-1" tabindex="-1"></a>fit_mala <span class="ot">&lt;-</span> <span class="fu">tulpa</span>(y <span class="sc">~</span> x <span class="sc">+</span> (<span class="dv">1</span> <span class="sc">|</span> g), <span class="at">data =</span> db, <span class="at">family =</span> <span class="st">&quot;binomial&quot;</span>,</span>
+<span id="cb9-2"><a href="#cb9-2" tabindex="-1"></a>                  <span class="at">mode =</span> <span class="st">&quot;mala&quot;</span>, <span class="at">sigma_re =</span> <span class="fl">0.6</span>,</span>
+<span id="cb9-3"><a href="#cb9-3" tabindex="-1"></a>                  <span class="at">control =</span> <span class="fu">list</span>(<span class="at">n_iter =</span> <span class="dv">450</span>, <span class="at">warmup =</span> <span class="dv">150</span>))</span>
+<span id="cb9-4"><a href="#cb9-4" tabindex="-1"></a><span class="fu">coef</span>(fit_mala)</span>
+<span id="cb9-5"><a href="#cb9-5" tabindex="-1"></a>fit_mala<span class="sc">$</span>mean_accept</span></code></pre></div>
+<p>MALA earns its keep when you want exact posterior moments at moderate
+dimension and the posterior is not so badly scaled that a single step
+size struggles across all directions. The acceptance rate is the
+diagnostic: far below the target means the chain needs a smaller step or
+more warmup.</p>
+</div>
+<div id="imh_laplace-tier-1" class="section level3">
+<h3>imh_laplace (Tier 1)</h3>
+<p>Independence Metropolis-Hastings with a Laplace proposal is the
+cheapest route to exact-tier draws when Laplace is almost right. It
+builds the Laplace mode and precision once, then proposes from that
+Gaussian and corrects with a Metropolis step. The proposal ignores the
+current state, so the iterations are nearly free and the acceptance rate
+doubles as a verdict on the Laplace approximation: high acceptance means
+the posterior is close to the Gaussian, low acceptance means it is far
+and Laplace was biased.</p>
+<div class="sourceCode" id="cb10"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb10-1"><a href="#cb10-1" tabindex="-1"></a>fit_imh <span class="ot">&lt;-</span> <span class="fu">tulpa</span>(y <span class="sc">~</span> x <span class="sc">+</span> (<span class="dv">1</span> <span class="sc">|</span> g), <span class="at">data =</span> db, <span class="at">family =</span> <span class="st">&quot;binomial&quot;</span>,</span>
+<span id="cb10-2"><a href="#cb10-2" tabindex="-1"></a>                 <span class="at">mode =</span> <span class="st">&quot;imh_laplace&quot;</span>, <span class="at">sigma_re =</span> <span class="fl">0.6</span>,</span>
+<span id="cb10-3"><a href="#cb10-3" tabindex="-1"></a>                 <span class="at">control =</span> <span class="fu">list</span>(<span class="at">n_iter =</span> <span class="dv">450</span>, <span class="at">warmup =</span> <span class="dv">150</span>))</span>
+<span id="cb10-4"><a href="#cb10-4" tabindex="-1"></a><span class="fu">coef</span>(fit_imh)</span>
+<span id="cb10-5"><a href="#cb10-5" tabindex="-1"></a>fit_imh<span class="sc">$</span>mean_accept</span></code></pre></div>
+<p>The acceptance here is high, which says the Laplace fit was already
+close. Two jobs suit <code>imh_laplace</code>: debiasing a Laplace fit
+at low parameter dimension, and repeated-fit workflows such as
+cross-validation where a full sampler’s startup cost would dominate.</p>
+</div>
+<div id="gibbs-tier-1" class="section level3">
+<h3>gibbs (Tier 1)</h3>
+<p>The Gibbs backend is the Polya-Gamma sampler for binomial and
+negative binomial responses, including the binomial areal spatial models
+that <code>mode = &quot;auto&quot;</code> selects it for. It samples the
+random-effect standard deviation rather than conditioning on a fixed
+<code>sigma_re</code>, which is why the spatial fit earlier reported a
+Gibbs backend. Its output carries the fixed effects in
+<code>$beta</code> and the field and variance components alongside.</p>
+<div class="sourceCode" id="cb11"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb11-1"><a href="#cb11-1" tabindex="-1"></a><span class="fu">round</span>(fit_auto<span class="sc">$</span>beta, <span class="dv">3</span>)</span></code></pre></div>
+<p>Gibbs is the right call when the family is conjugate-friendly under
+the Polya-Gamma scheme and you want an exact fit that samples the
+variance rather than fixing it. For a binomial areal field, auto takes
+this path on its own.</p>
+</div>
+<div id="re_cov_nested-and-agq-tier-2" class="section level3">
+<h3>re_cov_nested and agq (Tier 2)</h3>
+<p>Two further Tier 2 backends serve narrower roles.
+<code>re_cov_nested</code> integrates a random-effect covariance matrix
+rather than conditioning on a fixed standard deviation. A random-slope
+term such as <code>(1 + x | g)</code> has no scalar
+<code>sigma_re</code> to condition on, so when a slope term is present
+the Laplace path redirects to this backend automatically and integrates
+the covariance with a CCD design and a PC or LKJ prior. You reach it not
+by name but by writing a slope term and fitting at
+<code>mode = &quot;laplace&quot;</code>.</p>
+<div class="sourceCode" id="cb12"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb12-1"><a href="#cb12-1" tabindex="-1"></a><span class="fu">set.seed</span>(<span class="dv">20260531</span>)</span>
+<span id="cb12-2"><a href="#cb12-2" tabindex="-1"></a>ng <span class="ot">&lt;-</span> <span class="dv">60</span>; ni <span class="ot">&lt;-</span> <span class="dv">15</span></span>
+<span id="cb12-3"><a href="#cb12-3" tabindex="-1"></a>g   <span class="ot">&lt;-</span> <span class="fu">rep</span>(<span class="fu">seq_len</span>(ng), <span class="at">each =</span> ni)</span>
+<span id="cb12-4"><a href="#cb12-4" tabindex="-1"></a>xg  <span class="ot">&lt;-</span> <span class="fu">rnorm</span>(ng <span class="sc">*</span> ni)</span>
+<span id="cb12-5"><a href="#cb12-5" tabindex="-1"></a>Sig <span class="ot">&lt;-</span> <span class="fu">matrix</span>(<span class="fu">c</span>(<span class="fl">0.9</span><span class="sc">^</span><span class="dv">2</span>,            <span class="fl">0.5</span> <span class="sc">*</span> <span class="fl">0.9</span> <span class="sc">*</span> <span class="fl">0.6</span>,</span>
+<span id="cb12-6"><a href="#cb12-6" tabindex="-1"></a>                <span class="fl">0.5</span> <span class="sc">*</span> <span class="fl">0.9</span> <span class="sc">*</span> <span class="fl">0.6</span>,  <span class="fl">0.6</span><span class="sc">^</span><span class="dv">2</span>), <span class="dv">2</span>)</span>
+<span id="cb12-7"><a href="#cb12-7" tabindex="-1"></a>b   <span class="ot">&lt;-</span> <span class="fu">matrix</span>(<span class="fu">rnorm</span>(ng <span class="sc">*</span> <span class="dv">2</span>), ng) <span class="sc">%*%</span> <span class="fu">chol</span>(Sig)</span>
+<span id="cb12-8"><a href="#cb12-8" tabindex="-1"></a>eta <span class="ot">&lt;-</span> <span class="sc">-</span><span class="fl">0.2</span> <span class="sc">+</span> <span class="fl">0.7</span> <span class="sc">*</span> xg <span class="sc">+</span> b[g, <span class="dv">1</span>] <span class="sc">+</span> b[g, <span class="dv">2</span>] <span class="sc">*</span> xg</span>
+<span id="cb12-9"><a href="#cb12-9" tabindex="-1"></a>dsl <span class="ot">&lt;-</span> <span class="fu">data.frame</span>(<span class="at">y =</span> <span class="fu">rbinom</span>(ng <span class="sc">*</span> ni, <span class="dv">1</span>, <span class="fu">plogis</span>(eta)),</span>
+<span id="cb12-10"><a href="#cb12-10" tabindex="-1"></a>                  <span class="at">x =</span> xg, <span class="at">g =</span> <span class="fu">factor</span>(g))</span>
+<span id="cb12-11"><a href="#cb12-11" tabindex="-1"></a></span>
+<span id="cb12-12"><a href="#cb12-12" tabindex="-1"></a>fit_rc <span class="ot">&lt;-</span> <span class="fu">tulpa</span>(y <span class="sc">~</span> x <span class="sc">+</span> (<span class="dv">1</span> <span class="sc">+</span> x <span class="sc">|</span> g), <span class="at">data =</span> dsl,</span>
+<span id="cb12-13"><a href="#cb12-13" tabindex="-1"></a>                <span class="at">family =</span> <span class="st">&quot;binomial&quot;</span>, <span class="at">mode =</span> <span class="st">&quot;laplace&quot;</span>)</span>
+<span id="cb12-14"><a href="#cb12-14" tabindex="-1"></a>fit_rc<span class="sc">$</span>backend</span></code></pre></div>
+<p>The slope term routed the fit to <code>re_cov_nested</code> without
+being named. What comes back is the integrated covariance, not a point
+estimate of one: a 2x2 matrix carrying the intercept and slope variances
+on its diagonal and their covariance off it.</p>
+<div class="sourceCode" id="cb13"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb13-1"><a href="#cb13-1" tabindex="-1"></a><span class="fu">round</span>(fit_rc<span class="sc">$</span>Sigma_mean, <span class="dv">3</span>)</span></code></pre></div>
+<p>Integrating the covariance through a Gaussian grid over the
+hyperparameters means the fit carries a Pareto-k-hat accuracy
+diagnostic, the nested-approximation counterpart to the Rhat a sampler
+reports.</p>
+<div class="sourceCode" id="cb14"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb14-1"><a href="#cb14-1" tabindex="-1"></a><span class="fu">round</span>(fit_rc<span class="sc">$</span>pareto_k, <span class="dv">2</span>)</span></code></pre></div>
+<p>Here k-hat sits below the 0.7 threshold, so the Gaussian grid fits
+the covariance posterior well and the integrated matrix can be trusted.
+With smaller groups or sparser binary data that posterior turns skewed
+and k-hat climbs past 0.7 – not a defect but the signal to escalate to
+the exact debias, <code>control = list(re_cov = &quot;gibbs&quot;)</code>, which
+replaces the deterministic integration with a Metropolis-within-Gibbs
+sweep and a conjugate inverse-Wishart draw for the covariance.</p>
+<p>The adaptive Gauss-Hermite quadrature backend, <code>agq</code>,
+integrates a random-intercept variance by quadrature and is callable
+through its fitter <code>agq_fit()</code> for the single-grouping case
+rather than through <code>tulpa()</code>.</p>
+</div>
+<div id="ep-tier-2" class="section level3">
+<h3>ep (Tier 2)</h3>
+<p>Expectation Propagation approximates the posterior of a fixed-effect
+GLM by a Gaussian whose per-observation sites match the moments of the
+tilted distribution, rather than the mode curvature Laplace uses. It is
+exact when the likelihood is Gaussian and is typically more accurate
+than Laplace on a skewed GLM likelihood. EP fits fixed effects only (no
+random-effect, spatial, or latent structure); reach it with
+<code>mode = &quot;ep&quot;</code> or call <code>tulpa_ep()</code> directly.</p>
+<div class="sourceCode" id="cb15"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb15-1"><a href="#cb15-1" tabindex="-1"></a>fit_ep <span class="ot">&lt;-</span> <span class="fu">tulpa</span>(y <span class="sc">~</span> x, <span class="at">data =</span> d, <span class="at">family =</span> <span class="st">&quot;binomial&quot;</span>, <span class="at">mode =</span> <span class="st">&quot;ep&quot;</span>)</span>
+<span id="cb15-2"><a href="#cb15-2" tabindex="-1"></a><span class="fu">coef</span>(fit_ep)</span></code></pre></div>
+<p>The R-callable backends span both exact tiers and the structured
+tier. The next section puts three of them on the same model so the trade
+between cost and guarantee is visible in numbers.</p>
+</div>
+</div>
+<div id="cost-versus-guarantee" class="section level2">
+<h2>Cost versus guarantee</h2>
+<p>The clearest way to see what a tier buys is to fit one model several
+ways and lay the results side by side. Take the binomial
+random-intercept model from above and fit it at Laplace, MALA, and
+Pathfinder, timing each with <code>system.time()</code>.</p>
+<div class="sourceCode" id="cb16"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb16-1"><a href="#cb16-1" tabindex="-1"></a>t_lap  <span class="ot">&lt;-</span> <span class="fu">system.time</span>(</span>
+<span id="cb16-2"><a href="#cb16-2" tabindex="-1"></a>  f_lap  <span class="ot">&lt;-</span> <span class="fu">tulpa</span>(y <span class="sc">~</span> x <span class="sc">+</span> (<span class="dv">1</span> <span class="sc">|</span> g), <span class="at">data =</span> db, <span class="at">family =</span> <span class="st">&quot;binomial&quot;</span>,</span>
+<span id="cb16-3"><a href="#cb16-3" tabindex="-1"></a>                  <span class="at">mode =</span> <span class="st">&quot;laplace&quot;</span>, <span class="at">sigma_re =</span> <span class="fl">0.6</span>))[[<span class="st">&quot;elapsed&quot;</span>]]</span>
+<span id="cb16-4"><a href="#cb16-4" tabindex="-1"></a>t_mala <span class="ot">&lt;-</span> <span class="fu">system.time</span>(</span>
+<span id="cb16-5"><a href="#cb16-5" tabindex="-1"></a>  f_mala <span class="ot">&lt;-</span> <span class="fu">tulpa</span>(y <span class="sc">~</span> x <span class="sc">+</span> (<span class="dv">1</span> <span class="sc">|</span> g), <span class="at">data =</span> db, <span class="at">family =</span> <span class="st">&quot;binomial&quot;</span>,</span>
+<span id="cb16-6"><a href="#cb16-6" tabindex="-1"></a>                  <span class="at">mode =</span> <span class="st">&quot;mala&quot;</span>, <span class="at">sigma_re =</span> <span class="fl">0.6</span>,</span>
+<span id="cb16-7"><a href="#cb16-7" tabindex="-1"></a>                  <span class="at">control =</span> <span class="fu">list</span>(<span class="at">n_iter =</span> <span class="dv">450</span>, <span class="at">warmup =</span> <span class="dv">150</span>)))[[<span class="st">&quot;elapsed&quot;</span>]]</span>
+<span id="cb16-8"><a href="#cb16-8" tabindex="-1"></a>t_pf   <span class="ot">&lt;-</span> <span class="fu">system.time</span>(</span>
+<span id="cb16-9"><a href="#cb16-9" tabindex="-1"></a>  f_pf   <span class="ot">&lt;-</span> <span class="fu">tulpa</span>(y <span class="sc">~</span> x <span class="sc">+</span> (<span class="dv">1</span> <span class="sc">|</span> g), <span class="at">data =</span> db, <span class="at">family =</span> <span class="st">&quot;binomial&quot;</span>,</span>
+<span id="cb16-10"><a href="#cb16-10" tabindex="-1"></a>                  <span class="at">mode =</span> <span class="st">&quot;pathfinder&quot;</span>, <span class="at">sigma_re =</span> <span class="fl">0.6</span>,</span>
+<span id="cb16-11"><a href="#cb16-11" tabindex="-1"></a>                  <span class="at">control =</span> <span class="fu">list</span>(<span class="at">n_draws =</span> <span class="dv">450</span>)))[[<span class="st">&quot;elapsed&quot;</span>]]</span></code></pre></div>
+<p>Collect the slope estimate, its standard error, the tier, and the
+elapsed time into one table.</p>
+<div class="sourceCode" id="cb17"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb17-1"><a href="#cb17-1" tabindex="-1"></a>slope_se <span class="ot">&lt;-</span> <span class="cf">function</span>(f) <span class="fu">summary</span>(f)[<span class="st">&quot;x&quot;</span>, <span class="st">&quot;std.error&quot;</span>]</span>
+<span id="cb17-2"><a href="#cb17-2" tabindex="-1"></a><span class="fu">data.frame</span>(</span>
+<span id="cb17-3"><a href="#cb17-3" tabindex="-1"></a>  <span class="at">backend  =</span> <span class="fu">c</span>(f_lap<span class="sc">$</span>backend, f_mala<span class="sc">$</span>backend, f_pf<span class="sc">$</span>backend),</span>
+<span id="cb17-4"><a href="#cb17-4" tabindex="-1"></a>  <span class="at">tier     =</span> <span class="fu">c</span>(f_lap<span class="sc">$</span>inference_tier, f_mala<span class="sc">$</span>inference_tier,</span>
+<span id="cb17-5"><a href="#cb17-5" tabindex="-1"></a>               f_pf<span class="sc">$</span>inference_tier),</span>
+<span id="cb17-6"><a href="#cb17-6" tabindex="-1"></a>  <span class="at">slope    =</span> <span class="fu">round</span>(<span class="fu">c</span>(<span class="fu">coef</span>(f_lap)[<span class="st">&quot;x&quot;</span>], <span class="fu">coef</span>(f_mala)[<span class="st">&quot;x&quot;</span>],</span>
+<span id="cb17-7"><a href="#cb17-7" tabindex="-1"></a>                     <span class="fu">coef</span>(f_pf)[<span class="st">&quot;x&quot;</span>]), <span class="dv">3</span>),</span>
+<span id="cb17-8"><a href="#cb17-8" tabindex="-1"></a>  <span class="at">slope_se =</span> <span class="fu">round</span>(<span class="fu">c</span>(<span class="fu">slope_se</span>(f_lap), <span class="fu">slope_se</span>(f_mala),</span>
+<span id="cb17-9"><a href="#cb17-9" tabindex="-1"></a>                     <span class="fu">slope_se</span>(f_pf)), <span class="dv">3</span>),</span>
+<span id="cb17-10"><a href="#cb17-10" tabindex="-1"></a>  <span class="at">seconds  =</span> <span class="fu">round</span>(<span class="fu">c</span>(t_lap, t_mala, t_pf), <span class="dv">3</span>)</span>
+<span id="cb17-11"><a href="#cb17-11" tabindex="-1"></a>)</span></code></pre></div>
+<p>Three patterns sit in this table. The slope estimates agree across
+all three backends to within their standard errors. That is expected:
+the posterior mean is the easy quantity, and every method finds it. The
+standard errors agree too, because for this model the posterior is
+near-Gaussian and the Tier 2 approximation is accurate. That agreement
+is the signal that Laplace was safe here, confirmed independently by the
+high IMH acceptance earlier. Timing is where the methods part ways. The
+deterministic Laplace fit returns fastest. Pathfinder costs an
+optimisation plus a draw step. MALA pays for its full chain of gradient
+evaluations, and that cost is the visible price of the exact
+guarantee.</p>
+<p>Read the table as a guarantee you bought, not effort you wasted. The
+sampler purchased a promise this model did not need and another model
+would. The agreement you see is itself the product of a near-Gaussian
+posterior. Push the model toward a skewed or heavy-tailed posterior, by
+shrinking the data to a few dozen rows, moving to a sparse binomial with
+most outcomes zero, or adding a poorly identified variance component,
+and the Tier 2 standard error would start to drift away from the Tier 1
+one. The samplers would track the true posterior spread through that
+drift, while the Gaussian approximation would keep reporting the
+symmetric interval its assumption forces on it. That is the moment the
+price of the sampler turns into a reason to pay it.</p>
+<p>The marginal likelihood ties the comparison back to model choice.
+<code>compare_models()</code> reads <code>logLik()</code> from each fit,
+which on the Laplace tier is the approximate log marginal
+likelihood.</p>
+<div class="sourceCode" id="cb18"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb18-1"><a href="#cb18-1" tabindex="-1"></a><span class="fu">compare_models</span>(<span class="at">laplace =</span> f_lap, <span class="at">pathfinder =</span> f_pf, <span class="at">criterion =</span> <span class="st">&quot;loglik&quot;</span>)</span></code></pre></div>
+<p>The <code>glance()</code> accessor surfaces the per-fit diagnostics
+that matter for the sampler tiers: the number of post-warmup draws, the
+acceptance rate, and the divergence count.</p>
+<div class="sourceCode" id="cb19"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb19-1"><a href="#cb19-1" tabindex="-1"></a><span class="fu">glance</span>(f_mala)[<span class="fu">c</span>(<span class="st">&quot;n_samples&quot;</span>, <span class="st">&quot;mean_accept&quot;</span>, <span class="st">&quot;n_divergent&quot;</span>)]</span></code></pre></div>
+<p>An acceptance rate inside the healthy band and no divergences say the
+MALA chain mixed well, which is the prerequisite for trusting its
+intervals. Without that check, a Tier 1 fit is only nominally exact: a
+stuck chain reports a posterior it never explored.</p>
+</div>
+<div id="choosing-a-mode" class="section level2">
+<h2>Choosing a mode</h2>
+<p>The tier system gives a default worth following and a small set of
+rules for when to depart from it.</p>
+<ul>
+<li><p><strong>Start at <code>mode = &quot;laplace&quot;</code>.</strong> The fit
+is deterministic, carries no Monte Carlo error, and returns in well
+under a second on the models in this vignette and in a fraction of a
+second per thousand rows on much larger ones. Use it for the first fit
+and for model comparison by marginal likelihood, and keep it as the
+baseline even when you intend to finish with a sampler.</p></li>
+<li><p><strong>Check Laplace before you trust its intervals.</strong>
+The cheapest check is <code>mode = &quot;imh_laplace&quot;</code> on the same
+model: a high acceptance rate, above roughly 0.5, says the posterior is
+close to the Laplace Gaussian and the intervals are safe. An acceptance
+rate below about 0.1 says the posterior is far from Gaussian and the
+Laplace intervals are biased. The fit earlier accepted at a high rate,
+which is a clean pass.</p></li>
+<li><p><strong>Move to <code>mode = &quot;mala&quot;</code> for exact moments at
+moderate dimension.</strong> When the posterior is visibly non-Gaussian,
+when imh_laplace acceptance is low, or when you simply need intervals
+you can quote without the Gaussian caveat, the gradient sampler is the
+next step. Budget a few thousand iterations with warmup at a third to a
+half of them, and watch the acceptance rate settle near 0.574 and the
+divergence count stay at zero.</p></li>
+<li><p><strong>Use <code>mode = &quot;pathfinder&quot;</code> when you want draws
+cheaply.</strong> It costs more than Laplace and far less than MALA,
+returns a sample you can feed to downstream code, flags a poor Gaussian
+fit through its ELBO, and doubles as a warm start for a
+sampler.</p></li>
+<li><p><strong>Let <code>mode = &quot;auto&quot;</code> choose for structured
+models.</strong> For a latent block or a spatial field, auto routes to
+the designed path: nested Laplace for latent and most spatial fields,
+exact Polya-Gamma Gibbs for binomial areal models, and the Laplace path
+for very large plain models past tens of thousands of rows. Read
+<code>selection_reason</code> to confirm the branch. On a small plain
+model with no spatial or latent structure auto defaults to the MALA
+gradient sampler (Tier 1); name <code>mode = &quot;laplace&quot;</code> instead
+when you want the fast deterministic fit.</p></li>
+<li><p><strong>Treat <code>mode = &quot;optimized&quot;</code> as a deliberate
+exception.</strong> Tier 3 is opt-in because its uncertainty is
+unreliable and its failures are silent. It fits a narrow case: a fast
+point estimate when you have an independent handle on the uncertainty.
+Keep it off the default path, and off any interval you intend to
+report.</p></li>
+</ul>
+<p>The thread through all of it is that the tier is visible and the
+choice is recorded, so you are never reasoning about uncertainty you
+cannot account for. Read <code>$backend</code> and
+<code>$inference_tier</code> off any fit to see what ran and what its
+intervals promise, then read <code>$selection_reason</code> to see why
+that backend was chosen; when the promise on a fit is not the one your
+analysis needs, move up a tier and pay for the stronger guarantee on
+purpose.</p>
+</div>
+<div id="see-also" class="section level2">
+<h2>See also</h2>
+<ul>
+<li><code>inference_mode_info()</code> prints the full tier and backend
+map, with the R-callable and C-ABI-only backends tagged.</li>
+<li>The quickstart vignette covers the fitting workflow.</li>
+<li>The <code>tgmrf()</code> vignette runs the same tier ladder on a
+user-defined latent block, from nested Laplace through exact
+sampling.</li>
+<li><code>?mala</code>, <code>?pathfinder</code>,
+<code>?imh_laplace</code> for the low-level sampler interfaces that
+drive a <code>log_posterior</code> closure directly.</li>
+</ul>
+</div>
+
+
+
+<!-- code folding -->
+
+
+<!-- dynamically load mathjax for compatibility with self-contained -->
+<script>
+  (function () {
+    var script = document.createElement("script");
+    script.type = "text/javascript";
+    script.src  = "https://mathjax.rstudio.com/latest/MathJax.js?config=TeX-AMS-MML_HTMLorMML";
+    document.getElementsByTagName("head")[0].appendChild(script);
+  })();
+</script>
+
+</body>
+</html>

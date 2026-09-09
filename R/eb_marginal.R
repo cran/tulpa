@@ -1,0 +1,363 @@
+# ============================================================================
+# Marginal (hyperparameter-corrected) empirical Bayes.
+#
+# tulpa_eb() reports the fixed effects conditional on theta_hat: solve(H_beta)
+# is Var(beta | theta_hat, y), so its intervals omit the uncertainty in the
+# variance components themselves and are narrower than the truth -- increasingly
+# so as the number of groups falls, where the variance-component marginal is
+# skewed and weakly determined.
+#
+# tulpa_re_cov_nested() answers this by integrating a grid. The correction here
+# is the cheaper middle rung: keep the single maximizer, and propagate the
+# curvature of the outer objective around it. Write m(theta) for the outer log
+# objective (the inner log marginal plus the hyperprior) and x_hat(theta) for
+# the inner mode. Near the maximizer
+#
+#     theta | y   ~  N(theta_hat, H_theta^-1),   H_theta = -m''(theta_hat)
+#     x_hat(theta) ~  x_hat(theta_hat) + J (theta - theta_hat)
+#
+# with J = d x_hat / d theta. The law of total variance then reads
+#
+#     Var(x | y) = E_theta[Var(x | theta, y)] + Var_theta(E[x | theta, y])
+#                ~  Var(x | theta_hat, y)  +  J H_theta^-1 J'
+#
+# so the conditional covariance gains an additive, positive-semidefinite term
+# and never shrinks. Both ingredients are finite differences of quantities the
+# EB fit already produces: m(theta) is the objective the outer optimizer drove,
+# and x_hat(theta) is the inner solve's mode. One stencil yields both, so the
+# inner Laplace solves are shared between them rather than repeated per
+# quantity.
+#
+# This is an approximation in two places -- the Gaussian posterior for theta and
+# the linearization of x_hat -- and both degrade in the same regime, a strongly
+# skewed variance-component marginal. It widens intervals in the right direction
+# without claiming the nested integrator's accuracy; when the variance
+# components themselves are the target, integrate.
+#
+# Cost: the stencil is 1 + 2k^2 inner Laplace solves for k hyperparameter
+# coordinates (2k for the gradient-free J and the diagonal of H, 2k(k-1) for the
+# off-diagonals), doubled again under Richardson extrapolation. k is the total
+# over blocks: 1 for a scalar (1 | g), 3 for a correlated (1 + x | g).
+# ============================================================================
+
+
+# Cached objective/mode evaluator. Every stencil point is one inner Laplace
+# solve, and the two stencils of a Richardson pair share theta_hat, so the
+# results are memoized on a caller-supplied key rather than recomputed. Returns
+# NULL for a point whose inner solve failed or produced a non-finite objective;
+# the caller treats a single NULL as "no correction" rather than silently
+# working with a hole in the stencil.
+.eb_fd_evaluator <- function(core) {
+  cache <- new.env(parent = emptyenv())
+  k <- core$k
+  function(theta, key) {
+    if (exists(key, envir = cache, inherits = FALSE)) {
+      return(get(key, envir = cache, inherits = FALSE))
+    }
+    # When the dispersion is estimated the stencil walks [theta..., log phi]: the
+    # inner solve takes the covariance half and the phi it implies, and the
+    # hyperprior sees the covariance half alone (phi is unpenalized, which is
+    # what makes it the ML-II estimate).
+    has_phi  <- length(theta) > k
+    theta_re <- if (has_phi) theta[seq_len(k)] else theta
+    L_list   <- .re_cov_theta_to_L_list(theta_re, core$layout)
+    fit <- if (has_phi) core$inner_fit(L_list, exp(theta[[k + 1L]]))
+           else core$inner_fit(L_list)
+    ok <- !is.null(fit) && !is.null(fit$mode) &&
+      length(fit$log_marginal) == 1L && is.finite(fit$log_marginal)
+    val <- if (!ok) NULL else {
+      lp <- core$log_prior_theta(theta_re)
+      if (!is.finite(lp)) NULL else
+        list(m = fit$log_marginal + lp, x = as.numeric(fit$mode))
+    }
+    assign(key, val, envir = cache)
+    val
+  }
+}
+
+
+# Central-difference stencil at a single step size. Returns the negative
+# objective Hessian H (k x k) and the mode Jacobian J (n_x x k), or NULL if any
+# stencil point failed.
+#
+#   J[, j]  = (x_hat(+h e_j) - x_hat(-h e_j)) / 2h
+#   H[j, j] = -(m(+h e_j) - 2 m(0) + m(-h e_j)) / h^2
+#   H[j, l] = -(m(++) - m(+-) - m(-+) + m(--)) / 4h^2
+#
+# The +/- e_j points serve J and the diagonal of H at once, which is why the two
+# are built together here rather than by separate drivers.
+.eb_fd_stencil <- function(ev, theta_hat, step) {
+  k <- length(theta_hat)
+  at <- function(delta) {
+    key <- if (all(delta == 0L)) "0" else
+      paste0(signif(step, 12), ":", paste(delta, collapse = ","))
+    ev(theta_hat + step * delta, key)
+  }
+  e <- function(j, s) { d <- integer(k); d[j] <- s; d }
+
+  f0 <- at(integer(k))
+  if (is.null(f0)) return(NULL)
+  n_x <- length(f0$x)
+  if (n_x < 1L) return(NULL)
+
+  J <- matrix(0, n_x, k)
+  H <- matrix(0, k, k)
+  for (j in seq_len(k)) {
+    fp <- at(e(j, 1L))
+    fm <- at(e(j, -1L))
+    if (is.null(fp) || is.null(fm)) return(NULL)
+    if (length(fp$x) != n_x || length(fm$x) != n_x) return(NULL)
+    J[, j]  <- (fp$x - fm$x) / (2 * step)
+    H[j, j] <- -(fp$m - 2 * f0$m + fm$m) / step^2
+  }
+  if (k > 1L) {
+    for (j in seq_len(k - 1L)) {
+      for (l in (j + 1L):k) {
+        pp <- at(e(j, 1L)  + e(l, 1L))
+        pm <- at(e(j, 1L)  + e(l, -1L))
+        mp <- at(e(j, -1L) + e(l, 1L))
+        mm <- at(e(j, -1L) + e(l, -1L))
+        if (is.null(pp) || is.null(pm) || is.null(mp) || is.null(mm)) return(NULL)
+        H[j, l] <- H[l, j] <-
+          -(pp$m - pm$m - mp$m + mm$m) / (4 * step^2)
+      }
+    }
+  }
+  list(H = (H + t(H)) / 2, J = J, n_x = n_x)
+}
+
+
+# Same (H, J, n_x) contract as .eb_fd_stencil, built from the analytic outer
+# gradient instead of from differences of the objective:
+#
+#   J       closed form, one matrix-vector product per coordinate against the
+#           H^-1 the gradient already formed -- no extra solve, no truncation
+#   H[, j]  -(g(theta + h e_j) - g(theta - h e_j)) / 2h, one exact gradient per
+#           stencil point, so 2k solves rather than 1 + 2k^2
+#
+# Differencing a gradient also keeps the symmetry honest: the off-diagonals come
+# from two independent columns and are averaged, where the objective route needs
+# a separate four-point evaluation per pair.
+.eb_exact_stencil <- function(core, theta_hat, step) {
+  k <- length(theta_hat)
+  at <- core$exact_grad_at
+  if (is.null(at)) return(NULL)
+
+  centre <- tryCatch(at(theta_hat, want_jacobian = TRUE), error = function(e) NULL)
+  if (is.null(centre) || is.null(centre$J)) return(NULL)
+  J <- centre$J
+  n_x <- nrow(J)
+  if (n_x < 1L || ncol(J) != k) return(NULL)
+
+  H <- matrix(0, k, k)
+  for (j in seq_len(k)) {
+    tp <- theta_hat; tp[j] <- tp[j] + step
+    tm <- theta_hat; tm[j] <- tm[j] - step
+    gp <- tryCatch(at(tp), error = function(e) NULL)
+    gm <- tryCatch(at(tm), error = function(e) NULL)
+    if (is.null(gp) || is.null(gm)) return(NULL)
+    if (length(gp) != k || length(gm) != k) return(NULL)
+    H[, j] <- -(gp - gm) / (2 * step)
+  }
+  if (any(!is.finite(H))) return(NULL)
+  list(H = (H + t(H)) / 2, J = J, n_x = n_x)
+}
+
+
+# Same (H, J, n_x) contract as the stencils, but with NO differencing of any
+# inner solve: the outer Hessian comes back closed-form
+# (dev_notes/laplace_exact_hessian.md), and J is closed as before. The only
+# finite difference left is the user hyperprior's own curvature, which has no
+# inner solve behind it and is second-differenced inside `exact_grad_at`.
+#
+# Returns NULL -- dropping the caller to the differencing stencils -- when the
+# exact gradient is unavailable, the family has no second curvature derivative,
+# or the closed assembly declines at the mode (a singular H). When the
+# dispersion is estimated `theta_hat` is [covariance..., log phi] and the closed
+# Hessian borders the RE block with the phi row/column
+# (dev_notes/laplace_phi_hessian.md); a family whose phi Hessian has no closed
+# form leaves that block NULL, which drops to the stencil (whose gradient still
+# carries the phi row) rather than losing the coordinate.
+.eb_closed_hessian <- function(core, theta_hat) {
+  at <- core$exact_grad_at
+  if (is.null(at)) return(NULL)
+  r <- tryCatch(at(theta_hat, want_hessian = TRUE), error = function(e) NULL)
+  if (is.null(r) || is.null(r$J) || is.null(r$H)) return(NULL)
+  J <- r$J; H <- r$H
+  k <- length(theta_hat)
+  n_x <- nrow(J)
+  if (is.null(n_x) || n_x < 1L || ncol(J) != k ||
+      nrow(H) != k || ncol(H) != k) return(NULL)
+  if (any(!is.finite(H)) || any(!is.finite(J))) return(NULL)
+  list(H = (H + t(H)) / 2, J = J, n_x = n_x)
+}
+
+
+# Names for the stacked theta coordinates, in the packing order of
+# .re_cov_theta_to_L_list: per block, either the log standard deviations of a
+# diagonal Sigma or the column-major lower-triangular log-Cholesky coordinates
+# (log L_ii on the diagonal, raw L_ij below it).
+.eb_theta_names <- function(layout) {
+  unlist(lapply(seq_along(layout), function(m) {
+    bl  <- layout[[m]]
+    lab <- .re_cov_block_label(bl, m)
+    if (!isTRUE(bl$full)) {
+      if (bl$nc == 1L) paste0(lab, "_log_sd")
+      else sprintf("%s_log_sd[%d]", lab, seq_len(bl$nc))
+    } else {
+      nm <- character(0)
+      for (j in seq_len(bl$nc)) {
+        for (i in j:bl$nc) {
+          nm <- c(nm, if (i == j) sprintf("%s_logL[%d,%d]", lab, i, j)
+                      else sprintf("%s_L[%d,%d]", lab, i, j))
+        }
+      }
+      nm
+    }
+  }), use.names = FALSE)
+}
+
+
+# Assemble the correction at theta_hat. Returns NULL (with no warning -- the
+# caller owns the message) when the stencil, the positive-definiteness check or
+# either inversion fails, which leaves the conditional covariance in place
+# rather than reporting a covariance built from an unusable Hessian.
+.eb_marginal_correction <- function(core, theta_hat, p_fix, H_beta,
+                                    step = 1e-3, richardson = FALSE) {
+  k <- length(theta_hat)
+  if (k < 1L) return(NULL)
+  if (is.null(H_beta)) return(NULL)
+
+  # Three routes, cheapest-exact first. A fully closed-form outer Hessian (no
+  # differencing of any inner solve); else difference the analytic gradient for
+  # H_theta (2k solves) with J closed; else second-difference the objective
+  # itself (1 + 2k^2 solves). The closed route drops through on a NULL -- an
+  # older family gate, an estimated dispersion, or a singular H at the mode -- so
+  # it is a prepended try, not a replacement of the stencil logic below.
+  base <- if (is.null(core$exact_grad_at)) NULL else
+    .eb_closed_hessian(core, theta_hat)
+
+  if (is.null(base)) {
+    # One stencil interface, two implementations. Which one is live is decided
+    # once, so a Richardson pair never mixes them.
+    use_exact <- !is.null(core$exact_grad_at)
+    ev <- if (use_exact) NULL else .eb_fd_evaluator(core)
+    stencil_at <- if (use_exact) {
+      function(h) .eb_exact_stencil(core, theta_hat, h)
+    } else {
+      function(h) .eb_fd_stencil(ev, theta_hat, h)
+    }
+
+    base <- stencil_at(step)
+    # An exact route that fails at the mode (a singular H, a family gate that
+    # closed) is worth retrying through the stencil rather than abandoning the
+    # correction.
+    if (is.null(base) && use_exact) {
+      use_exact <- FALSE
+      ev <- .eb_fd_evaluator(core)
+      stencil_at <- function(h) .eb_fd_stencil(ev, theta_hat, h)
+      base <- stencil_at(step)
+    }
+    if (is.null(base)) return(NULL)
+
+    # Central differences carry O(step^2) truncation error, so evaluating the
+    # same stencil at step/2 and combining as (4 A(step/2) - A(step)) / 3 cancels
+    # the leading term and leaves O(step^4). It doubles the solve count and
+    # amplifies the inner solver's own noise, so it pays only when that noise is
+    # well below the truncation error -- a tight inner tolerance. On the exact
+    # route only H carries truncation error, since J is closed-form;
+    # extrapolating an already exact J would inject noise for nothing. The closed
+    # route needs no extrapolation at all, which is why it sits outside this
+    # branch.
+    if (isTRUE(richardson)) {
+      half <- stencil_at(step / 2)
+      if (!is.null(half) && identical(half$n_x, base$n_x)) {
+        base$H <- (4 * half$H - base$H) / 3
+        base$H <- (base$H + t(base$H)) / 2
+        if (!use_exact) base$J <- (4 * half$J - base$J) / 3
+      }
+    }
+  }
+  if (is.null(base)) return(NULL)
+
+  # H_theta must be positive definite for theta_hat to be a maximizer and for
+  # H_theta^-1 to be a covariance. It fails when theta_hat is not actually
+  # interior (a collapsed variance component sitting on the boundary is the
+  # usual cause) or when the step is small enough that the inner solver's noise
+  # dominates the second difference.
+  evals <- tryCatch(eigen(base$H, symmetric = TRUE, only.values = TRUE)$values,
+                    error = function(e) NULL)
+  if (is.null(evals) || any(!is.finite(evals)) || min(evals) <= 0) return(NULL)
+
+  H_inv <- tryCatch(solve(base$H), error = function(e) NULL)
+  if (is.null(H_inv)) return(NULL)
+
+  cov_cond <- tryCatch(solve(H_beta), error = function(e) NULL)
+  if (is.null(cov_cond)) return(NULL)
+  p <- min(as.integer(p_fix), nrow(cov_cond), nrow(base$J))
+  if (p < 1L) return(NULL)
+  idx      <- seq_len(p)
+  cov_cond <- cov_cond[idx, idx, drop = FALSE]
+  J_beta   <- base$J[idx, , drop = FALSE]
+
+  inflation <- J_beta %*% H_inv %*% t(J_beta)
+  cov_marg  <- cov_cond + inflation
+  cov_marg  <- (cov_marg + t(cov_marg)) / 2
+
+  th_names <- tryCatch(.eb_theta_names(core$layout), error = function(e) NULL)
+  # The estimated dispersion is the last stacked coordinate; name it so the
+  # bordered H / J carry a label for it too.
+  if (!is.null(th_names) && isTRUE(core$estimate_phi))
+    th_names <- c(th_names, "log_phi")
+  if (!is.null(th_names) && length(th_names) == k) {
+    dimnames(base$H) <- list(th_names, th_names)
+    dimnames(H_inv)  <- list(th_names, th_names)
+    colnames(base$J) <- th_names
+  }
+
+  list(
+    cov_marginal    = cov_marg,
+    cov_conditional = cov_cond,
+    inflation       = inflation,
+    H_theta         = base$H,
+    theta_cov       = H_inv,
+    J               = base$J,
+    theta_names     = th_names,
+    step            = step,
+    richardson      = isTRUE(richardson)
+  )
+}
+
+
+# Posterior variance of each block's hyperparameter coordinates, read off a fit
+# that carries the outer curvature this file produces. A sampler warm start uses
+# it to mass the log_sigma_re slots, which otherwise start at 1 and adapt.
+#
+# Returns a per-block list, NULL for a block whose coordinates do not map onto
+# the sampler's log_sigma_re: a correlated block is in log-Cholesky coordinates,
+# where log L_ii is not log sigma_i (sigma_i is the norm of row i of L), so its
+# variances are not the sampler's. NULL overall when the fit carries no
+# `theta_cov`, or when it does not line up with the block layout -- in which
+# case every mass stays at its adapting default rather than being filled from a
+# mismatched vector.
+.warm_start_hyper_var <- function(fit) {
+  tc  <- fit$theta_cov
+  lay <- fit$layout
+  if (!is.matrix(tc) || !is.list(lay) || length(lay) == 0L) return(NULL)
+  v <- tryCatch(diag(tc), error = function(e) NULL)
+  if (is.null(v) || !all(is.finite(v)) || any(v <= 0)) return(NULL)
+  ks <- tryCatch(vapply(lay, function(b) as.integer(b$k), integer(1)),
+                 error = function(e) NULL)
+  if (is.null(ks) || sum(ks) != length(v)) return(NULL)
+  pos <- 0L
+  out <- vector("list", length(lay))
+  for (m in seq_along(lay)) {
+    idx <- pos + seq_len(ks[m])
+    pos <- pos + ks[m]
+    # Leave a skipped block's slot at its preallocated NULL. Assigning NULL with
+    # [[<-, rather than skipping, would DELETE the element and shift every later
+    # block down one, so term t would be massed from term t+1's curvature.
+    if (!isTRUE(lay[[m]]$full)) out[[m]] <- unname(v[idx])
+  }
+  out
+}

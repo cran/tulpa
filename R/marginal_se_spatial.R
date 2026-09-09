@@ -1,0 +1,610 @@
+#' Marginal fixed-effect Hessian for spatial-field Laplace fits
+#'
+#' The raw fixed-effect block of the joint Hessian gives the *conditional*
+#' precision on \eqn{\beta \mid u^*}, which under-states uncertainty; this
+#' returns the marginal precision instead.
+#'
+#' The correct marginal precision comes from a Schur complement on the
+#' joint Hessian at the mode:
+#'
+#' \deqn{H_\beta^{\mathrm{marg}} = X'WX - X'WZ (Z'WZ + Q_u)^{-1} Z'WX}
+#'
+#' where \eqn{Z} is the obs->latent map (SPDE: projection matrix A;
+#' NNGP: indicator from obs to unique-location field) and \eqn{Q_u}
+#' is the spatial precision at the fitted hyperparameters.
+#'
+#' These helpers rebuild the spatial precision in R from the spec and
+#' fitted hyperparameters, then solve via sparse Cholesky. The shape
+#' matches what `cpp_laplace_fit_spde` / `cpp_laplace_fit_gp` use
+#' internally -- Q construction here is a 1:1 port of `spde_qbuilder.h`
+#' (orphan ridge included).
+#'
+#' @keywords internal
+#' @name marginal_se_spatial
+NULL
+
+
+# --- SPDE Matern (range, sigma) <-> (kappa, tau) on d = 2 -----------------
+# Marginal variance sigma^2 = 1 / (4*pi*nu * kappa^(2*nu) * tau^2)
+# (Lindgren, Rue, Lindstrom 2011, d = 2, alpha = nu + 1), so
+#   kappa = sqrt(8*nu) / range,
+#   tau   = 1 / (sqrt(4*pi*nu) * kappa^nu * sigma).
+# Single source for every site that maps hyperparameters to (kappa, tau);
+# at nu = 1 this reduces to 1 / (sqrt(4*pi) * kappa * sigma).
+
+#' @keywords internal
+.spde_kappa_tau <- function(range, sigma, nu) {
+  kappa <- sqrt(8 * nu) / range
+  list(kappa = kappa,
+       tau_spde = 1 / (sqrt(4 * pi * nu) * kappa^nu * sigma))
+}
+
+#' @keywords internal
+.spde_range_sigma <- function(kappa, tau_spde, nu) {
+  list(range = sqrt(8 * nu) / kappa,
+       sigma = 1 / (sqrt(4 * pi * nu) * kappa^nu * tau_spde))
+}
+
+
+# --- SPDE precision rebuild (mirrors src/spde_qbuilder.h) -----------------
+
+#' @keywords internal
+.spde_precision_Q <- function(spatial, kappa, tau_spde) {
+  n_mesh <- spatial$n_mesh
+  C0     <- as.numeric(spatial$C0_diag)
+  G1     <- as(spatial$G, "CsparseMatrix")
+
+  c0_eps   <- 1e-15
+  is_orph  <- C0 <= c0_eps
+  c0_inv   <- ifelse(C0 > c0_eps, 1 / C0, 0)
+  Cmat     <- Matrix::Diagonal(n_mesh, C0)
+  CinvDiag <- Matrix::Diagonal(n_mesh, c0_inv)
+
+  rat <- rational_spde_coefficients(spatial$nu)
+  k2   <- kappa * kappa
+  tau2 <- tau_spde * tau_spde
+
+  if (isTRUE(rat$is_integer)) {
+    alpha <- as.integer(round(rat$alpha))
+    # Q = tau^2 * K (C^-1 K)^(alpha-1) with K = kappa^2 C + G expands over the
+    # operator chain M_0 = C, M_1 = G, M_j = G (C^-1 G)^(j-1) as
+    #   tau^2 * sum_j choose(alpha, j) kappa^(2(alpha-j)) M_j.
+    # Mirrors src/spde_qbuilder.h's rebuild(); alpha = 2 (nu = 1) is
+    # kappa^4 C + 2 kappa^2 G + G C^-1 G.
+    M <- vector("list", alpha + 1L)
+    M[[1]] <- Cmat
+    M[[2]] <- G1
+    for (l in seq_len(alpha - 1L)) M[[l + 2L]] <- M[[l + 1L]] %*% CinvDiag %*% G1
+    Q <- tau2 * Reduce(`+`, lapply(0:alpha, function(j) {
+      choose(alpha, j) * k2^(alpha - j) * M[[j + 1L]]
+    }))
+  } else {
+    # Fractional alpha: the operator-based rational field does
+    # NOT have a shifted-alpha=2 precision; its precision is Q = Pl' C^{-1} Pl
+    # from the rational roots (see .spde_rational_assemble). This analytic
+    # marginal-SE path covers only the integer construction; fractional-nu field
+    # SEs go through the assembly-based fit, not this rebuild.
+    stop("Analytic SPDE marginal SEs are integer-nu only. ",
+         "For fractional nu, the rational field SEs are not yet wired through ",
+         "this path.", call. = FALSE)
+  }
+
+  if (any(is_orph)) {
+    idx <- which(is_orph)
+    Q <- Q + Matrix::sparseMatrix(
+      i = idx, j = idx, x = 1.0, dims = c(n_mesh, n_mesh)
+    )
+  }
+
+  Matrix::forceSymmetric(Q)
+}
+
+
+# --- Schur complement for SPDE marginal H_beta ----------------------------
+
+# --- NNGP precision rebuild (mirrors src/gpu_nngp_laplace.h logic) --------
+
+#' @keywords internal
+.nngp_cov_fn <- function(cov_type, sigma2, phi_gp) {
+  if (cov_type == 0L) {
+    function(d) sigma2 * exp(-d / phi_gp)
+  } else if (cov_type == 1L) {
+    function(d) {
+      x <- sqrt(3) * d / phi_gp
+      sigma2 * (1 + x) * exp(-x)
+    }
+  } else if (cov_type == 2L) {
+    function(d) {
+      x <- sqrt(5) * d / phi_gp
+      sigma2 * (1 + x + x * x / 3) * exp(-x)
+    }
+  } else {
+    stop("Unknown cov_type ", cov_type, call. = FALSE)
+  }
+}
+
+#' Build NNGP precision Lambda = (I - A)' D^-1 (I - A) at given hyperparameters.
+#'
+#' Mirrors the algorithm in `src/gpu_nngp_laplace.h::batch_nngp_scatter` plus
+#' `apply_nngp_full_prior_dense` -- for each Vecchia row i (in NNGP order):
+#'   - resolve conditioning set N(i) via `nn_idx` / `nn_order`
+#'   - form the n_nb x n_nb cov matrix C and the n_nb cov vector c
+#'   - solve C alpha = c
+#'   - v_i = sigma^2 - c' alpha
+#'   - beta_i is 1 at i and -alpha_k at each neighbor -> Lambda += beta_i beta_i' / v_i
+#'
+#' Identifiers follow the C++ side: `nn_idx[i, k]` is a 1-based NNGP-order
+#' index, `nn_order[j]` maps NNGP-order j (1-based) to obs idx (1-based).
+#'
+#' @keywords internal
+.nngp_precision_Q <- function(spatial, sigma2_gp, phi_gp) {
+  ni        <- spatial$neighbor_info
+  n_spatial <- spatial$n_spatial %||% nrow(spatial$unique_coords)
+  nn        <- spatial$nn %||% ncol(ni$nn_idx)
+  cov_type  <- gp_cov_type_for_laplace(spatial)
+  cov_fn    <- .nngp_cov_fn(cov_type, sigma2_gp, phi_gp)
+
+  nn_idx   <- ni$nn_idx
+  nn_dist  <- ni$nn_dist
+  nn_order <- ni$nn_order %||% seq_len(n_spatial)
+  coords   <- as.matrix(spatial$unique_coords)
+
+  # Triplet accumulator (pre-size: each row contributes (n_nb+1)^2 entries)
+  cap <- sum((rowSums(nn_idx > 0) + 1L)^2)
+  ii <- integer(cap); jj <- integer(cap); xx <- numeric(cap); pos <- 0L
+
+  for (i_nngp in seq_len(n_spatial)) {
+    obs_focal <- nn_order[i_nngp]
+    if (obs_focal < 1L || obs_focal > n_spatial) next
+
+    active <- nn_idx[i_nngp, ] > 0
+    n_nb   <- sum(active)
+    if (n_nb == 0L) {
+      pos <- pos + 1L
+      ii[pos] <- obs_focal; jj[pos] <- obs_focal; xx[pos] <- 1 / sigma2_gp
+      next
+    }
+
+    nb_nngp <- nn_idx[i_nngp, active]
+    nb_obs  <- nn_order[nb_nngp]
+
+    c_vec <- cov_fn(nn_dist[i_nngp, seq_len(n_nb)])
+
+    if (n_nb == 1L) {
+      C_mat <- matrix(sigma2_gp, 1, 1)
+    } else {
+      coords_nb <- coords[nb_obs, , drop = FALSE]
+      D <- as.matrix(dist(coords_nb))
+      C_mat <- cov_fn(D)
+      diag(C_mat) <- sigma2_gp
+    }
+
+    alpha_vec <- as.numeric(solve(C_mat, c_vec))
+    v_i       <- max(1e-10, sigma2_gp - sum(c_vec * alpha_vec))
+    tau_i     <- 1 / v_i
+
+    idxs  <- c(obs_focal, nb_obs)
+    coefs <- c(1, -alpha_vec)
+    m     <- length(idxs)
+    outer_xx <- tau_i * tcrossprod(coefs)
+
+    new_n <- m * m
+    rng   <- pos + seq_len(new_n)
+    ii[rng] <- rep(idxs, each  = m)
+    jj[rng] <- rep(idxs, times = m)
+    xx[rng] <- as.numeric(outer_xx)
+    pos     <- pos + new_n
+  }
+
+  if (pos < length(ii)) {
+    ii <- ii[seq_len(pos)]; jj <- jj[seq_len(pos)]; xx <- xx[seq_len(pos)]
+  }
+
+  Q <- Matrix::sparseMatrix(
+    i = ii, j = jj, x = xx, dims = c(n_spatial, n_spatial),
+    use.last.ij = FALSE  # sum duplicates
+  )
+  Matrix::forceSymmetric(Q)
+}
+
+
+# --- Schur complement for NNGP marginal H_beta ----------------------------
+
+#' Build a length-n_obs -> length-n_units indicator design matrix Z.
+#'
+#' The latent field lives on units -- unique coordinates for an NNGP field,
+#' adjacency units for an areal one -- and each observation belongs to exactly
+#' one, so `Z[i, j]` = 1 iff observation i sits on unit j.
+#'
+#' The map is passed in rather than read off the spec, because the two specs
+#' that reach here name it differently: a GP spec carries `obs_to_loc`, an areal
+#' spec carries `spatial_idx`. Reading one name served only one caller; for the
+#' other the field was absent, the map silently became `seq_len(n_obs)`, and the
+#' column index ran past `n_units` as soon as a location carried more than one
+#' observation.
+#'
+#' @param obs_to_unit Per-observation unit index, or empty for one observation
+#'   per unit.
+#' @keywords internal
+.field_design_Z <- function(obs_to_unit, n_units, n_obs) {
+  n_units <- as.integer(n_units)
+  if (length(obs_to_unit) == 0L) {
+    if (n_obs != n_units) {
+      stop("No observation -> unit map, but there are ", n_obs,
+           " observations over ", n_units, " units; the identity map only ",
+           "holds when they are equal.", call. = FALSE)
+    }
+    obs_to_unit <- seq_len(n_obs)
+  }
+  j <- as.integer(obs_to_unit)
+  if (length(j) != n_obs) {
+    stop("Observation -> unit map has length ", length(j), ", expected ",
+         n_obs, ".", call. = FALSE)
+  }
+  if (anyNA(j) || min(j) < 1L || max(j) > n_units) {
+    stop("Observation -> unit map indexes outside 1:", n_units, ".",
+         call. = FALSE)
+  }
+  Matrix::sparseMatrix(i = seq_len(n_obs), j = j, x = 1.0,
+                       dims = c(n_obs, n_units))
+}
+
+
+#' n_obs x n_re_groups indicator design for an iid RE block.
+#'
+#' `re_idx` is the 1-based per-observation group index. Observations whose
+#' group falls outside `1:n_re_groups` contribute no RE column, matching the
+#' `g >= 0 && g < n_re_groups` guard in the C++ kernels.
+#'
+#' @keywords internal
+.re_design <- function(re_idx, n_re_groups, n_obs) {
+  if (n_re_groups <= 0L) {
+    return(Matrix::sparseMatrix(i = integer(0), j = integer(0), x = numeric(0),
+                                dims = c(n_obs, 0L)))
+  }
+  g  <- as.integer(re_idx)
+  ok <- which(g >= 1L & g <= n_re_groups)
+  Matrix::sparseMatrix(i = ok, j = g[ok], x = 1.0,
+                       dims = c(n_obs, as.integer(n_re_groups)))
+}
+
+
+#' Schur complement of the latent block out of the joint Hessian.
+#'
+#' Given the fixed-effect design `X`, the combined latent design `D` (the iid
+#' RE indicator block stacked with the spatial-field design), the latent prior
+#' precision `Q_latent`, and the GLM weights `W`, returns the marginal fixed-
+#' effect precision `H_beta = X'WX - (X'WD) (D'WD + Q_latent)^{-1} (X'WD)'`.
+#' Shared by the SPDE and NNGP marginal-SE paths.
+#'
+#' @keywords internal
+.schur_H_beta <- function(X, D, Q_latent, W) {
+  D    <- as(D, "CsparseMatrix")
+  WX   <- W * X
+  WD   <- as(W * D, "CsparseMatrix")
+  XtWX <- crossprod(X, WX)
+  XtWD <- as.matrix(Matrix::crossprod(X, WD))
+  DtWD <- Matrix::crossprod(D, WD)
+
+  P_uu <- Matrix::forceSymmetric(DtWD + Q_latent)
+  R    <- Matrix::Cholesky(P_uu, LDL = FALSE, perm = TRUE)
+  sol  <- Matrix::solve(R, t(XtWD), system = "A")
+  H    <- as.matrix(XtWX) - XtWD %*% as.matrix(sol)
+  (H + t(H)) / 2
+}
+
+
+# Both marginal functions take the optional iid RE block so an SPDE / NNGP fit
+# carrying one slices its [beta, re, field] mode correctly and Schurs the RE
+# columns out of the joint Hessian alongside the field. With
+# n_re_groups = 0 the RE design is empty and the result is the field-only Schur.
+
+# The marginal-beta Schur every spatial field shares. A field type supplies only
+# three things:
+#
+#   n_field  total latent dimension of the field block(s)
+#   Z_field  its observation -> field design, d_fac already folded in
+#   Q_field  its precision at the hyperparameters used in the fit
+#
+# Everything around them is identical across gp / spde / car_proper / icar /
+# bym2 / hsgp: split the mode into (beta, u), stack the iid RE design beside the
+# field, evaluate eta and the GLM weights at the mode, and block the RE
+# precision in front of the field's. A field with several blocks (BYM2's phi +
+# theta) passes the combined design and the combined precision, which is the
+# same matrix `bdiag` would build block by block.
+.marginal_H_beta_field <- function(mode, X, family, phi, n_trials,
+                                   weights, offset,
+                                   n_field, Z_field, Q_field,
+                                   re_idx, n_re_groups, sigma_re) {
+  p     <- ncol(X)
+  n_obs <- nrow(X)
+
+  beta <- mode[seq_len(p)]
+  u    <- mode[p + seq_len(n_re_groups + n_field)]
+
+  D_re <- .re_design(re_idx, n_re_groups, n_obs)
+  D    <- cbind(D_re, Z_field)
+
+  eta <- as.numeric(X %*% beta) + (offset %||% 0) + as.numeric(D %*% u)
+  W   <- glmm_weights(eta, family, n_trials, phi)
+  if (!is.null(weights)) W <- W * weights
+
+  tau_re   <- 1 / (sigma_re^2 + 1e-10)
+  Q_latent <- Matrix::bdiag(
+    Matrix::Diagonal(n_re_groups, x = tau_re),
+    Q_field
+  )
+
+  .schur_H_beta(X, D, Q_latent, W)
+}
+
+
+#' @keywords internal
+.marginal_H_beta_gp <- function(mode, X, spatial, family, phi,
+                                n_trials, weights = NULL, offset = NULL,
+                                sigma2_gp, phi_gp,
+                                re_idx = NULL, n_re_groups = 0L,
+                                sigma_re = 1.0) {
+  n_spatial <- spatial$n_spatial %||% nrow(spatial$unique_coords)
+
+  .marginal_H_beta_field(
+    mode, X, family, phi, n_trials, weights, offset,
+    n_field = n_spatial,
+    Z_field = .field_design_Z(spatial$obs_to_loc, n_spatial, nrow(X)),
+    Q_field = .nngp_precision_Q(spatial, sigma2_gp, phi_gp),
+    re_idx = re_idx, n_re_groups = n_re_groups, sigma_re = sigma_re
+  )
+}
+
+
+#' @keywords internal
+.marginal_H_beta_spde <- function(mode, X, spatial, family, phi,
+                                  n_trials, weights = NULL, offset = NULL,
+                                  range_val, sigma_val,
+                                  re_idx = NULL, n_re_groups = 0L,
+                                  sigma_re = 1.0) {
+  p      <- ncol(X)
+  n_obs  <- nrow(X)
+  n_mesh <- spatial$n_mesh
+  beta   <- mode[seq_len(p)]
+  tau_re <- 1 / (sigma_re^2 + 1e-10)
+
+  # Fractional nu: the operator-based rational field. The
+  # latent is the auxiliary weight vector x ~ N(0, Q_rat^{-1}) on the non-orphan
+  # submesh, with obs -> latent map A_eff = A Pr; the field is u = Pr x. The
+  # marginal-beta Schur is parameterisation-invariant, so it runs on (A_eff,
+  # Q_rat) exactly as the integer path runs on (A, Q_spde). eta at the mode reads
+  # off the field-space mesh block (A w = A_eff x), so W needs no x.
+  if (.spde_nu_is_fractional(spatial$nu)) {
+    order <- spatial$rational_order %||% 2L
+    asm   <- .spde_assemble_at(spatial, range_val, sigma_val, order = order)
+    A_full     <- as(spatial$A, "CsparseMatrix")
+    D_re       <- .re_design(re_idx, n_re_groups, n_obs)
+    u_re       <- if (n_re_groups > 0L) mode[p + seq_len(n_re_groups)] else numeric(0)
+    field_full <- mode[p + n_re_groups + seq_len(n_mesh)]
+    eta <- as.numeric(X %*% beta) + (offset %||% 0) +
+           (if (n_re_groups > 0L) as.numeric(D_re %*% u_re) else 0) +
+           as.numeric(A_full %*% field_full)
+    W <- glmm_weights(eta, family, n_trials, phi)
+    if (!is.null(weights)) W <- W * weights
+    Q_latent <- Matrix::bdiag(Matrix::Diagonal(n_re_groups, x = tau_re), asm$Q)
+    D        <- cbind(D_re, asm$A_eff)
+    return(.schur_H_beta(X, D, Q_latent, W))
+  }
+
+  # Q_spde at the (range, sigma) used in the fit
+  .kt      <- .spde_kappa_tau(range_val, sigma_val, spatial$nu)
+
+  .marginal_H_beta_field(
+    mode, X, family, phi, n_trials, weights, offset,
+    n_field = n_mesh,
+    Z_field = as(spatial$A, "CsparseMatrix"),
+    Q_field = .spde_precision_Q(spatial, .kt$kappa, .kt$tau_spde),
+    re_idx = re_idx, n_re_groups = n_re_groups, sigma_re = sigma_re
+  )
+}
+
+
+# --- Proper-CAR precision + marginal H_beta -------------------------------
+
+#' Proper-CAR precision Q = tau * (D - rho W) at fixed (tau, rho).
+#'
+#' D is the diagonal degree matrix (neighbour counts) and W the adjacency, so
+#' Q has the same nonzero structure as the ICAR precision with rho scaling the
+#' off-diagonals. Matches `tulpa::add_car_proper_prior` / the nested CAR_proper
+#' precision builder.
+#'
+#' @keywords internal
+.car_proper_precision_Q <- function(spatial, tau, rho) {
+  W   <- as(Matrix::Matrix(as.matrix(spatial$adjacency), sparse = TRUE),
+            "CsparseMatrix")
+  deg <- Matrix::rowSums(W)
+  Matrix::forceSymmetric(tau * (Matrix::Diagonal(nrow(W), deg) - rho * W))
+}
+
+#' @keywords internal
+.marginal_H_beta_car_proper <- function(mode, X, spatial, family, phi,
+                                        n_trials, weights = NULL, offset = NULL,
+                                        tau, rho,
+                                        re_idx = NULL, n_re_groups = 0L,
+                                        sigma_re = 1.0) {
+  n_units <- nrow(as.matrix(spatial$adjacency))
+
+  .marginal_H_beta_field(
+    mode, X, family, phi, n_trials, weights, offset,
+    n_field = n_units,
+    Z_field = .field_design_Z(spatial$spatial_idx, n_units, nrow(X)),
+    Q_field = .car_proper_precision_Q(spatial, tau, rho),
+    re_idx = re_idx, n_re_groups = n_re_groups, sigma_re = sigma_re
+  )
+}
+
+
+# --- Intrinsic areal (ICAR / CAR / BYM2) precision + marginal H_beta -------
+
+#' Connected components of an adjacency graph, as a list of node-index vectors.
+#'
+#' Iterative depth-first search, so it carries no recursion-depth risk on a
+#' large map. Returns what `graph_partition` (`inst/include/tulpa/graph_components.h`)
+#' returns -- the actual component MEMBERSHIP, not just a count -- so a genuine
+#' disconnected map (a mainland plus islands) pins each component's constant
+#' over that component's real nodes rather than an equal-size contiguous split.
+#' Takes the dense adjacency rather than a sparse one because symmetric sparse
+#' storage (`dsCMatrix`) keeps a single triangle, which would put an edge's two
+#' endpoints in different components.
+#'
+#' @keywords internal
+.graph_components <- function(adjacency) {
+  A <- as.matrix(adjacency)
+  n <- nrow(A)
+  if (n == 0L) return(list())
+  nb   <- lapply(seq_len(n), function(i) which(A[i, ] != 0))
+  seen <- logical(n)
+  comps <- list()
+  for (s0 in seq_len(n)) {
+    if (seen[s0]) next
+    seen[s0] <- TRUE
+    stack <- s0
+    members <- integer(0)
+    while (length(stack) > 0L) {
+      s <- stack[[length(stack)]]
+      stack <- stack[-length(stack)]
+      members <- c(members, s)
+      new <- nb[[s]][!seen[nb[[s]]]]
+      if (length(new) > 0L) {
+        seen[new] <- TRUE
+        stack <- c(stack, new)
+      }
+    }
+    comps[[length(comps) + 1L]] <- sort.int(members)
+  }
+  comps
+}
+
+#' Number of connected components of an adjacency graph.
+#'
+#' The count of `.graph_components`, single-sourcing the DFS.
+#'
+#' @keywords internal
+.graph_n_components <- function(adjacency) length(.graph_components(adjacency))
+
+#' Intrinsic ICAR field precision, augmented to full rank.
+#'
+#' `L = D - W` (degree minus adjacency) plus the sum-to-zero augmentation
+#' `sum_c 1_c 1_c' / J_c` that identifies each component's constant null
+#' direction (`inst/include/tulpa/sum_to_zero.h`). The components are the actual
+#' connected components of the graph (`.graph_components`), each pinned over its
+#' own node set of size `J_c` -- matching `for_each_icar_component`
+#' (`src/icar_kernel.h`), so an unequal / non-contiguous disconnected map
+#' reconstructs the same precision the kernel penalizes with.
+#'
+#' The conditional Laplace kernel passes `tau_spatial = 1` on both the ICAR/CAR
+#' path (`R/fit_laplace.R`) and the BYM2 structured block (which carries sigma
+#' and rho in its `d_fac` instead), and the field enters the linear predictor
+#' with `d_fac = 1`, so this is exactly the field block of that fit's joint
+#' Hessian. `test-marginal-se-areal.R` pins it against the kernel's own
+#' `log_prior_icar`.
+#'
+#' @keywords internal
+.icar_precision_Q <- function(spatial) {
+  W   <- as(Matrix::Matrix(as.matrix(spatial$adjacency), sparse = TRUE),
+            "CsparseMatrix")
+  n   <- nrow(W)
+  deg <- Matrix::rowSums(W)
+  Q   <- Matrix::Diagonal(n, deg) - W
+
+  # Augmentation sum_c 1_{C_c} 1_{C_c}' / |C_c| over the TRUE components.
+  ii <- jj <- integer(0); xx <- numeric(0)
+  for (cc in .graph_components(spatial$adjacency)) {
+    jc <- length(cc)
+    if (jc == 0L) next
+    ii <- c(ii, rep(cc, times = jc))
+    jj <- c(jj, rep(cc, each  = jc))
+    xx <- c(xx, rep(1 / jc, jc * jc))
+  }
+  if (length(ii)) {
+    Q <- Q + Matrix::sparseMatrix(i = ii, j = jj, x = xx, dims = c(n, n))
+  }
+  Matrix::forceSymmetric(Q)
+}
+
+
+#' @keywords internal
+.marginal_H_beta_icar <- function(mode, X, spatial, family, phi,
+                                  n_trials, weights = NULL, offset = NULL,
+                                  re_idx = NULL, n_re_groups = 0L,
+                                  sigma_re = 1.0) {
+  n_units <- nrow(as.matrix(spatial$adjacency))
+
+  .marginal_H_beta_field(
+    mode, X, family, phi, n_trials, weights, offset,
+    n_field = n_units,
+    Z_field = .field_design_Z(spatial$spatial_idx, n_units, nrow(X)),  # d_fac = 1
+    Q_field = .icar_precision_Q(spatial),
+    re_idx = re_idx, n_re_groups = n_re_groups, sigma_re = sigma_re
+  )
+}
+
+
+#' Marginal H_beta for a BYM2 field. The latent is the two-block
+#' `[phi (structured), theta (unstructured)]` convolution; each enters the
+#' linear predictor through the field indicator scaled by its `d_fac`
+#' (`sigma * sqrt(rho) * scale_factor` for phi, `sigma * sqrt(1 - rho)` for
+#' theta), with `phi` carrying the augmented ICAR precision `.icar_precision_Q`
+#' and `theta ~ N(0, I)`. The conditional
+#' Laplace kernel hardcodes `sigma = 1`, `rho = 0.5`.
+#'
+#' @keywords internal
+.marginal_H_beta_bym2 <- function(mode, X, spatial, family, phi,
+                                  n_trials, weights = NULL, offset = NULL,
+                                  sigma_spatial = 1.0, rho = 0.5,
+                                  re_idx = NULL, n_re_groups = 0L,
+                                  sigma_re = 1.0) {
+  n_units      <- nrow(as.matrix(spatial$adjacency))
+  scale_factor <- spatial$scale_factor %||% 1.0
+
+  d_phi   <- sigma_spatial * sqrt(rho + 1e-10) * scale_factor
+  d_theta <- sigma_spatial * sqrt(1 - rho + 1e-10)
+  Z_ind   <- .field_design_Z(spatial$spatial_idx, n_units, nrow(X))
+
+  # Layout: [beta, re, phi (structured), theta (unstructured)]. d_fac folded
+  # into the design; the prior stays on the raw phi / theta.
+  .marginal_H_beta_field(
+    mode, X, family, phi, n_trials, weights, offset,
+    n_field = 2L * n_units,
+    Z_field = cbind(d_phi * Z_ind, d_theta * Z_ind),
+    Q_field = Matrix::bdiag(
+      .icar_precision_Q(spatial),          # phi: augmented ICAR structure
+      Matrix::Diagonal(n_units, x = 1.0)   # theta: iid
+    ),
+    re_idx = re_idx, n_re_groups = n_re_groups, sigma_re = sigma_re
+  )
+}
+
+
+# --- HSGP marginal H_beta -------------------------------------------------
+
+#' @keywords internal
+.marginal_H_beta_hsgp <- function(mode, X, spatial, family, phi,
+                                  n_trials, weights = NULL, offset = NULL,
+                                  phi_basis, lambda_eig, sigma2, lengthscale,
+                                  re_idx = NULL, n_re_groups = 0L,
+                                  sigma_re = 1.0) {
+  M <- ncol(phi_basis)
+
+  # The latent coefficients carry an N(0, I) prior; the spectral density
+  # sqrt(S_j) is folded into the design (matching make_hsgp_block.basis_eval /
+  # .prep). 2-D SE spectral density on the 2-D basis:
+  # S_j = sigma2 * (2 pi) * ell^2 * exp(-0.5 ell^2 lambda_j).
+  S    <- sigma2 * (2 * pi) * lengthscale^2 *
+          exp(-0.5 * lengthscale^2 * lambda_eig)
+  PhiS <- sweep(phi_basis, 2, sqrt(pmax(S, 0)), `*`)
+
+  .marginal_H_beta_field(
+    mode, X, family, phi, n_trials, weights, offset,
+    n_field = M,
+    Z_field = Matrix::Matrix(PhiS, sparse = TRUE),
+    Q_field = Matrix::Diagonal(M, x = 1.0),
+    re_idx = re_idx, n_re_groups = n_re_groups, sigma_re = sigma_re
+  )
+}

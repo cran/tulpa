@@ -1,0 +1,915 @@
+#' Formula parsing for tulpa models
+#'
+#' @description
+#' Parses mixed-model formulas by walking the formula's abstract syntax tree.
+#' R formulas are already parse trees -- we do structural recursion to find
+#' random effect terms (`|` nodes) and separate them from fixed effects.
+#'
+#' @return The formula helpers documented in this family return parsed-formula
+#'   structures (lists describing the fixed effects, random-effect terms, and
+#'   latent blocks); see each function's own help page.
+#'
+#' @name tulpa_formula
+NULL
+
+# ============================================================================
+# Core AST operations: findbars / nobars
+#
+# A formula like y ~ x + (1 | g) + (x || g2) is a nested call object:
+#   ~(y, +(+(x, (|(1, g))), (||(x, g2))))
+#
+# findbars: collect all | and || nodes (random effects)
+# nobars:  rewrite the tree with bar terms removed (fixed effects)
+# ============================================================================
+
+#' Find all bar terms in a formula's parse tree
+#'
+#' Recursively walks the formula AST and collects all `|` and `||` nodes
+#' found inside parentheses. These are the random effect specifications.
+#'
+#' @param term A language object (formula term)
+#' @return A list of language objects, each a `|` or `||` call
+#' @keywords internal
+#' @export
+findbars <- function(term) {
+  if (is.name(term) || !is.language(term)) return(NULL)
+
+  if (term[[1]] == as.name("(")) {
+    inner <- term[[2]]
+    if (is.call(inner) && (inner[[1]] == as.name("|") || inner[[1]] == as.name("||"))) {
+      return(list(inner))
+    }
+    return(findbars(inner))
+  }
+
+  if (term[[1]] == as.name("|") || term[[1]] == as.name("||")) {
+    return(list(term))
+  }
+
+  if (length(term) == 2) {
+    return(findbars(term[[2]]))
+  }
+
+  c(findbars(term[[2]]), findbars(term[[3]]))
+}
+
+#' Remove all bar terms from a formula's parse tree
+#'
+#' Recursively rewrites the formula AST, removing any `|` or `||` nodes
+#' found inside parentheses. Returns the fixed-effects-only formula.
+#'
+#' @param term A language object (formula term)
+#' @return A language object with all bar terms removed, or NULL if nothing remains
+#' @keywords internal
+#' @export
+nobars <- function(term) {
+  if (is.name(term) || !is.language(term)) return(term)
+
+  if (term[[1]] == as.name("(")) {
+    inner <- term[[2]]
+    if (is.call(inner) && (inner[[1]] == as.name("|") || inner[[1]] == as.name("||"))) {
+      return(NULL)
+    }
+    nb <- nobars(inner)
+    if (is.null(nb)) return(NULL)
+    return(call("(", nb))
+  }
+
+  if (length(term) == 2) {
+    nb <- nobars(term[[2]])
+    if (is.null(nb)) return(NULL)
+    return(call(deparse(term[[1]]), nb))
+  }
+
+  nb_left  <- nobars(term[[2]])
+  nb_right <- nobars(term[[3]])
+
+  if (is.null(nb_left) && is.null(nb_right)) return(NULL)
+  if (is.null(nb_left))  return(nb_right)
+  if (is.null(nb_right)) return(nb_left)
+
+  call(deparse(term[[1]]), nb_left, nb_right)
+}
+
+# ============================================================================
+# Latent block terms: latent(<tgmrf object>) anywhere in the RHS
+#
+# Same shape as findbars / nobars but matches `latent(...)` calls. The inner
+# expression is evaluated in the formula environment at parse time to recover
+# the latent-block object (currently a tgmrf S3 object; tgeneric in future).
+# ============================================================================
+
+#' Find all latent(...) calls in a formula's parse tree
+#'
+#' Recursively walks the formula AST and collects all `latent(...)` calls.
+#' The matched calls are returned unevaluated; [tulpa_parse_formula()]
+#' resolves them in the formula's environment.
+#'
+#' @param term A language object (formula term)
+#' @return A list of language objects, each a `latent(...)` call
+#' @keywords internal
+find_latent_terms <- function(term) {
+  if (is.name(term) || !is.language(term)) return(NULL)
+
+  if (is.call(term) && identical(term[[1]], as.name("latent")) &&
+      length(term) == 2L) {
+    return(list(term))
+  }
+
+  if (identical(term[[1]], as.name("("))) {
+    return(find_latent_terms(term[[2]]))
+  }
+
+  if (length(term) == 2L) {
+    return(find_latent_terms(term[[2]]))
+  }
+
+  c(find_latent_terms(term[[2]]), find_latent_terms(term[[3]]))
+}
+
+#' Remove all latent(...) calls from a formula's parse tree
+#'
+#' Mirror of [nobars()] for `latent(...)` calls.
+#'
+#' @param term A language object (formula term)
+#' @return A language object with all `latent(...)` calls removed, or NULL
+#'   if nothing remains.
+#' @keywords internal
+no_latent_terms <- function(term) {
+  if (is.name(term) || !is.language(term)) return(term)
+
+  if (is.call(term) && identical(term[[1]], as.name("latent")) &&
+      length(term) == 2L) {
+    return(NULL)
+  }
+
+  if (identical(term[[1]], as.name("("))) {
+    inner_nb <- no_latent_terms(term[[2]])
+    if (is.null(inner_nb)) return(NULL)
+    return(call("(", inner_nb))
+  }
+
+  if (length(term) == 2L) {
+    nb <- no_latent_terms(term[[2]])
+    if (is.null(nb)) return(NULL)
+    return(call(deparse(term[[1]]), nb))
+  }
+
+  nb_left  <- no_latent_terms(term[[2]])
+  nb_right <- no_latent_terms(term[[3]])
+
+  if (is.null(nb_left) && is.null(nb_right)) return(NULL)
+  if (is.null(nb_left))  return(nb_right)
+  if (is.null(nb_right)) return(nb_left)
+
+  call(deparse(term[[1]]), nb_left, nb_right)
+}
+
+# ----------------------------------------------------------------------------
+# Special model terms: spatial(col) / temporal(col)
+#
+# These name a single data column (the per-observation spatial unit / time
+# index); the structure + adjacency/coords arrive through tulpa()'s spatial= /
+# temporal= argument, not the formula. The finder/stripper mirror nobars()
+# but are parameterised by the wrapper name, so spatial and temporal share one
+# implementation. (latent(...) keeps its own pair above -- it evaluates its
+# argument to an object, a different semantics from naming a column.)
+# ----------------------------------------------------------------------------
+
+# Collect all `fname(...)` calls on the rhs (fname = "spatial" / "temporal").
+# `pred` optionally selects which matched-name calls to own: a `fname(...)`
+# call is always treated atomically (a special term is never recursed into),
+# and `pred(call)` decides whether THIS finder owns it. `pred = NULL` owns
+# every `fname(...)` call (the original behaviour). This is how the two
+# meanings of `spatial(...)` -- the inline field constructor and the bare
+# `spatial(col)` naming term -- share one walker.
+find_special_terms <- function(term, fname, pred = NULL) {
+  if (is.name(term) || !is.language(term)) return(NULL)
+  if (is.call(term) && identical(term[[1]], as.name(fname))) {
+    if (is.null(pred) || isTRUE(pred(term))) return(list(term))
+    return(NULL)
+  }
+  if (identical(term[[1]], as.name("("))) return(find_special_terms(term[[2]], fname, pred))
+  if (length(term) == 2L) return(find_special_terms(term[[2]], fname, pred))
+  c(find_special_terms(term[[2]], fname, pred),
+    find_special_terms(term[[3]], fname, pred))
+}
+
+# Rewrite the rhs with the `fname(...)` calls this caller owns removed (NULL if
+# nothing remains). `pred` mirrors find_special_terms: a matched-name call is
+# atomic -- stripped when owned, kept verbatim (never recursed into) when not.
+no_special_terms <- function(term, fname, pred = NULL) {
+  if (is.name(term) || !is.language(term)) return(term)
+  if (is.call(term) && identical(term[[1]], as.name(fname))) {
+    if (is.null(pred) || isTRUE(pred(term))) return(NULL)
+    return(term)
+  }
+  if (identical(term[[1]], as.name("("))) {
+    inner <- no_special_terms(term[[2]], fname, pred)
+    if (is.null(inner)) return(NULL)
+    return(call("(", inner))
+  }
+  if (length(term) == 2L) {
+    nb <- no_special_terms(term[[2]], fname, pred)
+    if (is.null(nb)) return(NULL)
+    return(call(deparse(term[[1]]), nb))
+  }
+  nb_left  <- no_special_terms(term[[2]], fname, pred)
+  nb_right <- no_special_terms(term[[3]], fname, pred)
+  if (is.null(nb_left) && is.null(nb_right)) return(NULL)
+  if (is.null(nb_left))  return(nb_right)
+  if (is.null(nb_right)) return(nb_left)
+  call(deparse(term[[1]]), nb_left, nb_right)
+}
+
+# Distinguish the two `spatial(...)` forms. The inline varying-coefficient field
+# constructor is signalled by a named `graph =` / `formula =` argument, or a
+# one-sided formula (`~ ...`) argument given positionally; it is evaluated to a
+# tulpa_spatial_field. Everything else -- a bare `spatial(col)` naming term or a
+# malformed old-form call -- is left to the areal-naming path, which validates
+# and errors on it as before.
+.is_spatial_field_call <- function(cl) {
+  args <- as.list(cl)[-1L]
+  nm <- names(args)
+  if (!is.null(nm) && any(nzchar(nm) & nm %in% c("graph", "formula"))) {
+    return(TRUE)
+  }
+  any(vapply(args,
+             function(a) is.call(a) && identical(a[[1L]], as.name("~")),
+             logical(1)))
+}
+
+# Distinguish the two `temporal(...)` forms (the temporal mirror of
+# .is_spatial_field_call). The inline varying-coefficient field constructor is
+# signalled by a named `formula =` / `structure =` argument, or a one-sided
+# formula (`~ ...`) argument given positionally; it evaluates to a
+# tulpa_temporal_field. A bare `temporal(col)` naming term (one bare column
+# name) is left to the temporal-naming path.
+.is_temporal_field_call <- function(cl) {
+  args <- as.list(cl)[-1L]
+  nm <- names(args)
+  if (!is.null(nm) && any(nzchar(nm) & nm %in% c("formula", "structure"))) {
+    return(TRUE)
+  }
+  any(vapply(args,
+             function(a) is.call(a) && identical(a[[1L]], as.name("~")),
+             logical(1)))
+}
+
+# Extract the single bare column name from a special term, e.g. spatial(region).
+# At most one such term is allowed; it must wrap exactly one bare name.
+.special_term_var <- function(calls, fname) {
+  if (length(calls) == 0L) return(NULL)
+  if (length(calls) > 1L) {
+    stop(sprintf("At most one %s(...) term is allowed in a formula.", fname),
+         call. = FALSE)
+  }
+  cl <- calls[[1]]
+  if (length(cl) != 2L || !is.name(cl[[2]])) {
+    stop(sprintf("%s(...) takes exactly one bare column name, e.g. %s(region).",
+                 fname, fname), call. = FALSE)
+  }
+  deparse(cl[[2]])
+}
+
+# ============================================================================
+# Bar recognizer: is a language object (or a one-sided formula's RHS) a
+# grouping bar `lhs | rhs` / `lhs || rhs`? Shared by spatial(),
+# .temporal_field_spec(), and tulpa_bar_field_specs() so the three paths read
+# the same grammar.
+# ============================================================================
+
+# Is `x` a `|` or `||` call?
+.is_bar_call <- function(x) {
+  is.call(x) &&
+    (identical(x[[1]], as.name("|")) || identical(x[[1]], as.name("||")))
+}
+
+#' Recognize an inline varying-coefficient bar
+#'
+#' @description
+#' Test whether a one-sided formula carries a single varying-coefficient
+#' grouping bar of the form `~ 1 + w || node` (independent fields, `||`) or
+#' `~ 1 + w | node` (correlated fields, `|`). This is the same grammar
+#' [spatial()] and the inline `temporal()` field constructor accept, and the
+#' grammar [tulpa_bar_field_specs()] expands. A downstream package can use it to
+#' branch on "is this term a spatial / temporal varying-coefficient bar?" before
+#' calling [tulpa_bar_field_specs()].
+#'
+#' @param x A one-sided formula (e.g. `~ 1 + w || node`) or the bar language
+#'   object itself (`quote(1 + w || node)`).
+#'
+#' @return A single logical: `TRUE` when `x` is (or wraps) a `|` / `||` bar,
+#'   `FALSE` otherwise (a plain formula such as `~ 1 + w`, a non-bar term, or a
+#'   non-formula / non-language input).
+#'
+#' @seealso [tulpa_bar_field_specs()] for expanding the bar into per-column
+#'   field specs.
+#'
+#' @examples
+#' tulpa_is_spatial_bar(~ 1 + w || cell)   # TRUE
+#' tulpa_is_spatial_bar(~ 1 + w | cell)    # TRUE (correlated)
+#' tulpa_is_spatial_bar(~ 1 + w)           # FALSE (no bar)
+#'
+#' @export
+tulpa_is_spatial_bar <- function(x) {
+  if (inherits(x, "formula")) {
+    if (length(x) != 2L) return(FALSE)
+    x <- x[[2L]]
+  }
+  .is_bar_call(x)
+}
+
+# ============================================================================
+# Bar term parsing: structured RE specification with || expansion
+# ============================================================================
+
+#' Parse a single random effect bar term
+#'
+#' Takes a `|` or `||` language object and extracts the grouping variable(s),
+#' effect terms (intercept, slopes), and correlation structure. The bar
+#' operator drives the `correlated` flag: `|` -> `TRUE` (LKJ-Cholesky on the
+#' joint slope vector), `||` -> `FALSE` (diagonal covariance, one sigma per
+#' coefficient). This matches lme4 / glmmTMB and lets downstream packages
+#' branch on `correlated` to choose between independent-sigma and Cholesky
+#' parameterizations.
+#'
+#' Nested grouping `(1 | a/b)` is expanded into one spec per level
+#' (a, then a:b). `||` is preserved as a single spec rather than split into
+#' multiple `|` bars, so the original user intent (one logical RE term with
+#' diagonal covariance) round-trips through the parsed object.
+#'
+#' @param bar_term A language object: `|`(lhs, rhs) or `||`(lhs, rhs)
+#' @return A list of RE specs (one per grouping level). Each spec has:
+#'   - `group_var`: character, display label (colon-joined for nested)
+#'   - `group_vars`: character vector, each element a column name
+#'   - `group_expr`: language or NULL (set when grouping is a non-name expr)
+#'   - `slope_terms`: list of language objects (slope LHS terms)
+#'   - `has_intercept`: logical
+#'   - `correlated`: logical (TRUE for `|`, FALSE for `||`)
+#'   - `original`: the original bar language object
+#' @keywords internal
+parse_bar_term <- function(bar_term) {
+  stopifnot(is.call(bar_term))
+
+  op <- bar_term[[1]]
+  correlated <- identical(op, as.name("|"))
+
+  lhs <- bar_term[[2]]
+  rhs <- bar_term[[3]]
+
+  lhs_decomp <- decompose_bar_lhs(lhs)
+  group_specs <- resolve_group_rhs(rhs)
+
+  out <- list()
+  for (gs in group_specs) {
+    out[[length(out) + 1L]] <- list(
+      group_var     = gs$group_var,
+      group_vars    = gs$group_vars,
+      group_expr    = gs$group_expr,
+      slope_terms   = lhs_decomp$slope_terms,
+      has_intercept = lhs_decomp$has_intercept,
+      correlated    = correlated,
+      original      = bar_term
+    )
+  }
+  out
+}
+
+#' Resolve the RHS of a bar term into one or more group specs
+#'
+#' Three cases:
+#'   - simple name: `g` -> one spec with `group_vars = "g"`.
+#'   - nested `/` :   `a/b` -> two specs (`"a"`, `c("a","b")`).
+#'   - other call:    `factor(g)` or `g1:g2` -> one spec carrying the
+#'     language object in `group_expr` so we evaluate it at build time
+#'     instead of guessing column names.
+#'
+#' @param rhs A language object (RHS of `|` or `||`).
+#' @return List of group specs.
+#' @keywords internal
+resolve_group_rhs <- function(rhs) {
+  # Nested grouping a/b
+  if (is.call(rhs) && identical(rhs[[1]], as.name("/")) && is.name(rhs[[2]]) && is.name(rhs[[3]])) {
+    parent_name <- as.character(rhs[[2]])
+    child_name  <- as.character(rhs[[3]])
+    return(list(
+      list(
+        group_var  = parent_name,
+        group_vars = parent_name,
+        group_expr = NULL
+      ),
+      list(
+        group_var  = paste0(parent_name, ":", child_name),
+        group_vars = c(parent_name, child_name),
+        group_expr = NULL
+      )
+    ))
+  }
+
+  # Simple name
+  if (is.name(rhs)) {
+    nm <- as.character(rhs)
+    return(list(list(
+      group_var  = nm,
+      group_vars = nm,
+      group_expr = NULL
+    )))
+  }
+
+  # General expression: evaluate at build time
+  label <- paste(deparse(rhs, width.cutoff = 500L), collapse = "")
+  list(list(
+    group_var  = label,
+    group_vars = character(0),
+    group_expr = rhs
+  ))
+}
+
+#' Decompose the LHS of a bar term into intercept flag + slope language objects
+#'
+#' Walks the additive chain of the LHS and separates numeric intercept
+#' indicators (0, 1, -1) from slope term expressions. Returns language
+#' objects, not deparsed strings.
+#'
+#' @param lhs A language object (LHS of a bar term)
+#' @return A list with `has_intercept` (logical) and `slope_terms` (list of language objects)
+#' @keywords internal
+decompose_bar_lhs <- function(lhs) {
+  terms <- collect_additive_terms(lhs)
+  has_intercept <- TRUE
+  slopes <- list()
+
+  for (term in terms) {
+    if (is.numeric(term)) {
+      # 0 drops the intercept; -1 does too (the binary `x - 1` form, flattened
+      # to a numeric -1 by collect_additive_terms); 1 is the intercept, skipped.
+      if (term == 0 || term == -1) has_intercept <- FALSE
+    } else if (is.call(term) && identical(term[[1]], as.name("-")) &&
+               length(term) == 2 && is.numeric(term[[2]]) && term[[2]] == 1) {
+      has_intercept <- FALSE
+    } else {
+      slopes <- c(slopes, list(term))
+    }
+  }
+
+  list(has_intercept = has_intercept, slope_terms = slopes)
+}
+
+#' Collect additive terms from a + chain
+#'
+#' Recursively flattens `a + b + c` into `list(a, b, c)`.
+#'
+#' @param expr A language object
+#' @return A list of language objects (individual terms)
+#' @keywords internal
+collect_additive_terms <- function(expr) {
+  if (is.call(expr) && identical(expr[[1]], as.name("+"))) {
+    c(collect_additive_terms(expr[[2]]), collect_additive_terms(expr[[3]]))
+  } else if (is.call(expr) && identical(expr[[1]], as.name("-")) &&
+             length(expr) == 3L) {
+    # `a - b` == `a + (-b)`: flatten the left, negate the right so the intercept
+    # drop in `x - 1` is seen (a numeric -1) instead of a single binary-minus
+    # call filed as a nonsensical slope.
+    c(collect_additive_terms(expr[[2]]), collect_additive_terms(.negate_term(expr[[3]])))
+  } else {
+    list(expr)
+  }
+}
+
+#' Negate an additive term (numeric literal -> its negative; anything else ->
+#' a unary-minus call), for flattening binary `-` in a bar LHS.
+#' @keywords internal
+.negate_term <- function(t) {
+  if (is.numeric(t)) return(-t)
+  call("-", t)
+}
+
+#' Render a slope spec as a display string
+#'
+#' Used by the print method. Derives the textual form on demand from
+#' the stored language objects so we never store deparsed slope text.
+#'
+#' @keywords internal
+format_re_lhs <- function(re) {
+  pieces <- character(0)
+  if (re$has_intercept) pieces <- c(pieces, "1") else pieces <- c(pieces, "0")
+  for (s in re$slope_terms) {
+    pieces <- c(pieces, paste(deparse(s, width.cutoff = 500L), collapse = ""))
+  }
+  paste(pieces, collapse = " + ")
+}
+
+# ============================================================================
+# Main formula parser
+# ============================================================================
+
+#' Parse a mixed-model formula
+#'
+#' Decomposes a formula into fixed effects and random effects by walking
+#' the formula's abstract syntax tree. This is structural recursion with
+#' pattern matching on bar terms -- no string manipulation.
+#'
+#' @param formula A formula object (e.g., `y ~ x + (1 | group)`)
+#' @return A list with:
+#'   - `response`: character, the response variable label (`NULL` if none)
+#'   - `response_expr`: language object, the LHS of `~` (`NULL` if none)
+#'   - `fixed_formula`: formula, the fixed-effects-only formula
+#'   - `random_effects`: list of parsed RE specifications
+#'   - `n_re_terms`: integer, number of RE terms
+#'   - `latent_blocks`: list of evaluated user-defined latent block objects
+#'     (typically `tgmrf` S3 objects), one per `latent(...)` term in the
+#'     original formula. Empty list when no `latent(...)` terms are present.
+#'   - `n_latent_blocks`: integer, number of `latent(...)` terms
+#'   - `original`: the original formula
+#'
+#' @examples
+#' pf <- tulpa_parse_formula(y ~ x1 + x2 + (1 | group) + (x1 || site))
+#' pf$response        # "y"
+#' pf$fixed_formula   # y ~ x1 + x2
+#'
+#' @export
+tulpa_parse_formula <- function(formula) {
+  stopifnot(inherits(formula, "formula"))
+
+  formula_env <- environment(formula)
+
+  if (length(formula) == 3) {
+    response_expr <- formula[[2]]
+    rhs <- formula[[3]]
+  } else {
+    response_expr <- NULL
+    rhs <- formula[[2]]
+  }
+  response <- if (is.null(response_expr)) NULL else paste(deparse(response_expr, width.cutoff = 500L), collapse = "")
+
+  # Inline areal varying-coefficient fields: spatial(graph = , formula =
+  # ~ ... || cell) calls carrying named args. Extracted and stripped BEFORE bar
+  # parsing, because the field's own `|| cell` bar lives inside the call and
+  # must not be read as a model random effect by findbars(). Like latent(...),
+  # the whole call is evaluated to an object (a tulpa_spatial_field).
+  spatial_field_blocks <- list()
+  sf_calls <- find_special_terms(rhs, "spatial", .is_spatial_field_call)
+  for (sc in sf_calls) {
+    blk <- tryCatch(
+      eval(sc, envir = formula_env),
+      error = function(e) {
+        stop("Failed to evaluate inline spatial() field term `",
+             paste(deparse(sc), collapse = ""),
+             "`: ", conditionMessage(e), call. = FALSE)
+      }
+    )
+    if (!inherits(blk, "tulpa_spatial_field")) {
+      stop("An inline spatial(graph = , formula = ) term must evaluate to a ",
+           "tulpa_spatial_field object; got class ",
+           paste(class(blk), collapse = "/"), ".", call. = FALSE)
+    }
+    spatial_field_blocks[[length(spatial_field_blocks) + 1L]] <- blk
+  }
+  if (length(spatial_field_blocks) > 0L) {
+    rhs <- no_special_terms(rhs, "spatial", .is_spatial_field_call)
+    if (is.null(rhs)) rhs <- 1
+  }
+
+  # Inline temporal varying-coefficient fields: temporal(formula = ~ ... || time,
+  # structure = ) calls. Extracted and stripped BEFORE bar parsing for the same
+  # reason as the spatial fields -- the field's own `|| time` bar must not be
+  # read as a model random effect by findbars().
+  temporal_field_blocks <- list()
+  tf_calls <- find_special_terms(rhs, "temporal", .is_temporal_field_call)
+  for (tc in tf_calls) {
+    blk <- tryCatch(
+      eval(tc, envir = formula_env),
+      error = function(e) {
+        stop("Failed to evaluate inline temporal() field term `",
+             paste(deparse(tc), collapse = ""),
+             "`: ", conditionMessage(e), call. = FALSE)
+      }
+    )
+    if (!inherits(blk, "tulpa_temporal_field")) {
+      stop("An inline temporal(formula = ) term must evaluate to a ",
+           "tulpa_temporal_field object; got class ",
+           paste(class(blk), collapse = "/"), ".", call. = FALSE)
+    }
+    temporal_field_blocks[[length(temporal_field_blocks) + 1L]] <- blk
+  }
+  if (length(temporal_field_blocks) > 0L) {
+    rhs <- no_special_terms(rhs, "temporal", .is_temporal_field_call)
+    if (is.null(rhs)) rhs <- 1
+  }
+
+  # Covariate smoother terms: s(x, k = , structure = ) calls. Kept as
+  # unevaluated language (the covariate resolves against `data` at build time,
+  # see .smooth_block_from_call). Stripped BEFORE bar parsing: the bar / latent
+  # strippers rebuild the tree positionally and would drop named arguments
+  # (`s(x, k = 25)` -> `s(x, 25)`).
+  smooth_calls <- find_special_terms(rhs, "s") %||% list()
+  if (length(smooth_calls) > 0L) {
+    rhs <- no_special_terms(rhs, "s")
+    if (is.null(rhs)) rhs <- 1
+  }
+
+  bars <- findbars(rhs)
+
+  random_effects <- list()
+  if (length(bars) > 0) {
+    for (bar in bars) {
+      random_effects <- c(random_effects, parse_bar_term(bar))
+    }
+  }
+
+  rhs_clean <- nobars(rhs)
+
+  # Latent-block terms: `latent(<tgmrf object>)` calls anywhere on the rhs.
+  # Match before stripping so the user's `latent(blk)` is detected even when
+  # it sits next to a bar term in the same formula.
+  latent_blocks <- list()
+  if (!is.null(rhs_clean)) {
+    latent_calls <- find_latent_terms(rhs_clean)
+    for (lc in latent_calls) {
+      blk <- tryCatch(
+        eval(lc, envir = formula_env),
+        error = function(e) {
+          stop("Failed to evaluate latent block term `",
+               paste(deparse(lc), collapse = ""),
+               "`: ", conditionMessage(e), call. = FALSE)
+        }
+      )
+      if (!inherits(blk, "tulpa_latent_block")) {
+        stop("latent(...) must wrap a tulpa latent-block object ",
+             "(e.g. one returned by tgmrf()); got class ",
+             paste(class(blk), collapse = "/"), ".", call. = FALSE)
+      }
+      latent_blocks[[length(latent_blocks) + 1L]] <- blk
+    }
+    rhs_clean <- no_latent_terms(rhs_clean)
+  }
+
+  # Spatial / temporal special terms: spatial(col) / temporal(col) name a data
+  # column (the per-observation spatial unit / time index). The structure +
+  # adjacency/coords arrive via tulpa()'s spatial= / temporal= argument. Record
+  # the column name and strip the term from the fixed-effects formula.
+  spatial_var <- NULL
+  temporal_var <- NULL
+  if (!is.null(rhs_clean)) {
+    spatial_var  <- .special_term_var(find_special_terms(rhs_clean, "spatial"), "spatial")
+    temporal_var <- .special_term_var(find_special_terms(rhs_clean, "temporal"), "temporal")
+    rhs_clean <- no_special_terms(rhs_clean, "spatial")
+    if (!is.null(rhs_clean)) rhs_clean <- no_special_terms(rhs_clean, "temporal")
+  }
+
+  fixed_rhs <- if (is.null(rhs_clean)) 1 else rhs_clean
+  fixed_formula <- if (is.null(response_expr)) {
+    as.formula(call("~", fixed_rhs), env = formula_env)
+  } else {
+    as.formula(call("~", response_expr, fixed_rhs), env = formula_env)
+  }
+
+  structure(
+    list(
+      response        = response,
+      response_expr   = response_expr,
+      fixed_formula   = fixed_formula,
+      random_effects  = random_effects,
+      n_re_terms      = length(random_effects),
+      latent_blocks   = latent_blocks,
+      n_latent_blocks = length(latent_blocks),
+      spatial_field_blocks   = spatial_field_blocks,
+      n_spatial_field_blocks = length(spatial_field_blocks),
+      temporal_field_blocks   = temporal_field_blocks,
+      n_temporal_field_blocks = length(temporal_field_blocks),
+      smooth_calls    = smooth_calls,
+      n_smooth_terms  = length(smooth_calls),
+      spatial_var     = spatial_var,
+      temporal_var    = temporal_var,
+      original        = formula
+    ),
+    class = "tulpa_parsed_formula"
+  )
+}
+
+#' Build the zero-inflation design matrix from `ziformula`.
+#'
+#' A one-sided formula giving the fixed effects of the structural-zero logit.
+#' `~ 1` is the constant-probability model. Random effects in the ZI predictor
+#' are not supported: the compiled kernels share the random-effect block into
+#' the count process only, so a bar here would be silently dropped.
+#'
+#' @keywords internal
+.zi_design <- function(ziformula, data, n_obs) {
+  if (is.null(ziformula)) return(NULL)
+  if (!inherits(ziformula, "formula") || length(ziformula) != 2L) {
+    stop("`ziformula` must be a one-sided formula, e.g. ~ 1 or ~ x.",
+         call. = FALSE)
+  }
+  if (any(grepl("\\|", deparse(ziformula[[2L]])))) {
+    stop("`ziformula` takes fixed effects only; random effects in the ",
+         "zero-inflation predictor are not supported.", call. = FALSE)
+  }
+  # ~ 0 / ~ -1 leaves no columns, which is "no zero inflation" written the long
+  # way round; treat it as such rather than building a zero-column process.
+  mf <- stats::model.frame(ziformula, data, na.action = stats::na.pass)
+  X_zi <- stats::model.matrix(ziformula, mf)
+  if (ncol(X_zi) == 0L) return(NULL)
+  if (nrow(X_zi) != n_obs) {
+    stop(sprintf(paste0(
+      "`ziformula` produced %d rows but the model has %d observations; the ",
+      "zero-inflation terms must come from the same `data`."),
+      nrow(X_zi), n_obs), call. = FALSE)
+  }
+  bad <- which(!stats::complete.cases(X_zi))
+  if (length(bad)) {
+    stop(sprintf(
+      "`ziformula` has missing values at row(s) %s.",
+      paste(utils::head(bad, 5L), collapse = ", ")), call. = FALSE)
+  }
+  colnames(X_zi) <- paste0("zi_", colnames(X_zi))
+  X_zi
+}
+
+
+#' Build model matrices from a parsed formula
+#'
+#' Takes a parsed formula and data frame, and constructs:
+#' - The fixed-effects design matrix X
+#' - An offset vector (or NULL) extracted from `offset(...)` terms
+#' - RE group index vectors
+#' - RE slope matrices (if applicable)
+#'
+#' @param parsed A `tulpa_parsed_formula` object
+#' @param data A data frame
+#' @return A list with:
+#'   - `y`: response vector (or NULL). A `cbind(successes, failures)` response
+#'     is resolved to the successes column.
+#'   - `n_trials`: binomial denominators when the response was written as
+#'     `cbind(successes, failures)`, otherwise NULL
+#'   - `X`: fixed-effects design matrix
+#'   - `offset`: numeric vector or NULL
+#'   - `re_terms`: list of RE data structures (group indices, slope matrices)
+#'
+#' @keywords internal
+#' @export
+tulpa_build_model_data <- function(parsed, data) {
+  stopifnot(inherits(parsed, "tulpa_parsed_formula"))
+
+  formula_env <- environment(parsed$original) %||% parent.frame()
+
+  # Response: evaluate the language object directly. Handles bare names,
+  # cbind(succ, fail), backtick-quoted identifiers, all in one path.
+  y <- NULL
+  if (!is.null(parsed$response_expr)) {
+    y <- tryCatch(
+      eval(parsed$response_expr, envir = data, enclos = formula_env),
+      error = function(e) NULL
+    )
+    if (is.null(y)) {
+      stop("Response '", parsed$response, "' not found in data", call. = FALSE)
+    }
+  }
+
+  # A two-column response is the lme4/glm binomial idiom, cbind(successes,
+  # failures). The kernels take successes plus a denominator, so the pair is
+  # resolved here into a length-n `y` and an `n_trials` vector, and everything
+  # downstream sees the single representation. Leaving the matrix in place
+  # would put 2n response values against the n rows of `X`, which recycles
+  # rather than errors once it reaches the linear algebra.
+  n_trials <- NULL
+  if (!is.null(y) && (is.matrix(y) || is.data.frame(y))) {
+    ym <- as.matrix(y)
+    if (ncol(ym) == 1L) {
+      y <- as.numeric(ym[, 1L])
+    } else if (ncol(ym) == 2L) {
+      successes <- as.numeric(ym[, 1L])
+      failures  <- as.numeric(ym[, 2L])
+      fin <- is.finite(successes) & is.finite(failures)
+      if (any(successes[fin] < 0) || any(failures[fin] < 0)) {
+        stop("A cbind(successes, failures) response must have non-negative ",
+             "entries in both columns.", call. = FALSE)
+      }
+      y <- successes
+      n_trials <- successes + failures
+    } else {
+      stop(sprintf(paste0(
+        "A matrix response must have 2 columns, cbind(successes, failures); ",
+        "got %d. Categorical responses are fit through family = ",
+        "'multinomial' / 'ordinal' with a factor response."), ncol(ym)),
+        call. = FALSE)
+    }
+  }
+
+  # Fixed-effects design matrix + offset extraction.
+  # model.frame parses offset() terms and exposes them via model.offset();
+  # model.matrix excludes them from the design.
+  mf <- model.frame(parsed$fixed_formula, data, na.action = na.pass)
+  X <- model.matrix(parsed$fixed_formula, mf)
+  off <- stats::model.offset(mf)
+
+  # Random effects
+  re_terms <- list()
+  for (i in seq_along(parsed$random_effects)) {
+    re_spec <- parsed$random_effects[[i]]
+
+    group_factor <- resolve_group_factor(re_spec, data, formula_env)
+    group_idx <- as.integer(group_factor)
+    n_groups <- nlevels(group_factor)
+
+    n_coefs <- if (re_spec$has_intercept) 1L else 0L
+    slope_matrix <- NULL
+    slope_names <- character(0)
+
+    slope_lang <- re_spec$slope_terms
+    if (length(slope_lang) > 0) {
+      slope_rhs <- slope_lang[[1]]
+      if (length(slope_lang) > 1) {
+        for (s in slope_lang[-1]) slope_rhs <- call("+", slope_rhs, s)
+      }
+      slope_formula <- as.formula(call("~", slope_rhs), env = formula_env)
+      slope_mf <- model.frame(slope_formula, data, na.action = na.pass)
+      slope_mat <- model.matrix(slope_formula, slope_mf)
+      intercept_col <- which(colnames(slope_mat) == "(Intercept)")
+      if (length(intercept_col) > 0) {
+        slope_mat <- slope_mat[, -intercept_col, drop = FALSE]
+      }
+      if (ncol(slope_mat) > 0) {
+        slope_matrix <- slope_mat
+        slope_names <- colnames(slope_mat)
+        n_coefs <- n_coefs + ncol(slope_mat)
+      }
+    }
+
+    re_terms[[i]] <- list(
+      group_var     = re_spec$group_var,
+      group_vars    = re_spec$group_vars,
+      group_idx     = group_idx,
+      n_groups      = n_groups,
+      n_coefs       = n_coefs,
+      has_intercept = re_spec$has_intercept,
+      slope_matrix  = slope_matrix,
+      slope_names   = slope_names,
+      correlated    = re_spec$correlated,
+      levels        = levels(group_factor)
+    )
+  }
+
+  list(
+    y           = y,
+    n_trials    = n_trials,
+    X           = X,
+    offset      = off,
+    re_terms    = re_terms,
+    n_obs       = nrow(X),
+    n_fixed     = ncol(X),
+    n_re_terms  = length(re_terms),
+    fixed_names = colnames(X)
+  )
+}
+
+#' Resolve a parsed RE spec to a grouping factor
+#'
+#' Three paths, mirroring `resolve_group_rhs`:
+#'   - single column name: take `data[[name]]`.
+#'   - multiple column names (nested `a/b`): `interaction(data[names])`.
+#'   - language expression: evaluate against `data` (e.g., `factor(g)`).
+#'
+#' @keywords internal
+resolve_group_factor <- function(re_spec, data, env) {
+  if (!is.null(re_spec$group_expr)) {
+    val <- eval(re_spec$group_expr, envir = data, enclos = env)
+    return(as.factor(val))
+  }
+  gvars <- re_spec$group_vars
+  if (length(gvars) > 1L) {
+    missing <- setdiff(gvars, names(data))
+    if (length(missing)) {
+      stop("Grouping variable(s) ", paste(shQuote(missing), collapse = ", "),
+           " not found in data", call. = FALSE)
+    }
+    return(interaction(data[gvars], drop = TRUE))
+  }
+  if (!gvars %in% names(data)) {
+    stop("Grouping variable '", gvars, "' not found in data", call. = FALSE)
+  }
+  as.factor(data[[gvars]])
+}
+
+#' @export
+print.tulpa_parsed_formula <- function(x, ...) {
+  cat("tulpa parsed formula\n")
+  cat("  Response:", x$response %||% "(none)", "\n")
+  cat("  Fixed:", paste(deparse(x$fixed_formula), collapse = ""), "\n")
+  cat("  Random effects:", x$n_re_terms, "term(s)\n")
+  for (re in x$random_effects) {
+    bar <- if (re$correlated) "|" else "||"
+    cat("    (", format_re_lhs(re), bar, re$group_var, ")\n")
+  }
+  if (length(x$latent_blocks) > 0L) {
+    cat("  Latent blocks:", x$n_latent_blocks, "term(s)\n")
+    for (i in seq_along(x$latent_blocks)) {
+      blk <- x$latent_blocks[[i]]
+      label <- blk$name %||% paste0("(", paste(class(blk), collapse = "/"), ")")
+      cat("    [", i, "] ", label, ": n_latent=", blk$n_latent,
+          ", theta=", blk$theta_dim, "\n", sep = "")
+    }
+  }
+  invisible(x)
+}

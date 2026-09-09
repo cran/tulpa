@@ -1,0 +1,574 @@
+#' Spatially varying coefficient structure
+#'
+#' @description
+#' Specify a spatially varying coefficient (SVC): one or more fixed-effect
+#' coefficients are allowed to vary smoothly over space, with the variation
+#' governed by a Gaussian process (NNGP or HSGP approximation).
+#'
+#' @param coords A formula (`~ lon + lat`) or character vector of length 2
+#'   naming the two coordinate variables in the data.
+#' @param terms Which coefficients vary over space. A formula, an integer vector
+#'   of design-matrix column indices, or a character vector of term names.
+#'   Default `1` (the intercept).
+#' @param cov Covariance function. One of `"exponential"` or `"matern"`.
+#' @param nn Number of nearest neighbours used in the NNGP approximation
+#'   (`approx = "nngp"`).
+#' @param shared Whether the effect is shared across processes in a
+#'   multi-process model. `NULL` (default) shares it; `FALSE` fits
+#'   process-specific effects and emits a warning.
+#' @param scale_coords Logical. Standardize coordinates before fitting
+#'   (default `TRUE`).
+#' @param approx Spatial approximation. `"nngp"` (nearest-neighbour GP) or
+#'   `"hsgp"` (Hilbert-space GP).
+#' @param m Number of basis functions per dimension for the HSGP approximation
+#'   (`approx = "hsgp"`).
+#' @param c_boundary Boundary-extension factor for the HSGP domain
+#'   (`approx = "hsgp"`).
+#' @param parameterization Latent parameterization for the exact-NUTS field
+#'   (`approx = "nngp"` only; HSGP is already non-centered by construction).
+#'   `"noncentered"` (default) samples `z_j ~ N(0, I)` per term and
+#'   reconstructs each field as `w_j = f(z_j, sigma2_j, phi_j)`, removing the
+#'   field/hyperparameter funnel that otherwise attenuates the field's
+#'   amplitude when it is weakly identified. `"centered"` places the NNGP
+#'   density on each term's field directly; it is marginally cheaper on a
+#'   well-identified response, but on a weakly identified one it recovers only
+#'   about a third of the field's spread.
+#'
+#' @return A `tulpa_svc` object (also of class `tulpa_spatial`).
+#'
+#' @seealso [spatial_gp()] for a spatial random effect (rather than a varying
+#'   coefficient).
+#'
+#' @examples
+#' # Intercept that varies smoothly over space
+#' spatial_svc(~ lon + lat)
+#'
+#' @export
+spatial_svc <- function(coords,
+                        terms = 1,
+                        cov = c("exponential", "matern"),
+                        nn = 15,
+                        shared = NULL,
+                        scale_coords = TRUE,
+                        approx = c("nngp", "hsgp"),
+                        m = 6,
+                        c_boundary = 1.5,
+                        parameterization = c("noncentered", "centered")) {
+
+  cov <- match.arg(cov)
+  approx <- match.arg(approx)
+  parameterization <- match.arg(parameterization)
+
+  coord_vars <- .parse_coord_spec(coords, "svc()")
+
+  # Parse terms specification
+  if (inherits(terms, "formula")) {
+    # Will be resolved against design matrix later
+    terms_spec <- list(type = "formula", formula = terms)
+  } else if (is.numeric(terms)) {
+    terms_spec <- list(type = "index", indices = as.integer(terms))
+  } else if (is.character(terms)) {
+    terms_spec <- list(type = "names", names = terms)
+  } else {
+    stop("`terms` must be a formula, integer vector, or character vector",
+         call. = FALSE)
+  }
+
+  # Validate nn (only relevant for NNGP)
+  if (approx == "nngp") {
+    if (!is.numeric(nn) || length(nn) != 1 || nn < 1) {
+      stop("`nn` must be a positive integer", call. = FALSE)
+    }
+    nn <- as.integer(nn)
+  }
+
+  # Validate HSGP parameters
+  if (approx == "hsgp") {
+    if (!is.numeric(m) || length(m) != 1 || m < 3 || m > 50) {
+      stop("`m` must be an integer between 3 and 50", call. = FALSE)
+    }
+    m <- as.integer(m)
+    if (!is.numeric(c_boundary) || length(c_boundary) != 1 || c_boundary < 1.0) {
+      stop("`c_boundary` must be a number >= 1.0", call. = FALSE)
+    }
+  }
+
+  if (isFALSE(shared)) .warn_nonshared("SVCs", "spatially-varying effects")
+
+  structure(
+    list(
+      type = "svc",
+      coord_vars = coord_vars,
+      terms_spec = terms_spec,
+      cov = cov,
+      nn = nn,
+      shared = shared,
+      scale_coords = scale_coords,
+      approx = approx,
+      m = m,
+      c_boundary = c_boundary,
+      parameterization = parameterization,
+      # Filled in during validation
+      n_obs = NULL,
+      n_svc = NULL,
+      svc_indices = NULL,
+      svc_names = NULL,
+      coords_matrix = NULL,
+      neighbor_info = NULL
+    ),
+    class = c("tulpa_svc", "tulpa_spatial", "list")
+  )
+}
+
+
+#' Print method for tulpa_svc
+#'
+#' @param x A tulpa_svc object
+#' @param ... Ignored
+#'
+#' @return The input `x`, returned invisibly. Called for the side effect of
+#'   printing the spatially-varying-coefficient specification to the console.
+#'
+#' @export
+print.tulpa_svc <- function(x, ...) {
+  cat("tulpa spatially-varying coefficients\n")
+  cat("=====================================\n\n")
+
+  cat("Coordinates:", paste(x$coord_vars, collapse = ", "), "\n")
+  cat("Covariance:", x$cov, "\n")
+  cat("Neighbors (NNGP):", x$nn, "\n")
+  cat("Shared:", if (!isFALSE(x$shared)) "Yes (enters both processes)" else "No", "\n")
+
+  if (!is.null(x$n_svc)) {
+    cat("\nSVC terms:", x$n_svc, "\n")
+    if (!is.null(x$svc_names)) {
+      cat("  ", paste(x$svc_names, collapse = ", "), "\n")
+    }
+  } else {
+    cat("\nTerms: ")
+    if (x$terms_spec$type == "formula") {
+      cat(deparse(x$terms_spec$formula), "\n")
+    } else if (x$terms_spec$type == "index") {
+      cat("columns ", paste(x$terms_spec$indices, collapse = ", "), "\n")
+    } else {
+      cat(paste(x$terms_spec$names, collapse = ", "), "\n")
+    }
+  }
+
+  if (!is.null(x$n_obs)) {
+    cat("Observations:", x$n_obs, "\n")
+  }
+
+  invisible(x)
+}
+
+
+#' Validate SVC specification against data and design matrix
+#'
+#' @param svc tulpa_svc object
+#' @param data Data frame
+#' @param X Design matrix (to resolve term names)
+#'
+#' @return Updated tulpa_svc object with computed neighbor structure
+#' @keywords internal
+validate_svc <- function(svc, data, X) {
+  if (is.null(svc)) return(NULL)
+  if (!inherits(svc, "tulpa_svc")) return(svc)  # Other spatial types
+
+  N <- nrow(data)
+  p <- ncol(X)
+
+  # Check coordinate columns exist
+  for (cv in svc$coord_vars) {
+    if (!(cv %in% names(data))) {
+      stop(sprintf("Coordinate variable '%s' not found in data", cv),
+           call. = FALSE)
+    }
+  }
+
+  # Extract coordinates
+  coords <- cbind(
+    data[[svc$coord_vars[1]]],
+    data[[svc$coord_vars[2]]]
+  )
+
+  # Check for missing coordinates
+  if (any(is.na(coords))) {
+    stop("Coordinate columns contain missing values", call. = FALSE)
+  }
+
+  # Scale coordinates if requested
+  if (svc$scale_coords) {
+    coords <- scale(coords)
+  }
+
+  # Resolve SVC terms
+  coef_names <- colnames(X)
+  if (is.null(coef_names)) {
+    coef_names <- paste0("V", seq_len(p))
+  }
+
+  if (svc$terms_spec$type == "index") {
+    svc_indices <- svc$terms_spec$indices
+    if (any(svc_indices < 1 | svc_indices > p)) {
+      stop(sprintf("SVC term indices must be between 1 and %d", p),
+           call. = FALSE)
+    }
+    svc_names <- coef_names[svc_indices]
+
+  } else if (svc$terms_spec$type == "names") {
+    svc_indices <- .resolve_varying_coef_columns(
+      svc$terms_spec$names, has_intercept = FALSE, data, coef_names, "SVC")
+    svc_names <- coef_names[svc_indices]
+
+  } else if (svc$terms_spec$type == "formula") {
+    tt <- terms(svc$terms_spec$formula)
+    svc_indices <- .resolve_varying_coef_columns(
+      attr(tt, "term.labels"), has_intercept = attr(tt, "intercept") == 1,
+      data, coef_names, "SVC")
+    svc_names <- coef_names[svc_indices]
+  }
+
+  # Compute nearest neighbors (NNGP only)
+  approx <- svc$approx %||% "nngp"
+  if (approx == "nngp") {
+    # The NNGP SVC field puts one effect per observation, so two rows sharing
+    # coordinates place a distance-0 point in a conditioning set -> correlation
+    # 1 -> a singular per-node covariance in the marginal-SE / kernel solve.
+    # Reject duplicates rather than fail silently downstream.
+    if (anyDuplicated(coords)) {
+      dup <- which(duplicated(coords) | duplicated(coords, fromLast = TRUE))
+      stop(sprintf(paste0(
+        "svc() with approx = 'nngp' requires distinct coordinates: %d row(s) ",
+        "share coordinates with another (first at row %d). Jitter or aggregate ",
+        "the duplicated locations before fitting."), length(dup), dup[1L]),
+        call. = FALSE)
+    }
+    nn <- min(svc$nn, N - 1)
+    neighbor_info <- compute_nngp_neighbors(coords, nn)
+  } else {
+    neighbor_info <- NULL
+  }
+
+  # Update SVC object
+  svc$n_obs <- N
+  svc$n_svc <- length(svc_indices)
+  svc$svc_indices <- svc_indices
+  svc$svc_names <- svc_names
+  svc$coords_matrix <- coords
+  svc$neighbor_info <- neighbor_info
+
+  # Set spatial parameters for parameter layout
+  if (approx == "hsgp") {
+    m <- svc$m %||% 6L
+    svc$n_spatial <- length(svc_indices) * as.integer(m)^2  # m^2 basis per SVC term
+  } else {
+    svc$n_spatial <- svc$n_obs * svc$n_svc  # N effects per SVC term
+  }
+
+  svc
+}
+
+
+#' Compute nearest neighbors for NNGP
+#'
+#' @description
+#' Compute the k nearest neighbors for each observation using Euclidean
+#' distance. Returns in a format suitable for the NNGP likelihood.
+#'
+#' @param coords N x d matrix of coordinates
+#' @param k Number of nearest neighbors
+#'
+#' @return List with:
+#'   - `nn_idx`: N x k matrix of neighbor indices (0 for obs with fewer neighbors)
+#'   - `nn_dist`: N x k matrix of distances to neighbors
+#'   - `nn_order`: Ordering of observations for NNGP (by coordinate)
+#'
+#' @export
+#' @keywords internal
+compute_nngp_neighbors <- function(coords, k) {
+  N <- nrow(coords)
+  d <- ncol(coords)
+
+  # Order observations lexicographically by coordinate (a valid NNGP ordering
+  # that improves conditioning over the raw input order), over however many
+  # coordinate columns there are. The neighbour SELECTION here and the neighbour
+  # COVARIANCE the kernels build from it read the same metric over every column;
+  # a selection pinned to two would order by a projection of the domain the
+  # covariance does not use.
+  order_idx <- do.call(order, lapply(seq_len(d), function(j) coords[, j]))
+
+  # Reorder coordinates
+  coords_ordered <- coords[order_idx, , drop = FALSE]
+
+  # Compute neighbors for each observation
+  nn_idx <- matrix(0L, nrow = N, ncol = k)
+  nn_dist <- matrix(Inf, nrow = N, ncol = k)
+
+  # Precompute pairwise distances among neighbors
+  nn_neighbor_dist <- array(0, dim = c(N, k, k))
+
+  # seq_len(N)[-1] is empty for N <= 1 (unlike 2:N, which counts DOWN to give
+  # c(2, 1) at N == 1 and indexes a non-existent row).
+  for (i in seq_len(N)[-1]) {
+    # Only consider previous observations (in ordering) as potential neighbors
+    n_candidates <- min(i - 1, k)
+
+    if (n_candidates > 0) {
+      # Compute distances to all previous observations
+      dists <- .coord_dist_to(coords_ordered[1:(i-1), , drop = FALSE],
+                              coords_ordered[i, ])
+
+      # Find k nearest
+      if (length(dists) <= k) {
+        nn_order <- order(dists)
+        nn_idx[i, seq_len(length(dists))] <- nn_order
+        nn_dist[i, seq_len(length(dists))] <- dists[nn_order]
+      } else {
+        nn_order <- order(dists)[1:k]
+        nn_idx[i, ] <- nn_order
+        nn_dist[i, ] <- dists[nn_order]
+      }
+
+      # Compute pairwise distances among neighbors
+      n_neighbors <- sum(nn_idx[i, ] > 0)
+      if (n_neighbors > 1) {
+        neighbor_indices <- nn_idx[i, 1:n_neighbors]
+        neighbor_coords <- coords_ordered[neighbor_indices, , drop = FALSE]
+        # The whole pairwise block at once, over every coordinate column. The
+        # diagonal is exactly 0 by construction rather than by a special case.
+        nn_neighbor_dist[i, seq_len(n_neighbors), seq_len(n_neighbors)] <-
+          as.matrix(stats::dist(neighbor_coords))
+      }
+    }
+  }
+
+  list(
+    nn_idx = nn_idx,
+    nn_dist = nn_dist,
+    nn_neighbor_dist = nn_neighbor_dist,  # cached pairwise distances
+    nn_order = order_idx,
+    nn_order_inv = order(order_idx),  # Inverse permutation
+    k = k
+  )
+}
+
+
+#' Extract spatially-varying coefficients from a fitted model
+#'
+#' @description
+#' Extract posterior distributions of spatially-varying coefficients (SVCs)
+#' from a fitted tulpa model with SVC specification.
+#'
+#' @param object A `tulpa_fit` object fitted with `svc` argument
+#' @param terms Which SVC terms to extract. If NULL (default), extracts all.
+#' @param summary Logical; if TRUE, return summary statistics instead of
+#'   full posterior draws.
+#' @param probs Quantiles to compute if `summary = TRUE`.
+#' @param ... Ignored
+#'
+#' @return A `tulpa_svc_posterior` object containing:
+#' - `draws`: Array of posterior draws (draws x locations x terms)
+#' - `coords`: Coordinate matrix
+#' - `term_names`: Names of SVC terms
+#'
+#' @examples
+#' \donttest{
+#' set.seed(303)
+#' n <- 25L
+#' df <- data.frame(lon = runif(n), lat = runif(n), x = rnorm(n))
+#' bsurf <- 0.9 * sin(2.8 * df$lon) + 0.7 * cos(2.2 * df$lat)
+#' df$count <- rpois(n, exp(0.2 + (0.8 + bsurf) * df$x))
+#'
+#' # The varying slope on `x` is a spatial field; SVC is exact-mode only.
+#' fit <- tulpa(
+#'   count ~ x,
+#'   data = df,
+#'   family = "poisson",
+#'   spatial = spatial_svc(~ lon + lat, terms = ~ x - 1, nn = 5L),
+#'   mode = "exact",
+#'   control = list(n_iter = 80L, n_warmup = 40L, seed = 1L)
+#' )
+#'
+#' svc_post <- svc(fit)
+#' summary(svc_post)
+#' }
+#'
+#' @seealso [spatial_svc()], [plot.tulpa_svc_posterior()]
+#'
+#' @export
+svc <- function(object, terms = NULL, summary = FALSE,
+                probs = c(0.025, 0.5, 0.975), ...) {
+  UseMethod("svc")
+}
+
+
+#' @rdname svc
+#' @export
+svc.tulpa_fit <- function(object, terms = NULL, summary = FALSE,
+                           probs = c(0.025, 0.5, 0.975), ...) {
+  .extract_varying_coef(
+    object, terms, summary, probs,
+    slot = "svc",
+    info_class = "tulpa_svc",
+    not_fitted_msg = paste0(
+      "Model was not fitted with spatially-varying coefficients.\n",
+      "Pass `spatial = spatial_svc(...)` to tulpa() with `mode = \"exact\"`."),
+    draws_field = "svc_draws",
+    names_field = "svc_names",
+    field_slot = "spatial",
+    draws_prefix = "svc_w",
+    n_units_field = "n_obs",
+    build_result = function(info, draws, term_names) {
+      structure(
+        list(
+          draws = draws,
+          coords = info$coords_matrix,
+          term_names = term_names,
+          n_obs = info$n_obs,
+          n_svc = length(term_names),
+          n_draws = dim(draws)[1],
+          cov = info$cov
+        ),
+        class = "tulpa_svc_posterior"
+      )
+    }
+  )
+}
+
+
+#' Summary method for tulpa_svc_posterior
+#'
+#' @param object A tulpa_svc_posterior object
+#' @param probs Quantiles to compute
+#' @param ... Ignored
+#'
+#' @return A `tulpa_svc_summary` data frame with one row per location and term,
+#'   holding the observation index, term name, coordinates, and the posterior
+#'   mean, SD, and requested quantiles of each spatially-varying coefficient.
+#'
+#' @export
+summary.tulpa_svc_posterior <- function(object, probs = c(0.025, 0.5, 0.975), ...) {
+  .summary_varying_coef(
+    object, probs,
+    n_terms = object$n_svc,
+    lead_cols = function(j) data.frame(
+      obs = seq_len(object$n_obs),
+      term = object$term_names[j],
+      coord_1 = object$coords[, 1],
+      coord_2 = object$coords[, 2]
+    ),
+    summary_class = "tulpa_svc_summary"
+  )
+}
+
+
+#' Print method for tulpa_svc_posterior
+#'
+#' @param x A tulpa_svc_posterior object
+#' @param ... Ignored
+#'
+#' @return The input `x`, returned invisibly. Called for the side effect of
+#'   printing a summary of the spatially-varying-coefficient posterior to the
+#'   console.
+#'
+#' @export
+print.tulpa_svc_posterior <- function(x, ...) {
+  .print_varying_coef(
+    x, "Spatially-varying",
+    axis_label = "Locations", axis_value = x$n_obs,
+    meta_label = "Covariance function", meta_value = x$cov,
+    viz = "spatial"
+  )
+}
+
+
+#' Plot method for tulpa_svc_posterior
+#'
+#' @param x A tulpa_svc_posterior object
+#' @param term Which term to plot (name or index). Default: first term.
+#' @param type Plot type: "mean" (default), "sd", or quantile (e.g., "q50")
+#' @param ... Additional arguments passed to plotting functions
+#'
+#' @return A `ggplot` object when ggplot2 is installed; otherwise `NULL`
+#'   invisibly, after drawing a base-graphics map. Called for the side effect of
+#'   mapping the selected spatially-varying coefficient.
+#'
+#' @export
+plot.tulpa_svc_posterior <- function(x, term = 1, type = "mean", ...) {
+
+  if (is.character(term)) {
+    term_idx <- match(term, x$term_names)
+    if (is.na(term_idx)) {
+      stop("Term not found: ", term, call. = FALSE)
+    }
+  } else {
+    term_idx <- term
+  }
+
+  term_name <- x$term_names[term_idx]
+  draws <- x$draws[, , term_idx]
+
+  # Compute summary to plot
+  if (type == "mean") {
+    values <- colMeans(draws)
+    title <- paste("SVC:", term_name, "(posterior mean)")
+  } else if (type == "sd") {
+    values <- apply(draws, 2, sd)
+    title <- paste("SVC:", term_name, "(posterior SD)")
+  } else if (grepl("^q[0-9]+", type)) {
+    prob <- as.numeric(gsub("q", "", type)) / 100
+    values <- apply(draws, 2, quantile, probs = prob)
+    title <- paste0("SVC: ", term_name, " (", type, ")")
+  } else {
+    stop("Unknown plot type: ", type, call. = FALSE)
+  }
+
+  coords <- x$coords
+
+  # Use ggplot2 if available
+  if (requireNamespace("ggplot2", quietly = TRUE)) {
+    df <- data.frame(
+      x = coords[, 1],
+      y = coords[, 2],
+      value = values
+    )
+
+    p <- ggplot2::ggplot(df, ggplot2::aes(x = .data$x, y = .data$y, color = .data$value)) +
+      ggplot2::geom_point(size = 2, ...) +
+      ggplot2::scale_color_viridis_c() +
+      ggplot2::labs(
+        title = title,
+        x = "Coordinate 1",
+        y = "Coordinate 2",
+        color = "Effect"
+      ) +
+      ggplot2::coord_fixed() +
+      theme_tulpa()
+
+    return(p)
+  }
+
+  # Base R fallback
+  col_ramp <- colorRampPalette(c("blue", "white", "red"))
+  n_colors <- 100
+  colors <- col_ramp(n_colors)
+
+  val_range <- range(values)
+  val_scaled <- (values - val_range[1]) / diff(val_range)
+  val_scaled[is.na(val_scaled)] <- 0.5
+  point_colors <- colors[pmax(1, pmin(n_colors, ceiling(val_scaled * n_colors)))]
+
+  plot(coords[, 1], coords[, 2],
+       col = point_colors,
+       pch = 19,
+       xlab = "Coordinate 1",
+       ylab = "Coordinate 2",
+       main = title,
+       asp = 1,
+       ...)
+
+  invisible(NULL)
+}
+
+

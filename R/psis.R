@@ -1,0 +1,624 @@
+# =============================================================================
+# psis.R -- Pareto-smoothed importance sampling (PSIS) and the Pareto-k-hat
+# diagnostic, following Vehtari, Simpson, Gelman, Yao & Gabry (2024),
+# "Pareto smoothed importance sampling", JMLR 25(72):1-58, and the
+# generalized-Pareto fit of Zhang & Stephens (2009), Technometrics 51(3).
+#
+# Native implementation -- no `loo` / `posterior` dependency. The shape
+# estimate `pareto_k` reproduces `loo::psis()` on a fixed log-ratio vector
+# (tests/testthat/test-psis.R). PSIS is the approximation-accuracy gate for
+# the nested-Laplace path: the inner-Laplace marginal posterior of the latent
+# block hyperparameters is importance-sampled against the Gaussian proposal the
+# nested integrator places its grid with, and k-hat measures whether that
+# proposal can be corrected to the target. k-hat < 0.7 => reliable;
+# k-hat >= 0.7 => the (skewed / heavy-tailed) hyperparameter posterior is
+# misfit by the Gaussian grid and the nested result is not trustworthy.
+# =============================================================================
+
+# Minimum number of finite importance draws for a usable outer Pareto-k-hat.
+# The GPD tail fit (Zhang-Stephens) below this is too noisy to report, so a
+# diagnostic with fewer finite evaluations declines to NA. A `n_samples` budget
+# under this floor can never clear it, so the IS cores short-circuit BEFORE
+# paying any inner solve rather than evaluate the whole budget and discard it
+
+.PSIS_MIN_EVAL <- 25L
+
+# --- outer Pareto-k decline reasons -----------------------
+#
+# The outer k-hat has many places it can decline, and every one of them used to
+# arrive as the single value `pareto_k = NA` -- so "you turned the diagnostic
+# off", "this family's support can never be scored", and "the outer Hessian came
+# back non-finite" were indistinguishable in a fit object, and a batch reading
+# `pareto_k` across many fits could not tell a permanent structural limitation
+# from a live signal about the fit. Every decline now carries a reason from this
+# closed vocabulary, attached as `res$pareto_k_declined`:
+#
+#   not_requested          the caller set control$diagnose_k = FALSE. NA is
+#                          expected and means nothing is wrong.
+#   not_applicable         the fit shape has no outer grid this diagnostic is
+#                          defined on (multi-block or multi-axis on the single
+#                          positive-scale-axis path, a bounded grid field).
+#   unguessable_axis       an axis whose support is not safely known
+#                          (car_proper's rho_car). A PERMANENT limitation of
+#                          that family: read the quadrature ESS instead.
+#   draws_too_few          the requested importance-draw budget is below the
+#                          GPD-fit floor (.PSIS_MIN_EVAL), or too few draws
+#                          evaluated finitely.
+#   grid_too_small         the integration grid / weights cannot support a
+#                          proposal (no positive weight, a grid of one cell).
+#                          A signal about the FIT, not the diagnostic.
+#   no_varying_axis        every axis is pinned to a single value, so there is
+#                          no direction to importance-sample along.
+#   degenerate_proposal    the proposal could not be built or scored (non-finite
+#                          or non-PD outer Hessian, a Cholesky failure, a
+#                          non-finite GPD shape). Also a signal about the fit.
+#   internal_inconsistency a bookkeeping mismatch (weights not matching the
+#                          grid, a re-solve returning the wrong length). This
+#                          indicates an engine bug rather than a property of the
+#                          data, and is worth reporting.
+.K_DECLINE_REASONS <- c("not_requested", "not_applicable", "unguessable_axis",
+                        "draws_too_few", "grid_too_small", "no_varying_axis",
+                        "degenerate_proposal", "internal_inconsistency",
+                        "not_converged")
+
+# A decline is a first-class return value, not a bare NULL: helpers that can
+# fail for materially different reasons return `.k_decline(<reason>)` and their
+# callers propagate it, so the reason reaches the fit instead of being erased at
+# the first `is.null()`. `detail` names the specific thing (an axis name, say)
+# where one exists.
+.k_decline <- function(reason, detail = NULL) {
+    if (!reason %in% .K_DECLINE_REASONS) {
+        stop("Unknown Pareto-k decline reason '", reason, "'.", call. = FALSE)
+    }
+    structure(list(declined = reason, detail = detail),
+              class = "tulpa_k_decline")
+}
+
+.k_is_decline <- function(x) inherits(x, "tulpa_k_decline")
+
+# Reason string for `res$pareto_k_declined`, with the detail appended when there
+# is one ("unguessable_axis: rho_car" names the axis that can never be scored).
+.k_decline_label <- function(x) {
+    if (!.k_is_decline(x)) return(NA_character_)
+    if (is.null(x$detail) || !length(x$detail)) return(x$declined)
+    paste0(x$declined, ": ", paste(as.character(x$detail), collapse = ", "))
+}
+
+# The reason carried by either shape a decline can arrive in: the sentinel
+# above (where a helper used to return NULL) or a result list that already
+# returns NA fields and carries the reason alongside them (`$declined`, the
+# shape the IS cores use so their callers keep reading `$pareto_k`).
+.k_reason_of <- function(x) {
+    if (.k_is_decline(x)) return(.k_decline_label(x))
+    if (is.list(x) && length(x$declined)) return(as.character(x$declined)[1L])
+    NA_character_
+}
+
+# Attach a decline (or clear it, on a computed k-hat) onto a fit.
+.k_attach_declined <- function(res, x) {
+    res$pareto_k_declined <- .k_reason_of(x)
+    res
+}
+
+# Is this decline PERMANENT for the family -- an axis whose support the engine
+# will never guess -- as opposed to something a rerun with different settings
+# could fill in? The reader's action differs: for a permanent decline the
+# quadrature ESS is the reliability number, full stop.
+.k_decline_is_permanent <- function(label) {
+    if (is.null(label) || !length(label) || is.na(label[1L])) return(FALSE)
+    identical(sub(":.*$", "", label[1L]), "unguessable_axis")
+}
+
+# One-line user-facing reading of a decline label, for `print` /
+# `diagnostic_summary()`. `label` is `res$pareto_k_declined`.
+.k_decline_note <- function(label) {
+    if (is.null(label) || !length(label) || is.na(label)) return(NULL)
+    reason <- sub(":.*$", "", label)
+    detail <- if (grepl(":", label, fixed = TRUE)) sub("^[^:]*:\\s*", "", label) else NULL
+    with_detail <- function(txt) {
+        if (is.null(detail)) txt else paste0(txt, " (", detail, ")")
+    }
+    switch(reason,
+        not_requested = "the outer diagnostic was not requested (control$diagnose_k = FALSE)",
+        not_applicable = with_detail("this fit's outer grid is not one the k-hat is defined on"),
+        unguessable_axis = paste0(
+            "the outer grid carries an axis whose support is not safely known",
+            if (!is.null(detail)) paste0(" (", detail, ")") else "",
+            "; k-hat is permanently unavailable for this family -- read the",
+            " quadrature ESS instead"),
+        draws_too_few = "too few importance draws to fit the GPD tail; raise diagnose_draws",
+        grid_too_small = with_detail("the outer grid / weights cannot support a proposal"),
+        no_varying_axis = "every outer axis is pinned to a single value; there is nothing to sample along",
+        degenerate_proposal = with_detail(
+            "the outer proposal degenerated (non-finite or non-PD mode curvature)"),
+        internal_inconsistency = with_detail(paste(
+            "an internal bookkeeping mismatch stopped the diagnostic;",
+            "this indicates an engine bug -- please report it")),
+        not_converged = with_detail(paste(
+            "the inner solve the diagnostic re-dispatches did not reach a mode,",
+            "so there is no Laplace approximation at a mode to score")),
+        NULL)
+}
+
+# Whitened-radius envelope for the outer Pareto-k importance draws
+#. The outer integrator placed its grid to cover the
+# hyperparameter posterior; a proposal draw far outside that node cloud is a
+# deep extrapolation the integration never represented AND -- at EVA scale --
+# exactly where the inner Newton stalls toward max_iter, so those draws
+# dominate the diagnostic's wall time (~50x the grid integration) while
+# carrying negligible target mass. They sit in the LEFT tail of the importance
+# ratio (target ~ 0), immaterial to the right-tail GPD fit the k-hat reads, so
+# excluding them bounds the diagnostic cost without moving the k-hat. The cap is
+# `.K_DIAG_SUPPORT_RADIUS_MULT` times the largest whitened grid-node radius:
+# a generous envelope (twice the covered radius) that retains essentially every
+# draw in the well-behaved case -- where the proposal mass sits within the grid
+# -- and skips only the deep-extrapolation stalls. Scope: the k-hat then
+# certifies the Gaussian-proposal-over-grid approximation the draws are actually
+# synthesised from; grid-width adequacy (target mass beyond the grid) is a
+# separate concern.
+.K_DIAG_SUPPORT_RADIUS_MULT <- 2.0
+
+# Compute the whitened-radius cap from the integration grid. `u_grid` is the
+# K x d grid in the proposal's own (unconstrained) coordinate, `u_hat` the
+# proposal centre, `L` the lower-Cholesky factor of the proposal covariance
+# (L L' = Sigma). Each grid node's whitened distance from u_hat is
+# || L^{-1} (u_grid[k] - u_hat) ||, in the SAME metric as a draw's whitened
+# radius ||z|| (the proposal draws U = u_hat + L z, so z = L^{-1}(U - u_hat)).
+# Returns Inf (keep every draw) on a degenerate solve.
+.nested_grid_radius_cap <- function(u_grid, u_hat, L) {
+  cen <- sweep(u_grid, 2L, u_hat)
+  w   <- tryCatch(forwardsolve(L, t(cen)), error = function(e) NULL)
+  if (is.null(w)) return(Inf)
+  r2  <- colSums(w * w)
+  r2  <- r2[is.finite(r2)]
+  if (length(r2) == 0L) return(Inf)
+  sqrt(max(r2)) * .K_DIAG_SUPPORT_RADIUS_MULT
+}
+
+# Log-sum-exp, numerically stabilized.
+.tulpa_logsumexp <- function(x) {
+  m <- max(x)
+  if (!is.finite(m)) return(m)
+  m + log(sum(exp(x - m)))
+}
+
+# Quantile function of the generalized Pareto distribution (location 0):
+# Q(p) = sigma/k * ((1 - p)^(-k) - 1), with the k -> 0 exponential limit.
+.tulpa_qgpd <- function(p, k, sigma) {
+  if (is.nan(sigma) || sigma <= 0) return(rep(NaN, length(p)))
+  if (abs(k) < 1e-30) return(sigma * (-log1p(-p)))
+  sigma * expm1(-k * log1p(-p)) / k
+}
+
+# Generalized-Pareto fit on positive exceedances `x`, by the Zhang & Stephens
+# (2009) empirical-Bayes profile over the scale parameter, with the
+# weakly-informative prior of Vehtari et al. (2024) shrinking the shape toward
+# 1/2 (pseudo-count 10). Matches `loo:::gpdfit()`.
+.tulpa_gpd_fit <- function(x, wip = TRUE, min_grid_pts = 30L) {
+  x <- sort.int(x)
+  N <- length(x)
+  prior <- 3
+  M <- min_grid_pts + floor(sqrt(N))
+  jj <- seq_len(M)
+  xstar <- x[floor(N / 4 + 0.5)]                       # 25% quantile
+  theta <- 1 / x[N] + (1 - sqrt(M / (jj - 0.5))) / (prior * xstar)
+  k_theta <- vapply(theta, function(t) mean(log1p(-t * x)), numeric(1))
+  l_theta <- N * (log(-theta / k_theta) - k_theta - 1) # profile log-likelihood
+  w_theta <- exp(l_theta - .tulpa_logsumexp(l_theta))  # softmax over the grid
+  theta_hat <- sum(theta * w_theta)
+  k <- mean(log1p(-theta_hat * x))                     # shape (heavy tail => k > 0)
+  sigma <- -k / theta_hat
+  if (wip) k <- (k * N + 0.5 * 10) / (N + 10)          # shrink toward 1/2
+  if (is.na(k)) k <- Inf
+  list(k = k, sigma = sigma)
+}
+
+# Number of upper-tail order statistics for the GPD fit.
+# `NULL` => the automatic PSIS rule ceil(min(0.2*S, 3*sqrt(S))) (the r_eff = 1
+# form, appropriate for near-independent diagnostic draws). An explicit request is
+# an EXPERT tail-threshold control, capped DEFENSIVELY at floor(0.2*S) -- the 20%-
+# of-sample ceiling that keeps the fit an extreme tail (a request beyond it drags
+# body ratios into the tail: lower variance but a BIASED k-hat and a falsely
+# reassuring CI). This cap is SILENT; the user-facing warning (with the requested
+# vs used counts) is raised once by the diagnostic driver, not per bootstrap
+# replicate. `tail_points` is not a precision knob; the draw count `S` is.
+.psis_tail_len <- function(S, tail_points = NULL) {
+  if (is.null(tail_points)) {
+    return(as.integer(ceiling(min(0.2 * S, 3 * sqrt(S)))))
+  }
+  req <- suppressWarnings(as.integer(tail_points))
+  if (length(req) != 1L || is.na(req) || req < 1L) {
+    stop("`tail_points` must be a single positive integer, or NULL.",
+         call. = FALSE)
+  }
+  min(req, as.integer(floor(0.2 * S)))
+}
+
+# Reliability band index of a k-hat under configurable boundaries `bands` (sorted
+# ascending, e.g. c(0.5, 0.7) -> intervals (-Inf, 0.5] / (0.5, 0.7] / (0.7, Inf)
+# = 0 / 1 / 2). A boundary value falls in the LOWER interval (strict `>`), so
+# k = 0.5 is "good" and k = 0.7 is "ok". NA for a non-finite k.
+.k_band_b <- function(k, bands) {
+  if (!is.finite(k)) return(NA_integer_)
+  as.integer(sum(k > bands))
+}
+
+# Does the interval [lo, hi] lie within a SINGLE reliability band (does not cross
+# any boundary in `bands`)? FALSE for any non-finite endpoint.
+.within_one_band_b <- function(lo, hi, bands) {
+  bl <- .k_band_b(lo, bands); bh <- .k_band_b(hi, bands)
+  !is.na(bl) && !is.na(bh) && bl == bh
+}
+
+# Sample-size-dependent usable reliability boundary for the outer Pareto-k-hat
+# (Vehtari, Simpson, Gelman, Yao & Gabry 2024; the loo `ps_khat_threshold` rule).
+# In the finite-mean band the importance-sampling estimate converges only as
+# S^(k-1), so a smaller draw count `S` tolerates a smaller k: the usable boundary
+# tightens below 0.7 for small `S` and reaches the bias-driven 0.7 cap only past
+# S ~ 2154 (1 - 1/log10(S) = 0.7). At S = 200 it is ~0.565. `S` is the realised
+# number of finite importance evaluations.
+.ps_khat_threshold <- function(S) min(1 - 1 / log10(S), 0.7)
+
+# Default reliability-band boundaries at draw count `S`: the good (finite-variance)
+# cut 0.5 plus the sample-size-dependent usable cut from `.ps_khat_threshold`. When
+# the usable cut is at or below 0.5 (very small `S`) good and ok are not separable,
+# so a single usable boundary (reliable / unreliable) is returned. The result is
+# the `bands` vector `.k_band_b` / `.within_one_band_b` classify against.
+.ps_conf_bands <- function(S) {
+  usable <- .ps_khat_threshold(S)
+  if (usable > 0.5) c(0.5, usable) else usable
+}
+
+# Bootstrap + closed-form uncertainty of the outer Pareto-k-hat from ONE batch of
+# importance log-ratios. The k-hat is a GPD shape fit to the
+# upper tail of `lr`; its sampling uncertainty GIVEN the proposal is estimated by
+# resampling the SAME ratios with replacement and refitting `n_boot` times. This
+# is free (no new inner solves) and estimator-agnostic (it resamples whatever
+# k-hat tulpa_psis computes). Bootstrap cannot create tail information: it reports
+# how UNSTABLE the current tail estimate is, not a tighter k -- a tighter k needs
+# more ACTUAL tail ratios (raise the draw count). The closed-form
+# `se_formula = (1 + k) / sqrt(M)` (M = tail_len) is the GPD shape MLE asymptotic
+# SE, reported as a cross-check (the Zhang-Stephens estimator's SE differs
+# slightly, so the bootstrap is primary). `band_confident` is TRUE iff the
+# bootstrap [ci_low, ci_high] lies within one reliability band (`conf_bands`), the
+# honest form when the bootstrap distribution is skewed. `conf_bands = NULL`
+# (default) uses the sample-size-dependent boundaries `.ps_conf_bands(S)` at the
+# realised draw count `S`; pass an explicit strictly-increasing vector to fix the
+# boundaries instead. Returns the point k, its IS-ESS, the tail size used, the
+# bootstrap SE / 95% CI, the formula SE, and the band-confidence flag.
+.tulpa_psis_k_uncertainty <- function(lr, tail_points = NULL, n_boot = 1000L,
+                                      conf_bands = NULL) {
+  lr   <- lr[is.finite(lr)]
+  S    <- length(lr)
+  base <- tulpa_psis(lr, tail_points = tail_points)
+  k    <- base$pareto_k
+  M    <- base$tail_len
+  out  <- list(pareto_k = k, is_ess = base$is_ess, tail_points = M,
+               se_boot = NA_real_, ci_low = NA_real_, ci_high = NA_real_,
+               se_formula = NA_real_, band_confident = NA, conf_bands = NULL)
+  if (!is.finite(k) || S < .PSIS_MIN_EVAL) return(out)
+  if (is.null(conf_bands)) conf_bands <- .ps_conf_bands(S)
+  # The bands actually used for band_confident (at the realised finite-draw
+  # count S) travel with the result so downstream band-index verdicts share the
+  # same boundaries rather than recomputing at a different draw count.
+  out$conf_bands <- conf_bands
+  nb <- max(0L, as.integer(n_boot))
+  if (nb >= 2L) {
+    ks <- vapply(seq_len(nb), function(b) {
+      tulpa_psis(lr[sample.int(S, S, replace = TRUE)],
+                 tail_points = tail_points)$pareto_k
+    }, numeric(1))
+    ks <- ks[is.finite(ks)]
+    if (length(ks) >= 2L) {
+      out$se_boot <- stats::sd(ks)
+      qs          <- stats::quantile(ks, c(0.025, 0.975), names = FALSE, type = 7)
+      out$ci_low  <- qs[1L]
+      out$ci_high <- qs[2L]
+      out$band_confident <- .within_one_band_b(qs[1L], qs[2L], conf_bands)
+    }
+  }
+  if (is.finite(M) && M > 0L) out$se_formula <- (1 + max(k, 0)) / sqrt(M)
+  out
+}
+
+#' Pareto-smoothed importance sampling
+#'
+#' Smooths a set of importance ratios by replacing the largest weights with the
+#' order statistics of a generalized-Pareto fit to their upper tail, and
+#' returns the Pareto shape diagnostic `pareto_k` together with the smoothed
+#' (normalized) log weights and their importance-sampling effective sample
+#' size. `pareto_k` estimates the number of finite moments of the raw weight
+#' distribution: `< 0.5` is good (finite variance). The usable upper boundary is
+#' sample-size dependent, `min(1 - 1/log10(S), 0.7)` for `S` draws (Vehtari et al.
+#' 2024): about 0.565 at `S = 200`, reaching the 0.7 cap only past `S` ~ 2154.
+#' Above it the proposal cannot be reliably corrected to the target.
+#'
+#' @param log_ratios Numeric vector of (unnormalized) log importance ratios
+#'   `log p_target(x) - log q_proposal(x)` evaluated at draws `x ~ q`.
+#' @param tail_points Number of upper-tail order statistics for the
+#'   generalized-Pareto fit, or `NULL` (default) for the automatic PSIS rule
+#'   `ceil(min(0.2 * S, 3 * sqrt(S)))`. An explicit value is an expert
+#'   tail-threshold control, capped at `floor(0.2 * S)` so the fit stays an
+#'   extreme tail; it is NOT a precision knob (raise the draw count for a tighter
+#'   shape estimate).
+#' @return A list with `pareto_k` (the tail shape, `NA` if the sample is too
+#'   small to fit), `is_ess` (importance-sampling effective sample size,
+#'   `1 / sum(w^2)` on the normalized smoothed weights), `log_weights`
+#'   (the normalized smoothed log weights), `tail_len` (the tail size used), and
+#'   `tail_smoothed` (`FALSE` when the tail kept its raw log ratios because the
+#'   generalized-Pareto fit was not attempted or returned a shape / scale the
+#'   quantile function is undefined at; `pareto_k` then reports the attempted fit
+#'   and does not describe the returned weights).
+#' @references Vehtari, Simpson, Gelman, Yao & Gabry (2024). Pareto smoothed
+#'   importance sampling. \emph{JMLR} 25(72):1-58.
+#' @seealso [diagnostics()] for the fit-level diagnostic front door.
+#' @examples
+#' set.seed(1)
+#' # Well-behaved importance ratios: k-hat is small.
+#' ps <- tulpa_psis(rnorm(2000))
+#' ps$pareto_k
+#' ps$is_ess
+#' @export
+tulpa_psis <- function(log_ratios, tail_points = NULL) {
+  log_ratios <- log_ratios[is.finite(log_ratios)]
+  S <- length(log_ratios)
+  if (S < 5L) {
+    return(list(pareto_k = NA_real_, is_ess = NA_real_, log_weights = numeric(0),
+                tail_len = 0L, tail_smoothed = FALSE))
+  }
+
+  # The GPD tail fit + Pareto smoothing (the former body, now the C++ oracle
+  # .tulpa_gpd_fit / .tulpa_qgpd in test-psis.R) run in cpp_tulpa_psis. The tail
+  # size (with its expert-control cap / warning) stays in R; the bootstrap
+  # k-uncertainty resamples with R's RNG and calls this per refit.
+  tail_len <- .psis_tail_len(S, tail_points)
+  cpp_tulpa_psis(as.numeric(log_ratios), as.integer(tail_len))
+}
+
+# Outer (hyperparameter) Pareto-k-hat for a nested-Laplace fit. Monte-Carlo
+# samples theta from the Gaussian proposal the integrator places its grid with
+# (mean `theta_hat`, scale `L_scale` so theta = theta_hat + L_scale %*% z,
+# z ~ N(0, I)), forms the log importance ratio log p_target(theta) - log q(theta)
+# against the inner-marginal target, and PSIS-smooths it. The proposal's
+# normalizing constant is common to every draw, so it drops under PSIS's
+# self-normalization and only the quadratic 0.5 ||z||^2 enters. Each evaluation
+# is one inner Laplace solve, so `n_samples` extra solves are paid -- the cost
+# the `diagnose_k` switch controls.
+#
+# This path applies NO radius cap (unlike the grid/joint `.nested_is_pareto_k`):
+# its inner solve is a dense `tulpa_laplace()` that converges in a handful of
+# Newton steps even at far-radius draws, so the EVA-scale stalls the cap
+# bounds do not arise here. Evaluating every draw is therefore both affordable
+# and the unbiased choice -- consistent in correctness with the grid/joint path,
+# whose cap now folds the far tail back in whenever it would matter
+
+.nested_outer_pareto_k <- function(log_target, theta_hat, L_scale,
+                                   n_samples = 200L) {
+  # The per-sample closure is the length-1 case of the batched target the shared
+  # core (.nested_is_pareto_k) drives; wrap it (non-finite -> -Inf, matching the
+  # old drop) and evaluate every draw (radius_cap = Inf). The sampling transform
+  # theta_hat + L_scale %*% Z[s, ] equals the core's Z %*% t(L_scale), so the
+  # draws -- and the k-hat -- are identical to the previous open-coded version.
+  batched <- function(Umat) vapply(seq_len(nrow(Umat)), function(i) {
+    lt <- log_target(Umat[i, ])
+    if (is.finite(lt)) lt else -Inf
+  }, numeric(1))
+  kd <- .nested_is_pareto_k(theta_hat, L_scale, batched,
+                            n_samples = n_samples, radius_cap = Inf)
+  .kdiag_capture(kd$lr, scope = "re_cov nested (hyperparameter Gaussian)")
+  kd
+}
+
+# Outer Pareto-k-hat for a grid-integrated nested fit (the generic
+# `tulpa_nested_laplace` path), where the inner marginal is evaluated by a
+# BATCHED re-fit rather than a per-sample closure. Fits a Gaussian proposal to
+# the hyperparameter posterior in the proposal's coordinate, draws `n_samples`,
+# re-evaluates the target in ONE call, and PSIS-smooths log p_target - log q.
+# The caller supplies the target so it matches whatever density the integrator
+# actually weights (any change-of-variables Jacobian is the caller's job); the
+# proposal's normalizing constant is common to every draw and drops under PSIS.
+#
+# `theta_hat` / `L_scale` define the proposal N(theta_hat, L_scale L_scale')
+# in the integrator's OWN coordinate space; `log_target_batched(U_matrix)`
+# returns the integrator's unnormalized log posterior at the S x d sample in
+# that same space (any change-of-variables Jacobian is the caller's job, so the
+# diagnostic always matches whatever target the integrator actually weights).
+# The proposal's normalizing constant is common to all draws and drops under
+# PSIS, leaving the quadratic 0.5||z||^2.
+# `Z` is the whitened draw matrix. NULL (the default) draws it here from R's
+# stream, which is what every outer-k caller wants. A caller that already HOLDS
+# the whitened draws its target was evaluated at passes them instead -- the
+# inner k-hat does, because its target evaluations happen inside the C++ Newton
+# loop against an engine-owned deterministic sample (see src/inner_laplace_is.h),
+# so the sampling and the evaluation cannot be split across the boundary. The
+# rest of the core -- the GPD-fit floor, the decline vocabulary, the radius
+# envelope, the capture aperture, the PSIS call -- is identical either way, so
+# there is one importance-sampling k-hat in the engine rather than two.
+.nested_is_pareto_k <- function(theta_hat, L_scale, log_target_batched,
+                                n_samples = 200L, radius_cap = Inf,
+                                return_draws = FALSE, tail_points = NULL,
+                                Z = NULL) {
+  d <- length(theta_hat)
+  n_samples <- as.integer(n_samples)
+  na_out <- function(reason, n_eval = 0L) {
+    list(pareto_k = NA_real_, is_ess = NA_real_, n_eval = n_eval,
+         declined = reason)
+  }
+  if (n_samples < .PSIS_MIN_EVAL) {                          # cannot reach the floor
+    return(na_out("draws_too_few"))
+  }
+  if (is.null(Z)) {
+    Z <- matrix(stats::rnorm(n_samples * d), n_samples, d)
+  } else {
+    Z <- matrix(as.numeric(Z), ncol = d)
+    if (nrow(Z) != n_samples) return(na_out("internal_inconsistency"))
+  }
+  U <- sweep(Z %*% t(L_scale), 2L, theta_hat, `+`)           # S x d ~ N(theta_hat, .)
+  z2 <- rowSums(Z^2)                                         # squared whitened radius
+
+  # Cost bound: draws far past the grid's coverage stall the
+  # inner Newton toward max_iter and dominate the diagnostic's wall time, so by
+  # default only draws within `radius_cap` of the proposal centre (whitened
+  # metric) are evaluated. The discarded draws are NOT a guaranteed left tail of
+  # the importance ratio, though: the log-ratio is lr = log p_target + 0.5||z||^2,
+  # so a target HEAVIER than the Gaussian proposal makes lr RISE with z2 and the
+  # far-radius draws carry the LARGEST ratios -- exactly the right-tail mass the
+  # GPD k-hat reads. Dropping them would bias k-hat downward in the heavy-tail
+  # regime the diagnostic exists to flag. The escalation step
+  # below detects that regime and folds the dropped draws back in, so the cap
+  # bounds cost only when it cannot bias the result. radius_cap = Inf keeps every
+  # draw (the unrestricted re-cov path).
+  in_supp <- if (is.finite(radius_cap)) z2 <= radius_cap * radius_cap
+             else rep(TRUE, n_samples)
+  n_in <- sum(in_supp)
+  if (n_in < .PSIS_MIN_EVAL) {                               # too few within support
+    return(na_out("draws_too_few", n_in))
+  }
+
+  lr <- rep(-Inf, n_samples)
+  lt <- log_target_batched(U[in_supp, , drop = FALSE])
+  if (length(lt) != n_in) {
+    # The re-solve returned a different number of values than it was handed:
+    # a bookkeeping fault in the caller's target, not a property of the data.
+    return(na_out("internal_inconsistency"))
+  }
+  lr[in_supp] <- lt + 0.5 * z2[in_supp]                      # target - log q (up to const)
+
+  # Heavy-tail escalation: if the importance log-ratio is
+  # still rising at the cap boundary -- OLS slope of lr on z2 significantly
+  # positive, i.e. the target is heavier-tailed than the proposal -- the radius
+  # cap is clipping the right tail the k-hat depends on. Evaluate the dropped
+  # draws and fold them in so the GPD fits the genuine uncapped tail. A flat or
+  # negative slope (target no heavier than the proposal) leaves the cap in force,
+  # keeping the well-behaved case at its bounded cost.
+  if (is.finite(radius_cap) && n_in < n_samples) {
+    fin <- in_supp & is.finite(lr)
+    if (sum(fin) >= .PSIS_MIN_EVAL && .lr_rises_with_radius(z2[fin], lr[fin])) {
+      out  <- !in_supp
+      lt2  <- log_target_batched(U[out, , drop = FALSE])
+      if (length(lt2) == sum(out)) lr[out] <- lt2 + 0.5 * z2[out]
+    }
+  }
+
+  n_eval <- sum(is.finite(lr))
+  if (n_eval < .PSIS_MIN_EVAL) {
+    return(na_out("draws_too_few", n_eval))
+  }
+  ps  <- tulpa_psis(lr, tail_points = tail_points)
+  fin <- is.finite(lr)
+  # `lr` travels with every scored proposal: it is what the k bootstrap re-fits
+  # the GPD on, and what `.kdiag_capture()` publishes for the proposal a backend
+  # ends up REPORTING. A scorer that is called several times per fit (the
+  # moment-matching loop) therefore hands each candidate's ratios back rather
+  # than writing any of them anywhere.
+  out <- list(pareto_k = ps$pareto_k, is_ess = ps$is_ess, n_eval = n_eval,
+              lr = lr[fin])
+  # The evaluated draws and their PSIS-smoothed log weights, same order
+  # (tulpa_psis keeps the finite entries in place), so a caller can re-estimate
+  # the proposal from the importance-weighted moments (moment-matching IS).
+  if (return_draws) {
+    out$U <- U[fin, , drop = FALSE]
+    out$log_weights <- ps$log_weights
+  }
+  out
+}
+
+# Validation aperture. When `tulpa.kdiag.capture` holds an
+# environment, a fit stashes there the importance log-ratios its REPORTED outer
+# k-hat was fitted on, so an external check reproduces that number exactly:
+#
+#     tulpa_psis(cap$lr, tail_points = cap$tail_points)$pareto_k == fit$pareto_k
+#
+# It is written ONCE per fit, by the driver that fixes the reported k-hat, from
+# the proposal that driver SELECTED. It is deliberately not written by
+# `.nested_is_pareto_k()`: that scorer runs once per candidate proposal, and on
+# the joint path the moment-matching loop, the grid mixture and the skew-normal
+# rescue each score a candidate that may lose the comparison -- so a write there
+# leaves the aperture holding a discarded proposal's ratios and invites a
+# recomputation that disagrees with the fit for a reason that is not a defect in
+# either number.
+#
+# `tail_points` is the request as handed to `tulpa_psis()` (NULL under the
+# automatic PSIS rule), not the resolved tail size: the resolved size is capped
+# at floor(0.2 * S) on re-entry, so feeding it back can shorten the tail and
+# move the shape. `scope` names what the ratios belong to. Off by default, zero
+# overhead when unset.
+.kdiag_capture <- function(lr, tail_points = NULL, scope = NULL) {
+  cap <- getOption("tulpa.kdiag.capture", NULL)
+  if (!is.environment(cap) || is.null(lr) || !length(lr)) return(invisible(FALSE))
+  cap$lr          <- lr[is.finite(lr)]
+  cap$tail_points <- tail_points
+  cap$scope       <- scope
+  invisible(TRUE)
+}
+
+# One-sided test that the importance log-ratio RISES with the squared whitened
+# radius `z2` AT THE CAP BOUNDARY -- the signal that the target is heavier-tailed
+# than the Gaussian proposal there, so the radius cap is clipping the right tail
+# the GPD k-hat reads. Because lr = log p_target + 0.5*z2, a
+# Gaussian target c-times as wide as the proposal gives a constant slope
+# 0.5*(1 - 1/c) (>0 when heavier); a genuinely heavy (e.g. Student-t) target is
+# flat or falling in the bulk and only rises in the tail, so the GLOBAL slope is
+# misleading. The slope is therefore fit on the OUTER HALF of the draws by `z2`
+# (those nearest the cap), a local estimate of the boundary behaviour. Returns
+# TRUE when that slope is more than `t_crit` standard errors above zero (a
+# flat-slope good case fires only at the test's false-positive rate, preserving
+# the cost bound).
+.lr_rises_with_radius <- function(z2, lr, t_crit = 2.0) {
+  keep <- z2 >= stats::median(z2)          # outer half: local slope at the cap
+  x <- z2[keep]; y <- lr[keep]
+  n <- length(x)
+  if (n < 5L) return(FALSE)
+  xb  <- mean(x)
+  Sxx <- sum((x - xb)^2)
+  if (!is.finite(Sxx) || Sxx <= 0) return(FALSE)
+  yb    <- mean(y)
+  slope <- sum((x - xb) * (y - yb)) / Sxx
+  if (!is.finite(slope) || slope <= 0) return(FALSE)
+  resid <- y - (yb + slope * (x - xb))
+  s2    <- sum(resid^2) / (n - 2)
+  se    <- sqrt(s2 / Sxx)
+  if (!is.finite(se)) return(FALSE)
+  if (se <= 0) return(TRUE)             # exact positive linear trend (e.g. a
+                                        # Gaussian target wider than the proposal):
+                                        # the strongest rising signal there is
+  slope / se > t_crit
+}
+
+# Grid path for a single positive-scale axis whose default grid is geometric
+# (uniform in `u = log theta`, e.g. exp(seq(log a, log b))). The integrator
+# weights that grid with plain softmax(log_marginal) and applies NO volume
+# element (nested_laplace.R, "no user-scale volume element is applied"; the
+# CAR_proper recovery confirms adding one biases the scale posterior), so
+# exp(log_marginal) IS the unnormalized u-space posterior density. The Gaussian
+# proposal is fit to the grid posterior in that same `u` coordinate, so the
+# importance target is `log_marginal` with NO change-of-variables Jacobian --
+# matching the integrator's own weighting and the SPDE Pareto-k path. `u_grid`
+# is the K x d log-scale grid, `weights` the K integration weights,
+# `refit_log_marginal(theta_mat)` maps an S x d CONSTRAINED grid to its S inner
+# log-marginals. Restricted by the caller to a single all-positive-scale axis.
+.nested_grid_pareto_k <- function(u_grid, weights, refit_log_marginal,
+                                  n_samples = 200L) {
+  u_hat <- as.numeric(crossprod(weights, u_grid))            # weighted mean
+  cen   <- sweep(u_grid, 2L, u_hat)
+  Su    <- crossprod(cen * weights, cen)                     # weighted covariance
+  Su    <- (Su + t(Su)) / 2
+  L <- tryCatch(t(chol(Su)), error = function(e) NULL)
+  if (is.null(L)) {
+    # The grid-weighted covariance is not positive definite -- a collapsed or
+    # single-cell grid leaves nothing to place a proposal with.
+    return(list(pareto_k = NA_real_, is_ess = NA_real_, n_eval = 0L,
+                declined = "degenerate_proposal"))
+  }
+
+  lt <- function(U) {
+    lm <- refit_log_marginal(exp(U))
+    if (length(lm) != nrow(U)) return(rep(NA_real_, nrow(U)))
+    lm                                                       # already the u-space target
+  }
+  radius_cap <- .nested_grid_radius_cap(u_grid, u_hat, L)
+  kd <- .nested_is_pareto_k(u_hat, L, lt, n_samples, radius_cap = radius_cap)
+  .kdiag_capture(kd$lr,
+                 scope = "nested_laplace grid (single positive-scale axis)")
+  kd
+}

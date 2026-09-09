@@ -1,0 +1,612 @@
+<!DOCTYPE html>
+
+<html>
+
+<head>
+
+<meta charset="utf-8" />
+<meta name="generator" content="pandoc" />
+<meta http-equiv="X-UA-Compatible" content="IE=EDGE" />
+
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+
+
+
+<title>The data a tulpa model expects</title>
+
+<script>// Pandoc 2.9 adds attributes on both header and div. We remove the former (to
+// be compatible with the behavior of Pandoc < 2.8).
+document.addEventListener('DOMContentLoaded', function(e) {
+  var hs = document.querySelectorAll("div.section[class*='level'] > :first-child");
+  var i, h, a;
+  for (i = 0; i < hs.length; i++) {
+    h = hs[i];
+    if (!/^h[1-6]$/i.test(h.tagName)) continue;  // it should be a header h1-h6
+    a = h.attributes;
+    while (a.length > 0) h.removeAttribute(a[0].name);
+  }
+});
+</script>
+
+<style type="text/css">
+code{white-space: pre-wrap;}
+span.smallcaps{font-variant: small-caps;}
+span.underline{text-decoration: underline;}
+div.column{display: inline-block; vertical-align: top; width: 50%;}
+div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+ul.task-list{list-style: none;}
+</style>
+
+
+
+<style type="text/css">
+code {
+white-space: pre;
+}
+.sourceCode {
+overflow: visible;
+}
+</style>
+<style type="text/css" data-origin="pandoc">
+html { -webkit-text-size-adjust: 100%; }
+pre > code.sourceCode { white-space: pre; position: relative; }
+pre > code.sourceCode > span { display: inline-block; line-height: 1.25; }
+pre > code.sourceCode > span:empty { height: 1.2em; }
+.sourceCode { overflow: visible; }
+code.sourceCode > span { color: inherit; text-decoration: inherit; }
+div.sourceCode { margin: 1em 0; }
+pre.sourceCode { margin: 0; }
+@media screen {
+div.sourceCode { overflow: auto; }
+}
+@media print {
+pre > code.sourceCode { white-space: pre-wrap; }
+pre > code.sourceCode > span { text-indent: -5em; padding-left: 5em; }
+}
+pre.numberSource code
+{ counter-reset: source-line 0; }
+pre.numberSource code > span
+{ position: relative; left: -4em; counter-increment: source-line; }
+pre.numberSource code > span > a:first-child::before
+{ content: counter(source-line);
+position: relative; left: -1em; text-align: right; vertical-align: baseline;
+border: none; display: inline-block;
+-webkit-touch-callout: none; -webkit-user-select: none;
+-khtml-user-select: none; -moz-user-select: none;
+-ms-user-select: none; user-select: none;
+padding: 0 4px; width: 4em;
+color: #aaaaaa;
+}
+pre.numberSource { margin-left: 3em; border-left: 1px solid #aaaaaa; padding-left: 4px; }
+div.sourceCode
+{ }
+@media screen {
+pre > code.sourceCode > span > a:first-child::before { text-decoration: underline; }
+}
+code span.al { color: #ff0000; font-weight: bold; } 
+code span.an { color: #60a0b0; font-weight: bold; font-style: italic; } 
+code span.at { color: #7d9029; } 
+code span.bn { color: #40a070; } 
+code span.bu { color: #008000; } 
+code span.cf { color: #007020; font-weight: bold; } 
+code span.ch { color: #4070a0; } 
+code span.cn { color: #880000; } 
+code span.co { color: #60a0b0; font-style: italic; } 
+code span.cv { color: #60a0b0; font-weight: bold; font-style: italic; } 
+code span.do { color: #ba2121; font-style: italic; } 
+code span.dt { color: #902000; } 
+code span.dv { color: #40a070; } 
+code span.er { color: #ff0000; font-weight: bold; } 
+code span.ex { } 
+code span.fl { color: #40a070; } 
+code span.fu { color: #06287e; } 
+code span.im { color: #008000; font-weight: bold; } 
+code span.in { color: #60a0b0; font-weight: bold; font-style: italic; } 
+code span.kw { color: #007020; font-weight: bold; } 
+code span.op { color: #666666; } 
+code span.ot { color: #007020; } 
+code span.pp { color: #bc7a00; } 
+code span.sc { color: #4070a0; } 
+code span.ss { color: #bb6688; } 
+code span.st { color: #4070a0; } 
+code span.va { color: #19177c; } 
+code span.vs { color: #4070a0; } 
+code span.wa { color: #60a0b0; font-weight: bold; font-style: italic; } 
+</style>
+<script>
+// apply pandoc div.sourceCode style to pre.sourceCode instead
+(function() {
+  var sheets = document.styleSheets;
+  for (var i = 0; i < sheets.length; i++) {
+    if (sheets[i].ownerNode.dataset["origin"] !== "pandoc") continue;
+    try { var rules = sheets[i].cssRules; } catch (e) { continue; }
+    var j = 0;
+    while (j < rules.length) {
+      var rule = rules[j];
+      // check if there is a div.sourceCode rule
+      if (rule.type !== rule.STYLE_RULE || rule.selectorText !== "div.sourceCode") {
+        j++;
+        continue;
+      }
+      var style = rule.style.cssText;
+      // check if color or background-color is set
+      if (rule.style.color === '' && rule.style.backgroundColor === '') {
+        j++;
+        continue;
+      }
+      // replace div.sourceCode by a pre.sourceCode rule
+      sheets[i].deleteRule(j);
+      sheets[i].insertRule('pre.sourceCode{' + style + '}', j);
+    }
+  }
+})();
+</script>
+
+
+
+
+<style type="text/css">body {
+background-color: #fff;
+margin: 1em auto;
+max-width: 700px;
+overflow: visible;
+padding-left: 2em;
+padding-right: 2em;
+font-family: "Open Sans", "Helvetica Neue", Helvetica, Arial, sans-serif;
+font-size: 14px;
+line-height: 1.35;
+}
+#TOC {
+clear: both;
+margin: 0 0 10px 10px;
+padding: 4px;
+width: 400px;
+border: 1px solid #CCCCCC;
+border-radius: 5px;
+background-color: #f6f6f6;
+font-size: 13px;
+line-height: 1.3;
+}
+#TOC .toctitle {
+font-weight: bold;
+font-size: 15px;
+margin-left: 5px;
+}
+#TOC ul {
+padding-left: 40px;
+margin-left: -1.5em;
+margin-top: 5px;
+margin-bottom: 5px;
+}
+#TOC ul ul {
+margin-left: -2em;
+}
+#TOC li {
+line-height: 16px;
+}
+table {
+margin: 1em auto;
+border-width: 1px;
+border-color: #DDDDDD;
+border-style: outset;
+border-collapse: collapse;
+}
+table th {
+border-width: 2px;
+padding: 5px;
+border-style: inset;
+}
+table td {
+border-width: 1px;
+border-style: inset;
+line-height: 18px;
+padding: 5px 5px;
+}
+table, table th, table td {
+border-left-style: none;
+border-right-style: none;
+}
+table thead, table tr.even {
+background-color: #f7f7f7;
+}
+p {
+margin: 0.5em 0;
+}
+blockquote {
+background-color: #f6f6f6;
+padding: 0.25em 0.75em;
+}
+hr {
+border-style: solid;
+border: none;
+border-top: 1px solid #777;
+margin: 28px 0;
+}
+dl {
+margin-left: 0;
+}
+dl dd {
+margin-bottom: 13px;
+margin-left: 13px;
+}
+dl dt {
+font-weight: bold;
+}
+ul {
+margin-top: 0;
+}
+ul li {
+list-style: circle outside;
+}
+ul ul {
+margin-bottom: 0;
+}
+pre, code {
+background-color: #f7f7f7;
+border-radius: 3px;
+color: #333;
+white-space: pre-wrap; 
+}
+pre {
+border-radius: 3px;
+margin: 5px 0px 10px 0px;
+padding: 10px;
+}
+pre:not([class]) {
+background-color: #f7f7f7;
+}
+code {
+font-family: Consolas, Monaco, 'Courier New', monospace;
+font-size: 85%;
+}
+p > code, li > code {
+padding: 2px 0px;
+}
+div.figure {
+text-align: center;
+}
+img {
+background-color: #FFFFFF;
+padding: 2px;
+border: 1px solid #DDDDDD;
+border-radius: 3px;
+border: 1px solid #CCCCCC;
+margin: 0 5px;
+}
+h1 {
+margin-top: 0;
+font-size: 35px;
+line-height: 40px;
+}
+h2 {
+border-bottom: 4px solid #f7f7f7;
+padding-top: 10px;
+padding-bottom: 2px;
+font-size: 145%;
+}
+h3 {
+border-bottom: 2px solid #f7f7f7;
+padding-top: 10px;
+font-size: 120%;
+}
+h4 {
+border-bottom: 1px solid #f7f7f7;
+margin-left: 8px;
+font-size: 105%;
+}
+h5, h6 {
+border-bottom: 1px solid #ccc;
+font-size: 105%;
+}
+a {
+color: #0033dd;
+text-decoration: none;
+}
+a:hover {
+color: #6666ff; }
+a:visited {
+color: #800080; }
+a:visited:hover {
+color: #BB00BB; }
+a[href^="http:"] {
+text-decoration: underline; }
+a[href^="https:"] {
+text-decoration: underline; }
+
+code > span.kw { color: #555; font-weight: bold; } 
+code > span.dt { color: #902000; } 
+code > span.dv { color: #40a070; } 
+code > span.bn { color: #d14; } 
+code > span.fl { color: #d14; } 
+code > span.ch { color: #d14; } 
+code > span.st { color: #d14; } 
+code > span.co { color: #888888; font-style: italic; } 
+code > span.ot { color: #007020; } 
+code > span.al { color: #ff0000; font-weight: bold; } 
+code > span.fu { color: #900; font-weight: bold; } 
+code > span.er { color: #a61717; background-color: #e3d2d2; } 
+</style>
+
+
+
+
+</head>
+
+<body>
+
+
+
+
+<h1 class="title toc-ignore">The data a tulpa model expects</h1>
+
+
+
+<div class="sourceCode" id="cb1"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb1-1"><a href="#cb1-1" tabindex="-1"></a><span class="fu">library</span>(tulpa)</span></code></pre></div>
+<div id="expected-structure" class="section level2">
+<h2>Expected structure</h2>
+<p>Every tulpa fit starts from two things: a formula and a data frame.
+The formula names the response, the fixed effects, the grouping factors
+for random effects, and any special structure (an offset, a spatial
+unit). The data frame holds one row per observation, with one column for
+each name the formula mentions. <code>tulpa()</code> walks the formula,
+pulls the matching columns out of the data, and turns them into the
+numeric pieces an inference backend consumes.</p>
+<p>Two functions do that translation, and both are exported so you can
+call them on their own. <code>tulpa_parse_formula()</code> reads the
+formula and reports its parts. <code>tulpa_build_model_data()</code>
+takes that parsed object plus the data and returns the design. Looking
+at their output is the fastest way to see what tulpa thinks your model
+is before you commit to a fit.</p>
+<p>The formula grammar follows lme4 and glmmTMB, so most mixed-model
+formulas you already write carry over. Fixed effects sit on the right of
+<code>~</code> as an additive chain. A random intercept is
+<code>(1 | g)</code>. A random intercept and slope sharing a correlation
+is <code>(1 + x | g)</code>; the double bar <code>(1 + x || g)</code>
+keeps the same two effects but drops the correlation between them. An
+<code>offset(...)</code> term enters a known per-row shift on the
+linear-predictor scale. A <code>spatial(col)</code> term names the
+column that maps each row to a spatial unit, with the field structure
+itself arriving through the <code>spatial=</code> argument.</p>
+<p>Here is a formula that uses several of those at once. Print the
+parsed object to read it back.</p>
+<div class="sourceCode" id="cb2"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb2-1"><a href="#cb2-1" tabindex="-1"></a>pf <span class="ot">&lt;-</span> <span class="fu">tulpa_parse_formula</span>(y <span class="sc">~</span> x <span class="sc">+</span> z <span class="sc">+</span> (<span class="dv">1</span> <span class="sc">|</span> g) <span class="sc">+</span> (<span class="dv">1</span> <span class="sc">+</span> x <span class="sc">||</span> site))</span>
+<span id="cb2-2"><a href="#cb2-2" tabindex="-1"></a>pf</span></code></pre></div>
+<p>The print method separates the response from the fixed formula and
+lists each random-effect term in its canonical form. The bar operator is
+shown as <code>|</code> or <code>||</code>, so a glance confirms whether
+a slope carries a correlation. The fixed formula has had every random,
+latent, and special term stripped out, which is exactly the formula used
+to build the fixed-effects design matrix.</p>
+</div>
+<div id="building-from-a-data-frame" class="section level2">
+<h2>Building from a data frame</h2>
+<p>A tidy data frame is the natural input. One row per observation,
+columns typed as you intend them: numeric for continuous predictors,
+<code>factor</code> for unordered categories, <code>ordered</code> for
+ranked ones. tulpa reads the type off each column and builds the
+matching design piece, so a factor expands into contrasts while a
+numeric column stays a single slope. Simulate a small long-format frame
+with a numeric predictor, a numeric covariate, and two grouping
+factors.</p>
+<div class="sourceCode" id="cb3"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb3-1"><a href="#cb3-1" tabindex="-1"></a>n  <span class="ot">&lt;-</span> <span class="dv">200</span></span>
+<span id="cb3-2"><a href="#cb3-2" tabindex="-1"></a>df <span class="ot">&lt;-</span> <span class="fu">data.frame</span>(</span>
+<span id="cb3-3"><a href="#cb3-3" tabindex="-1"></a>  <span class="at">y    =</span> <span class="fu">rpois</span>(n, <span class="dv">3</span>),</span>
+<span id="cb3-4"><a href="#cb3-4" tabindex="-1"></a>  <span class="at">x    =</span> <span class="fu">rnorm</span>(n),</span>
+<span id="cb3-5"><a href="#cb3-5" tabindex="-1"></a>  <span class="at">z    =</span> <span class="fu">rnorm</span>(n),</span>
+<span id="cb3-6"><a href="#cb3-6" tabindex="-1"></a>  <span class="at">g    =</span> <span class="fu">factor</span>(<span class="fu">sample</span>(letters[<span class="dv">1</span><span class="sc">:</span><span class="dv">6</span>], n, <span class="at">replace =</span> <span class="cn">TRUE</span>)),</span>
+<span id="cb3-7"><a href="#cb3-7" tabindex="-1"></a>  <span class="at">site =</span> <span class="fu">factor</span>(<span class="fu">sample</span>(<span class="fu">paste0</span>(<span class="st">&quot;s&quot;</span>, <span class="dv">1</span><span class="sc">:</span><span class="dv">4</span>), n, <span class="at">replace =</span> <span class="cn">TRUE</span>))</span>
+<span id="cb3-8"><a href="#cb3-8" tabindex="-1"></a>)</span>
+<span id="cb3-9"><a href="#cb3-9" tabindex="-1"></a><span class="fu">str</span>(df)</span></code></pre></div>
+<p>Pass the parsed formula and the data to
+<code>tulpa_build_model_data()</code>. The result is a list with the
+response vector, the fixed-effects design matrix, an offset slot, the
+parsed random-effect terms, and a few count fields the backends
+read.</p>
+<div class="sourceCode" id="cb4"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb4-1"><a href="#cb4-1" tabindex="-1"></a>bundle <span class="ot">&lt;-</span> <span class="fu">tulpa_build_model_data</span>(pf, df)</span>
+<span id="cb4-2"><a href="#cb4-2" tabindex="-1"></a><span class="fu">names</span>(bundle)</span></code></pre></div>
+<p>The design matrix <code>X</code> is the ordinary
+<code>model.matrix</code> output for the fixed formula. It carries the
+intercept column unless you drop it, expands factors into contrasts, and
+labels its columns.</p>
+<div class="sourceCode" id="cb5"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb5-1"><a href="#cb5-1" tabindex="-1"></a><span class="fu">dim</span>(bundle<span class="sc">$</span>X)</span>
+<span id="cb5-2"><a href="#cb5-2" tabindex="-1"></a><span class="fu">colnames</span>(bundle<span class="sc">$</span>X)</span>
+<span id="cb5-3"><a href="#cb5-3" tabindex="-1"></a><span class="fu">head</span>(bundle<span class="sc">$</span>X, <span class="dv">3</span>)</span></code></pre></div>
+<p>The response <code>y</code> comes from evaluating the left side of
+<code>~</code> against the data, so a bare name, a transformation like
+<code>log(y)</code>, or a <code>cbind(...)</code> pair all resolve
+through the same path. The count fields <code>n_obs</code>,
+<code>n_fixed</code>, and <code>n_re_terms</code> are the sizes the
+backends need up front, and <code>fixed_names</code> echoes the design
+columns.</p>
+<div class="sourceCode" id="cb6"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb6-1"><a href="#cb6-1" tabindex="-1"></a><span class="fu">c</span>(<span class="at">n_obs =</span> bundle<span class="sc">$</span>n_obs, <span class="at">n_fixed =</span> bundle<span class="sc">$</span>n_fixed,</span>
+<span id="cb6-2"><a href="#cb6-2" tabindex="-1"></a>  <span class="at">n_re_terms =</span> bundle<span class="sc">$</span>n_re_terms)</span></code></pre></div>
+<p>When <code>tulpa()</code> runs a full fit it calls these two
+functions for you, then attaches the design back onto the returned
+object as <code>$model_matrix</code> and records
+<code>$fixed_names</code> and the parameter layout. Calling the builders
+yourself is useful for checking that a factor has the levels you expect
+or that an interaction expanded the way you wanted, before any inference
+runs. The cost is a single function call, and the payoff is that a
+design problem shows up as a printed matrix instead of a confusing fit
+failure several steps later.</p>
+</div>
+<div id="random-effect-terms" class="section level2">
+<h2>Random-effect terms</h2>
+<p>Each random-effect term becomes one entry in
+<code>bundle$re_terms</code>, and the entry carries everything a backend
+needs to place group-level effects: an integer index mapping every row
+to its group, the number of groups, the level labels, the coefficient
+count, and a slope matrix when the term has slopes. Read the first term,
+the random intercept <code>(1 | g)</code>.</p>
+<div class="sourceCode" id="cb7"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb7-1"><a href="#cb7-1" tabindex="-1"></a>re1 <span class="ot">&lt;-</span> bundle<span class="sc">$</span>re_terms[[<span class="dv">1</span>]]</span>
+<span id="cb7-2"><a href="#cb7-2" tabindex="-1"></a>re1[<span class="fu">c</span>(<span class="st">&quot;group_var&quot;</span>, <span class="st">&quot;n_groups&quot;</span>, <span class="st">&quot;n_coefs&quot;</span>, <span class="st">&quot;has_intercept&quot;</span>)]</span>
+<span id="cb7-3"><a href="#cb7-3" tabindex="-1"></a>re1<span class="sc">$</span>levels</span></code></pre></div>
+<p><code>group_idx</code> is the heart of it. Each observation gets an
+integer pointing at one of the <code>n_groups</code> levels, and the
+order of <code>levels</code> fixes which integer means which group. A
+random intercept has <code>n_coefs = 1</code> and no slope matrix, since
+the design column is an implicit vector of ones.</p>
+<div class="sourceCode" id="cb8"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb8-1"><a href="#cb8-1" tabindex="-1"></a><span class="fu">head</span>(re1<span class="sc">$</span>group_idx, <span class="dv">12</span>)</span>
+<span id="cb8-2"><a href="#cb8-2" tabindex="-1"></a><span class="fu">table</span>(re1<span class="sc">$</span>group_idx)</span></code></pre></div>
+<p>The second term, <code>(1 + x || site)</code>, adds a random slope on
+<code>x</code>. Its coefficient count rises to two (an intercept and the
+slope), the slope column shows up in <code>slope_matrix</code>, and
+<code>correlated</code> is <code>FALSE</code> because the double bar
+asked for independent effects.</p>
+<div class="sourceCode" id="cb9"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb9-1"><a href="#cb9-1" tabindex="-1"></a>re2 <span class="ot">&lt;-</span> bundle<span class="sc">$</span>re_terms[[<span class="dv">2</span>]]</span>
+<span id="cb9-2"><a href="#cb9-2" tabindex="-1"></a>re2[<span class="fu">c</span>(<span class="st">&quot;group_var&quot;</span>, <span class="st">&quot;n_groups&quot;</span>, <span class="st">&quot;n_coefs&quot;</span>, <span class="st">&quot;correlated&quot;</span>)]</span>
+<span id="cb9-3"><a href="#cb9-3" tabindex="-1"></a><span class="fu">head</span>(re2<span class="sc">$</span>slope_matrix)</span></code></pre></div>
+<p>Group levels come from factor levels, so the way you build a factor
+controls the group ordering and which groups exist at all. If a level is
+present in the factor but never observed, it still counts toward
+<code>n_groups</code>, which inflates the number of group-level effects
+the model carries with no data to inform them. To keep only the observed
+levels, drop the unused ones with <code>droplevels()</code> before
+fitting. A character column is coerced to a factor on the fly. That
+works, and it leaves the level order up to <code>as.factor()</code>,
+which sorts alphabetically; setting the factor yourself keeps that order
+under your control and makes the <code>levels</code> slot read the way
+you expect.</p>
+<p>The link between <code>group_idx</code> and <code>levels</code> is
+worth holding onto, because it is how a fit reports group-level effects
+back to you. <code>ranef()</code> returns one row per level in the order
+of <code>levels</code>, and a row of the design points into that same
+vector through <code>group_idx</code>. When two factors share level
+labels, keeping them as distinct columns rather than merging them avoids
+a silent collision in the index.</p>
+<p>The grouping side of a bar also accepts an expression rather than a
+bare name, which covers crossed and nested designs without a reshape.
+Writing <code>(1 | g:site)</code> crosses the two factors into one
+grouping, and tulpa evaluates the interaction at build time instead of
+guessing column names. Nested grouping <code>(1 | g/site)</code> expands
+into two terms, one for <code>g</code> and one for the
+<code>g:site</code> combination, matching the lme4 convention. The
+parsed object shows both terms, so you can confirm the expansion before
+fitting rather than after.</p>
+<div class="sourceCode" id="cb10"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb10-1"><a href="#cb10-1" tabindex="-1"></a>pn <span class="ot">&lt;-</span> <span class="fu">tulpa_parse_formula</span>(y <span class="sc">~</span> x <span class="sc">+</span> (<span class="dv">1</span> <span class="sc">|</span> g<span class="sc">/</span>site))</span>
+<span id="cb10-2"><a href="#cb10-2" tabindex="-1"></a>pn<span class="sc">$</span>n_re_terms</span>
+<span id="cb10-3"><a href="#cb10-3" tabindex="-1"></a><span class="fu">vapply</span>(pn<span class="sc">$</span>random_effects, <span class="st">`</span><span class="at">[[</span><span class="st">`</span>, <span class="fu">character</span>(<span class="dv">1</span>), <span class="st">&quot;group_var&quot;</span>)</span></code></pre></div>
+</div>
+<div id="binomial-denominators-and-offsets" class="section level2">
+<h2>Binomial denominators and offsets</h2>
+<p>A binomial model needs to know the number of trials behind each
+success count. tulpa offers two ways to supply that, and they suit
+different data shapes. When your data frame has a column of successes
+and a column of failures, pass both through <code>cbind()</code> on the
+response side. The builder evaluates the call and returns a two-column
+matrix.</p>
+<div class="sourceCode" id="cb11"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb11-1"><a href="#cb11-1" tabindex="-1"></a>db <span class="ot">&lt;-</span> <span class="fu">data.frame</span>(<span class="at">x =</span> <span class="fu">rnorm</span>(n))</span>
+<span id="cb11-2"><a href="#cb11-2" tabindex="-1"></a>prob   <span class="ot">&lt;-</span> <span class="fu">plogis</span>(<span class="sc">-</span><span class="fl">0.2</span> <span class="sc">+</span> <span class="fl">0.8</span> <span class="sc">*</span> db<span class="sc">$</span>x)</span>
+<span id="cb11-3"><a href="#cb11-3" tabindex="-1"></a>db<span class="sc">$</span>succ <span class="ot">&lt;-</span> <span class="fu">rbinom</span>(n, <span class="dv">15</span>, prob)</span>
+<span id="cb11-4"><a href="#cb11-4" tabindex="-1"></a>db<span class="sc">$</span>fail <span class="ot">&lt;-</span> <span class="dv">15</span> <span class="sc">-</span> db<span class="sc">$</span>succ</span>
+<span id="cb11-5"><a href="#cb11-5" tabindex="-1"></a></span>
+<span id="cb11-6"><a href="#cb11-6" tabindex="-1"></a>pf_b   <span class="ot">&lt;-</span> <span class="fu">tulpa_parse_formula</span>(<span class="fu">cbind</span>(succ, fail) <span class="sc">~</span> x)</span>
+<span id="cb11-7"><a href="#cb11-7" tabindex="-1"></a>bun_b  <span class="ot">&lt;-</span> <span class="fu">tulpa_build_model_data</span>(pf_b, db)</span>
+<span id="cb11-8"><a href="#cb11-8" tabindex="-1"></a><span class="fu">head</span>(bun_b<span class="sc">$</span>y, <span class="dv">3</span>)</span></code></pre></div>
+<p>When the denominators live in their own vector, keep the response as
+the success count and hand the trials to <code>tulpa()</code> through
+<code>n_trials</code>, a vector with one entry per row. This is the
+shape to reach for when every unit was observed a known number of times
+and you would rather not carry a redundant failure column. The two
+routes are equivalent: a single-column response of successes paired with
+<code>n_trials</code>, or a two-column <code>cbind(succ, fail)</code>
+response, describe the same model. Binary data is the special case where
+every denominator is one, so a plain <code>0/1</code> response needs
+neither route.</p>
+<div class="sourceCode" id="cb12"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb12-1"><a href="#cb12-1" tabindex="-1"></a>db<span class="sc">$</span>tot <span class="ot">&lt;-</span> <span class="dv">15</span><span class="dt">L</span></span>
+<span id="cb12-2"><a href="#cb12-2" tabindex="-1"></a>fit_b <span class="ot">&lt;-</span> <span class="fu">tulpa</span>(succ <span class="sc">~</span> x, <span class="at">data =</span> db, <span class="at">family =</span> <span class="st">&quot;binomial&quot;</span>,</span>
+<span id="cb12-3"><a href="#cb12-3" tabindex="-1"></a>               <span class="at">n_trials =</span> db<span class="sc">$</span>tot, <span class="at">mode =</span> <span class="st">&quot;laplace&quot;</span>)</span>
+<span id="cb12-4"><a href="#cb12-4" tabindex="-1"></a><span class="fu">coef</span>(fit_b)</span>
+<span id="cb12-5"><a href="#cb12-5" tabindex="-1"></a></span>
+<span id="cb12-6"><a href="#cb12-6" tabindex="-1"></a>fit_cbind <span class="ot">&lt;-</span> <span class="fu">tulpa</span>(<span class="fu">cbind</span>(succ, fail) <span class="sc">~</span> x, <span class="at">data =</span> db, <span class="at">family =</span> <span class="st">&quot;binomial&quot;</span>,</span>
+<span id="cb12-7"><a href="#cb12-7" tabindex="-1"></a>                   <span class="at">mode =</span> <span class="st">&quot;laplace&quot;</span>)</span>
+<span id="cb12-8"><a href="#cb12-8" tabindex="-1"></a><span class="fu">max</span>(<span class="fu">abs</span>(<span class="fu">coef</span>(fit_cbind) <span class="sc">-</span> <span class="fu">coef</span>(fit_b)))</span></code></pre></div>
+<p>An offset is a known additive term on the linear-predictor scale,
+fixed at coefficient one rather than estimated, and exposure in a rate
+model is the common case: a Poisson count observed over a varying window
+of time or area enters as <code>offset(log(exposure))</code>, which
+turns the modelled mean into a rate times exposure. The builder pulls
+the offset out of the design and returns it in its own slot, so it never
+appears as a fitted column.</p>
+<div class="sourceCode" id="cb13"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb13-1"><a href="#cb13-1" tabindex="-1"></a>dp <span class="ot">&lt;-</span> <span class="fu">data.frame</span>(<span class="at">x =</span> <span class="fu">rnorm</span>(n), <span class="at">expo =</span> <span class="fu">runif</span>(n, <span class="dv">1</span>, <span class="dv">8</span>))</span>
+<span id="cb13-2"><a href="#cb13-2" tabindex="-1"></a>dp<span class="sc">$</span>y <span class="ot">&lt;-</span> <span class="fu">rpois</span>(n, dp<span class="sc">$</span>expo <span class="sc">*</span> <span class="fu">exp</span>(<span class="fl">0.1</span> <span class="sc">+</span> <span class="fl">0.5</span> <span class="sc">*</span> dp<span class="sc">$</span>x))</span>
+<span id="cb13-3"><a href="#cb13-3" tabindex="-1"></a></span>
+<span id="cb13-4"><a href="#cb13-4" tabindex="-1"></a>pf_o  <span class="ot">&lt;-</span> <span class="fu">tulpa_parse_formula</span>(y <span class="sc">~</span> x <span class="sc">+</span> <span class="fu">offset</span>(<span class="fu">log</span>(expo)))</span>
+<span id="cb13-5"><a href="#cb13-5" tabindex="-1"></a>bun_o <span class="ot">&lt;-</span> <span class="fu">tulpa_build_model_data</span>(pf_o, dp)</span>
+<span id="cb13-6"><a href="#cb13-6" tabindex="-1"></a><span class="fu">head</span>(bun_o<span class="sc">$</span>offset, <span class="dv">4</span>)</span>
+<span id="cb13-7"><a href="#cb13-7" tabindex="-1"></a><span class="fu">colnames</span>(bun_o<span class="sc">$</span>X)</span></code></pre></div>
+<p>The offset column is <code>log(expo)</code> evaluated row by row, and
+<code>X</code> holds only the intercept and <code>x</code>. The
+transformation inside <code>offset(...)</code> runs as written, so the
+log is yours to apply, not something tulpa adds. Fit it as a Poisson
+model and the slope recovers near its true value of 0.5, with the
+exposure absorbed through the offset rather than estimated as a free
+coefficient.</p>
+<div class="sourceCode" id="cb14"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb14-1"><a href="#cb14-1" tabindex="-1"></a>fit_o <span class="ot">&lt;-</span> <span class="fu">tulpa</span>(y <span class="sc">~</span> x <span class="sc">+</span> <span class="fu">offset</span>(<span class="fu">log</span>(expo)), <span class="at">data =</span> dp,</span>
+<span id="cb14-2"><a href="#cb14-2" tabindex="-1"></a>               <span class="at">family =</span> <span class="st">&quot;poisson&quot;</span>, <span class="at">mode =</span> <span class="st">&quot;laplace&quot;</span>)</span>
+<span id="cb14-3"><a href="#cb14-3" tabindex="-1"></a><span class="fu">coef</span>(fit_o)</span></code></pre></div>
+</div>
+<div id="validation-and-errors" class="section level2">
+<h2>Validation and errors</h2>
+<p>The builders fail early and name the problem, rather than passing a
+half-formed design to a backend. The most common slip is a name in the
+formula that has no matching column. Suppose the grouping factor is
+called <code>g</code> in the data but the formula asks for
+<code>region</code>: the build stops and quotes the offending name.</p>
+<div class="sourceCode" id="cb15"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb15-1"><a href="#cb15-1" tabindex="-1"></a>bad <span class="ot">&lt;-</span> <span class="fu">tulpa_parse_formula</span>(y <span class="sc">~</span> x <span class="sc">+</span> (<span class="dv">1</span> <span class="sc">|</span> region))</span>
+<span id="cb15-2"><a href="#cb15-2" tabindex="-1"></a><span class="fu">tulpa_build_model_data</span>(bad, df)</span></code></pre></div>
+<p>A response that cannot be found is reported the same way, against the
+label that appeared on the left of <code>~</code>.</p>
+<div class="sourceCode" id="cb16"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb16-1"><a href="#cb16-1" tabindex="-1"></a><span class="fu">tulpa_build_model_data</span>(<span class="fu">tulpa_parse_formula</span>(count <span class="sc">~</span> x), df)</span></code></pre></div>
+<p>The special terms check their own shape at parse time. A
+<code>spatial(...)</code> term wraps exactly one bare column name, so a
+call with the wrong arity is caught before any data is touched, with a
+message that shows the intended form.</p>
+<div class="sourceCode" id="cb17"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb17-1"><a href="#cb17-1" tabindex="-1"></a><span class="fu">tulpa_parse_formula</span>(y <span class="sc">~</span> <span class="fu">spatial</span>(x, g))</span></code></pre></div>
+<p>A spatial term also has a partner requirement that surfaces at fit
+time. Naming a unit column with <code>spatial(col)</code> tells tulpa
+where each row sits, but the field structure (the adjacency for an areal
+model, coordinates for a continuous one) arrives through the
+<code>spatial=</code> argument. Leaving it out stops the fit with
+guidance on what to pass.</p>
+<div class="sourceCode" id="cb18"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb18-1"><a href="#cb18-1" tabindex="-1"></a><span class="fu">tulpa</span>(y <span class="sc">~</span> x <span class="sc">+</span> <span class="fu">spatial</span>(g), <span class="at">data =</span> df, <span class="at">family =</span> <span class="st">&quot;poisson&quot;</span>, <span class="at">mode =</span> <span class="st">&quot;laplace&quot;</span>)</span></code></pre></div>
+<p>These checks share a habit worth leaning on. The formula declares
+intent, the data supplies the columns, and the builder reconciles the
+two before anything numeric happens. When a fit fails to start, parsing
+the formula on its own and then building the model data by hand isolates
+whether the trouble is in the formula grammar or in the columns the data
+does or does not carry. Reading <code>bundle$re_terms</code> confirms
+the group counts; reading <code>colnames(bundle$X)</code> confirms how
+factors and interactions expanded. Most data-shape questions answer
+themselves once those two pieces are on screen.</p>
+</div>
+<div id="see-also" class="section level2">
+<h2>See also</h2>
+<ul>
+<li><code>?tulpa_parse_formula</code>,
+<code>?tulpa_build_model_data</code> for the function references.</li>
+<li>The getting-started vignette for the fit, extract, predict, and
+compare workflow once the data is in shape.</li>
+<li>The spatial and priors vignettes for the structures that ride
+alongside the formula through <code>spatial=</code> and the prior
+arguments.</li>
+</ul>
+</div>
+
+
+
+<!-- code folding -->
+
+
+<!-- dynamically load mathjax for compatibility with self-contained -->
+<script>
+  (function () {
+    var script = document.createElement("script");
+    script.type = "text/javascript";
+    script.src  = "https://mathjax.rstudio.com/latest/MathJax.js?config=TeX-AMS-MML_HTMLorMML";
+    document.getElementsByTagName("head")[0].appendChild(script);
+  })();
+</script>
+
+</body>
+</html>

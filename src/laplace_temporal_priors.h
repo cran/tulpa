@@ -1,0 +1,175 @@
+// laplace_temporal_priors.h
+// Temporal prior utilities and precision interfaces for Laplace solvers.
+//
+// Each precision (RW1/RW2/AR1) is exposed in two scatter flavors:
+//   * Dense:  `add_*_precision`         -> DenseMat& H  (legacy fallback)
+//   * Sparse: `add_*_precision_sparse`  -> SparseHessianBuilder& H  (scale path)
+// Both must agree numerically. Pattern enumeration is provided alongside.
+
+#ifndef TULPA_LAPLACE_TEMPORAL_PRIORS_H
+#define TULPA_LAPLACE_TEMPORAL_PRIORS_H
+
+#include "hmc_temporal.h"   // single-source temporal log-prior / rank / AR1 floor
+#include "laplace_types.h"
+#include <Rcpp.h>
+#include <algorithm>
+#include <cmath>
+#include <utility>
+#include <vector>
+
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
+namespace tulpa {
+
+// Forward decl — full type in sparse_hessian.h, only needed in the .cpp.
+class SparseHessianBuilder;
+
+// The RW1 / RW2 / AR1 log-priors are adapters over the single templated
+// implementation in hmc_temporal.h: they carry the Laplace path's
+// (NumericVector, start_idx) calling convention and nothing else, so the two
+// tiers evaluate one density and their log-marginals are on one scale.
+inline double log_prior_temporal_span(
+    const Rcpp::NumericVector& x, int start_idx, int n_times,
+    TemporalType type, double tau, double rho, bool cyclic
+) {
+    if (n_times < 1) return 0.0;
+    const double* phi = x.begin() + start_idx;
+    return tulpa_temporal::log_prior_temporal(
+        phi, n_times, type, tau, rho, cyclic);
+}
+
+inline double log_prior_rw1(
+    const Rcpp::NumericVector& x, int start_idx, int n_times,
+    double tau, bool cyclic
+) {
+    return log_prior_temporal_span(x, start_idx, n_times,
+                                   TemporalType::RW1, tau, 0.0, cyclic);
+}
+
+inline double log_prior_rw2(
+    const Rcpp::NumericVector& x, int start_idx, int n_times,
+    double tau, bool cyclic
+) {
+    return log_prior_temporal_span(x, start_idx, n_times,
+                                   TemporalType::RW2, tau, 0.0, cyclic);
+}
+
+inline double log_prior_ar1(
+    const Rcpp::NumericVector& x, int start_idx, int n_times,
+    double tau, double rho
+) {
+    return log_prior_temporal_span(x, start_idx, n_times,
+                                   TemporalType::AR1, tau, rho, false);
+}
+
+void add_rw1_precision(
+    DenseVec& grad, DenseMat& H, const Rcpp::NumericVector& x,
+    int start_idx, int n_times, double tau, bool cyclic
+);
+
+void add_rw1_precision_sparse(
+    DenseVec& grad, SparseHessianBuilder& H, const Rcpp::NumericVector& x,
+    int start_idx, int n_times, double tau, bool cyclic
+);
+
+void add_rw2_precision(
+    DenseVec& grad, DenseMat& H, const Rcpp::NumericVector& x,
+    int start_idx, int n_times, double tau, bool cyclic
+);
+
+void add_rw2_precision_sparse(
+    DenseVec& grad, SparseHessianBuilder& H, const Rcpp::NumericVector& x,
+    int start_idx, int n_times, double tau, bool cyclic
+);
+
+void add_ar1_precision(
+    DenseVec& grad, DenseMat& H, const Rcpp::NumericVector& x,
+    int start_idx, int n_times, double tau, double rho
+);
+
+void add_ar1_precision_sparse(
+    DenseVec& grad, SparseHessianBuilder& H, const Rcpp::NumericVector& x,
+    int start_idx, int n_times, double tau, double rho
+);
+
+// Append (row, col) lower-triangle entries the RW1 / RW2 / AR1 precision
+// contributes to the joint H sparsity pattern. Diagonal entries are omitted
+// (pattern builder adds them unconditionally).
+void add_rw1_pattern(
+    std::vector<std::pair<int,int>>& out,
+    int start_idx, int n_times, bool cyclic
+);
+
+void add_rw2_pattern(
+    std::vector<std::pair<int,int>>& out,
+    int start_idx, int n_times, bool cyclic
+);
+
+void add_ar1_pattern(
+    std::vector<std::pair<int,int>>& out,
+    int start_idx, int n_times
+);
+
+// A whole temporal field: n_groups contiguous walks of n_times at
+// [start + g*n_times, ...), sharing one tau, never connected across a group
+// boundary.
+//
+// RW1 and RW2 are intrinsic, so the field carries a constant null direction
+// that is jointly unidentified with the intercept. These entry points add the
+// per-group precision AND the sum-to-zero pin that identifies it (laplace_s2z.h),
+// which the per-group `add_rw*_precision` helpers below deliberately do not: the
+// pin is over the field's GLOBAL constant, not per walk. The G - 1 between-group
+// level contrasts stay improper by design -- the front door does not fit them --
+// so this pins exactly the one direction the sampler path augments
+// (tulpa_priors_temporal.h), and the two paths identify the same model.
+//
+// The pin is stored as S2ZStorage::Fold, so an RW chain's pattern stays
+// tridiagonal (RW1) / pentadiagonal (RW2) and the block keeps the ADJACENCY
+// fill kind it declares; the solver folds the rank-1 in exactly.
+//
+// AR1 is proper (full rank), needs no pin, and keeps the per-group helpers.
+void add_rw1_field(
+    DenseVec& grad, DenseMat& H, const Rcpp::NumericVector& x,
+    int start, int n_groups, int n_times, double tau, bool cyclic
+);
+
+void add_rw1_field_sparse(
+    DenseVec& grad, SparseHessianBuilder& H, const Rcpp::NumericVector& x,
+    int start, int n_groups, int n_times, double tau, bool cyclic
+);
+
+void add_rw1_field_pattern(
+    std::vector<std::pair<int,int>>& out,
+    int start, int n_groups, int n_times, bool cyclic
+);
+
+double log_prior_rw1_field(
+    const Rcpp::NumericVector& x,
+    int start, int n_groups, int n_times, double tau, bool cyclic
+);
+
+void add_rw2_field(
+    DenseVec& grad, DenseMat& H, const Rcpp::NumericVector& x,
+    int start, int n_groups, int n_times, double tau, bool cyclic
+);
+
+void add_rw2_field_sparse(
+    DenseVec& grad, SparseHessianBuilder& H, const Rcpp::NumericVector& x,
+    int start, int n_groups, int n_times, double tau, bool cyclic
+);
+
+void add_rw2_field_pattern(
+    std::vector<std::pair<int,int>>& out,
+    int start, int n_groups, int n_times, bool cyclic
+);
+
+double log_prior_rw2_field(
+    const Rcpp::NumericVector& x,
+    int start, int n_groups, int n_times, double tau, bool cyclic
+);
+
+} // namespace tulpa
+
+#endif // TULPA_LAPLACE_TEMPORAL_PRIORS_H

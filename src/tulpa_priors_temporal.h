@@ -1,0 +1,290 @@
+// tulpa_priors_temporal.h
+// Sliced from tulpa_priors.h. Include via "tulpa_priors.h" or directly.
+//
+// Prerequisite: ModelData and ParamLayout must be defined before this
+// header (normally via hmc_sampler.h).
+
+#ifndef TULPA_PRIORS_TEMPORAL_H
+#define TULPA_PRIORS_TEMPORAL_H
+
+#include <vector>
+#include <cmath>
+#include "autodiff_utils.h"
+#include "hmc_temporal.h"  // single-source RW1/RW2/AR1 kernels
+#include "temporal_gp_kernel.h"  // temporal GP covariance + dense factorization
+#include "tulpa/sum_to_zero.h"  // s2z_aug_coef / s2z_aug_rank
+
+namespace tulpa {
+namespace priors {
+
+using namespace math;
+
+// ============================================================================
+// 6. Temporal prior (RW1/RW2/AR1/GP)
+// ============================================================================
+
+template<typename T>
+T compute_temporal_prior(const std::vector<T>& params, const ModelData& data,
+                          const ParamLayout& layout, std::vector<T>& phi_temporal,
+                          T& tau_temporal_out, T& rho_ar1_out,
+                          T& sigma2_temporal_gp_out, T& phi_temporal_gp_out)
+{
+    T log_post = T(0.0);
+
+    if (layout.has_temporal) {
+        // Extract temporal effects (common to all temporal types)
+        int n_temporal = layout.temporal_end - layout.temporal_start;
+        phi_temporal.resize(n_temporal);
+        for (int t = 0; t < n_temporal; t++) {
+            phi_temporal[t] = params[layout.temporal_start + t];
+        }
+
+        if (layout.is_temporal_gp) {
+            // Temporal GP: sigma2 and phi (lengthscale) parameters
+            T log_sigma2 = params[layout.log_sigma2_temporal_gp_idx];
+            T logit_phi = params[layout.logit_phi_temporal_gp_idx];
+            sigma2_temporal_gp_out = safe_exp(log_sigma2);
+
+            phi_temporal_gp_out = bounded_from_logit(
+                logit_phi,
+                data.temporal_gp_phi_prior_lower,
+                data.temporal_gp_phi_prior_upper);
+        } else {
+            // RW1/RW2/AR1: tau-based parameterization
+            T log_tau = params[layout.log_tau_temporal_idx];
+            tau_temporal_out = safe_exp(log_tau);
+
+            if (layout.is_ar1) {
+                T logit_rho = params[layout.logit_rho_ar1_idx];
+                // Map to (-1, 1): temporal_ar1() documents a Uniform(-1, 1)
+                // prior and build_ar1_precision() requires |rho| < 1, so the
+                // sampler must be able to reach negative autocorrelation.
+                // (The sibling ST/TVC AR1 code uses the same 2u - 1 map.)
+                T u_ar1 = inv_logit(logit_rho);
+                rho_ar1_out = T(2.0) * u_ar1 - T(1.0);
+            }
+        }
+
+        int T_times = data.n_times;
+
+        if (layout.is_temporal_gp) {
+            // Temporal GP: PC prior on sigma2, logit-bounded phi (lengthscale)
+
+            // PC prior on sigma2 (favor smaller variance), over the sampled
+            // log-variance -- the shared pc_prior.h form (base density + exact
+            // change-of-variables Jacobian), single-sourced.
+            log_post = log_post + log_prior_log_sigma2_pc(
+                params[layout.log_sigma2_temporal_gp_idx],
+                data.temporal_gp_sigma2_prior_U,
+                data.temporal_gp_sigma2_prior_alpha);
+
+            // Uniform prior on phi over (lower, upper); the bounded map holds
+            // the interval, so only its Jacobian is contributed here. A 1D
+            // lengthscale would need the d = 1 PC density to move off Uniform,
+            // which pc_prior.h deliberately does not provide.
+            log_post = log_post + log_jacobian_bounded(
+                phi_temporal_gp_out,
+                data.temporal_gp_phi_prior_lower,
+                data.temporal_gp_phi_prior_upper);
+
+            const bool use_nc = (data.temporal_gp_parameterization == 1);
+
+            // The exponential kernel (and Matern nu = 1/2, which is the same
+            // kernel) is an Ornstein-Uhlenbeck process, so its joint density is
+            // a first-order Markov chain and evaluates in O(T) with no matrix.
+            // Every other kernel has no finite-dimensional state-space form and
+            // is evaluated densely off a T x T Cholesky.
+            if (!tulpa_temporal_gp::cov_is_markov(data.temporal_gp_data.cov_type,
+                                                  data.temporal_gp_data.nu)) {
+                std::vector<T> L;
+                const bool ok = tulpa_temporal_gp::temporal_cov_chol(
+                    data.temporal_gp_data.time_values, T_times,
+                    sigma2_temporal_gp_out, phi_temporal_gp_out,
+                    data.temporal_gp_data.cov_type,
+                    data.temporal_gp_data.nu,
+                    data.temporal_gp_data.period, L);
+                if (!ok) return T(-INFINITY);
+
+                if (use_nc) {
+                    // The sampled variable IS z ~ N(0, I); f = L z is handed to
+                    // the observation loop. No log|det(df/dz)| here, for the
+                    // same reason the Markov branch below omits it.
+                    for (int t = 0; t < n_temporal; t++) {
+                        log_post = log_post - T(0.5) * phi_temporal[t] * phi_temporal[t];
+                    }
+                    std::vector<T> f_reconstructed(n_temporal);
+                    for (int g = 0; g < data.n_temporal_groups; g++) {
+                        tulpa_temporal_gp::dense_gp_forward(
+                            L, T_times, phi_temporal, g * T_times, f_reconstructed);
+                    }
+                    phi_temporal = std::move(f_reconstructed);
+                } else {
+                    for (int g = 0; g < data.n_temporal_groups; g++) {
+                        log_post = log_post + tulpa_temporal_gp::dense_gp_log_density(
+                            L, T_times, phi_temporal, g * T_times);
+                    }
+                }
+                return log_post;
+            }
+
+            // Precompute shared rho[t] and derived quantities once (same dt for all groups)
+                std::vector<T> rho_shared(T_times > 1 ? T_times - 1 : 0);
+                std::vector<T> omr2_shared(T_times > 1 ? T_times - 1 : 0);
+                std::vector<T> a_shared(T_times > 1 ? T_times - 1 : 0);
+                T sigma_t = safe_sqrt(sigma2_temporal_gp_out);
+                for (int t = 1; t < T_times; t++) {
+                    double dt = data.temporal_gp_data.time_values[t] - data.temporal_gp_data.time_values[t - 1];
+                    rho_shared[t - 1] = safe_exp(T(-dt) / phi_temporal_gp_out);
+                    // The guard is on the correlation factor 1 - rho^2, the
+                    // shared AR1 floor: it is the factor that degenerates when
+                    // a long lengthscale meets a fine time grid, and flooring
+                    // it leaves the amplitude alone, so a genuinely small
+                    // sigma^2 keeps the conditional variance the model asks for
+                    // instead of being lifted to the floor. Both branches read
+                    // this one value, so the non-centered transform's scale a_t
+                    // and the centered branch's conditional variance are the
+                    // same number and the two parameterizations target the same
+                    // posterior.
+                    omr2_shared[t - 1] =
+                        tulpa_temporal::ar1_one_minus_rho2(rho_shared[t - 1]);
+                    a_shared[t - 1] = sigma_t * safe_sqrt(omr2_shared[t - 1]);
+                }
+
+            if (use_nc) {
+                // Non-centered: params store z ~ N(0,1)
+                // Prior: z ~ N(0, I) for each temporal effect
+                for (int t = 0; t < n_temporal; t++) {
+                    log_post = log_post - T(0.5) * phi_temporal[t] * phi_temporal[t];
+                }
+
+                // No z -> f Jacobian here: in the non-centered parameterization
+                // the sampled variable IS z with prior N(0, I) (added above), so
+                // the target is -0.5 z'z plus the likelihood at the reconstructed
+                // f. The centered branch below places the GP prior on f directly;
+                // the two are reparameterizations of the same posterior. Adding
+                // log|det(df/dz)| = T*log(sigma) + 0.5*sum log(1 - rho_t^2) here
+                // would inflate the GP amplitude by sigma^(G*T) and shrink the
+                // lengthscale.
+
+                // Forward transform z -> f: overwrite phi_temporal for use in obs loop
+                // f[0] = sigma * z[0]
+                // f[t] = rho_t * f[t-1] + a_t * z[t]
+                std::vector<T> f_reconstructed(n_temporal);
+                for (int g = 0; g < data.n_temporal_groups; g++) {
+                    int off = g * T_times;
+                    f_reconstructed[off] = sigma_t * phi_temporal[off];
+                    for (int t = 1; t < T_times; t++) {
+                        f_reconstructed[off + t] = rho_shared[t - 1] * f_reconstructed[off + t - 1] + a_shared[t - 1] * phi_temporal[off + t];
+                    }
+                }
+                // Replace phi_temporal with reconstructed f for observation loop
+                phi_temporal = std::move(f_reconstructed);
+            } else {
+                // Centered: GP log-likelihood using state-space representation
+                for (int g = 0; g < data.n_temporal_groups; g++) {
+                    T f0 = phi_temporal[g * T_times];
+                    log_post = log_post - T(0.5) * safe_log(T(2.0 * M_PI) * sigma2_temporal_gp_out);
+                    log_post = log_post - T(0.5) * f0 * f0 / sigma2_temporal_gp_out;
+
+                    for (int t = 1; t < T_times; t++) {
+                        T f_prev = phi_temporal[g * T_times + t - 1];
+                        T f_curr = phi_temporal[g * T_times + t];
+
+                        T cond_var = sigma2_temporal_gp_out * omr2_shared[t - 1];
+                        T cond_mean = rho_shared[t - 1] * f_prev;
+                        T resid = f_curr - cond_mean;
+
+                        log_post = log_post - T(0.5) * safe_log(T(2.0 * M_PI) * cond_var);
+                        log_post = log_post - T(0.5) * resid * resid / cond_var;
+                    }
+                }
+            }
+        } else {
+            // RW1/RW2/AR1: tau-based parameterization
+            T log_tau = params[layout.log_tau_temporal_idx];
+            log_post = log_post + log_prior_gamma(log_tau, data.tau_temporal_shape, data.tau_temporal_rate);
+
+            // RW1 and RW2 are intrinsic, and this path carried no sum-to-zero
+            // term at all, so the field level would be free to wander
+            // against the intercept, as it is on any intrinsic field left
+            // unpinned.
+            //
+            // Exactly ONE direction is augmented: the single GLOBAL constant,
+            // the only one confounded with the intercept. With several groups
+            // the walks are disconnected, so the prior's null space is G
+            // constants, but a per-group level shifts eta only for that group's
+            // observations and the likelihood pins it. Augmenting per group
+            // would put a proper N(0, 1/tau) prior on those differences and
+            // shrink them, which is a different model -- and one the
+            // nested-Laplace temporal block deliberately does not fit (see
+            // make_temporal_latent_block). The G - 1 group contrasts therefore
+            // stay improper on both paths, and the global constant is
+            // centred out of eta.
+            const int n_total = T_times * data.n_temporal_groups;
+            const auto global_aug = [&](void) {
+                const T s = tulpa::s2z_component_sum(phi_temporal.data(), 0, n_total);
+                return tulpa::s2z_aug_coef(T(1.0), n_total) * s * s;
+            };
+
+            if (data.temporal_type == TemporalType::RW1) {
+                // RW1: sum of (phi[t] - phi[t-1])^2 per group
+                T quad_form = T(0.0);
+                for (int g = 0; g < data.n_temporal_groups; g++) {
+                    quad_form = quad_form + tulpa_temporal::rw1_quadratic_form(
+                        phi_temporal.data() + g * T_times, T_times,
+                        data.temporal_cyclic);
+                }
+                quad_form = quad_form + global_aug();
+                int rank_rw1 = tulpa::s2z_aug_rank(
+                    tulpa_temporal::rw1_rank(T_times, data.temporal_cyclic)
+                        * data.n_temporal_groups, 1);
+                log_post = log_post
+                    + tulpa_temporal::gmrf_log_norm(rank_rw1, log_tau);
+                log_post = log_post - T(0.5) * tau_temporal_out * quad_form;
+
+            } else if (data.temporal_type == TemporalType::RW2) {
+                // RW2: sum of (phi[t] - 2*phi[t-1] + phi[t-2])^2 per group
+                T quad_form = T(0.0);
+                for (int g = 0; g < data.n_temporal_groups; g++) {
+                    quad_form = quad_form + tulpa_temporal::rw2_quadratic_form(
+                        phi_temporal.data() + g * T_times, T_times,
+                        data.temporal_cyclic);
+                }
+                quad_form = quad_form + global_aug();
+                // A non-cyclic RW2 also keeps its per-group LINEAR null
+                // direction, which this does not touch.
+                int rank_rw2 = tulpa::s2z_aug_rank(
+                    tulpa_temporal::rw2_rank(T_times, data.temporal_cyclic)
+                        * data.n_temporal_groups, 1);
+                log_post = log_post
+                    + tulpa_temporal::gmrf_log_norm(rank_rw2, log_tau);
+                log_post = log_post - T(0.5) * tau_temporal_out * quad_form;
+
+            } else if (data.temporal_type == TemporalType::AR1) {
+                // AR1: phi[t] | phi[t-1] ~ N(rho * phi[t-1], 1/tau)
+                // Beta(a, b) prior on u = (rho + 1)/2 = inv_logit. In the
+                // sampler's unconstrained space the Beta density combines with
+                // the logit change-of-variables to a*log(u) + b*log(1-u); the
+                // default (a, b) = (1, 1) recovers the Uniform(-1, 1) prior.
+                T u_ar1 = T(0.5) * (rho_ar1_out + T(1.0));
+                log_post = log_post
+                    + T(data.ar1_rho_prior_a) * safe_log(u_ar1)
+                    + T(data.ar1_rho_prior_b) * safe_log(T(1.0) - u_ar1);
+
+                for (int g = 0; g < data.n_temporal_groups; g++) {
+                    log_post = log_post + tulpa_temporal::ar1_log_density(
+                        phi_temporal.data() + g * T_times, T_times,
+                        rho_ar1_out, tau_temporal_out);
+                }
+            }
+        }
+    }
+
+    return log_post;
+}
+
+
+} // namespace priors
+} // namespace tulpa
+
+#endif // TULPA_PRIORS_TEMPORAL_H

@@ -1,0 +1,398 @@
+# Grid-cell checkpoint/resume for tulpa_nested_laplace_joint (gcol33/tulpa#50).
+#
+# The outer grid is the checkpoint boundary: each completed cell is appended to
+# a file, and a resume run loads finished cells and solves only the rest. The
+# loaded path must be exactly equivalent to a from-scratch fit (a resumed cell
+# is the same self-contained LaplaceResult), a torn tail from a killed run must
+# be discarded and re-solved, and a file written for different data must be
+# rejected rather than resumed onto a stale result.
+
+skip_on_cran()
+
+.ck_chain_adj <- function(n_s) {
+    nbr <- lapply(seq_len(n_s),
+                  function(s) setdiff(c(s - 1L, s + 1L), c(0L, n_s + 1L)))
+    n_neighbors <- vapply(nbr, length, integer(1))
+    list(
+        adj_row_ptr = as.integer(c(0L, cumsum(n_neighbors))),
+        adj_col_idx = as.integer(unlist(nbr)) - 1L,
+        n_neighbors = as.integer(n_neighbors),
+        n_spatial_units = n_s
+    )
+}
+
+.ck_sim_joint <- function(seed = 42L, N = 160L, n_s = 20L,
+                          sigma = 0.6, alpha_true = 1.2) {
+    set.seed(seed)
+    adj <- .ck_chain_adj(n_s)
+    w <- as.numeric(arima.sim(n = n_s, list(ar = 0.6))) * sigma
+    w <- w - mean(w)
+
+    s_idx_1 <- sample(seq_len(n_s), N, replace = TRUE)
+    s_idx_2 <- sample(seq_len(n_s), N, replace = TRUE)
+    x1 <- rnorm(N); x2 <- rnorm(N)
+
+    eta1 <- 0.3 + 0.5 * x1 + w[s_idx_1]
+    eta2 <- -0.2 + 0.4 * x2 + alpha_true * w[s_idx_2]
+
+    y1 <- rbinom(N, 1L, plogis(eta1))
+    y2 <- rnorm(N, mean = eta2, sd = 0.4)
+
+    list(
+        adj = adj,
+        responses = list(
+            occ = list(y = as.numeric(y1), n_trials = rep(1L, N),
+                       X = cbind(intercept = 1, x = x1),
+                       spatial_idx = s_idx_1,
+                       re_idx = rep(0L, N), n_re_groups = 0L,
+                       sigma_re = 1.0, family = "binomial", phi = 1.0),
+            pos = list(y = as.numeric(y2), n_trials = rep(1L, N),
+                       X = cbind(intercept = 1, x = x2),
+                       spatial_idx = s_idx_2,
+                       re_idx = rep(0L, N), n_re_groups = 0L,
+                       sigma_re = 1.0, family = "gaussian", phi = 0.4)
+        )
+    )
+}
+
+.ck_fit <- function(sim, prior, copy = NULL, control = list()) {
+    base <- list(max_iter = 50L, tol = 1e-8, n_threads = 1L,
+                 verbose = FALSE, diagnose_k = FALSE)
+    responses <- sim$responses
+    if (!is.null(copy))
+        responses[[copy$arm]]$field_coef <- list(name = "alpha", grid = copy$alpha_grid)
+    tulpa_nested_laplace_joint(
+        responses = responses, prior = prior,
+        control = utils::modifyList(base, control)
+    )
+}
+
+.ck_expect_equiv <- function(fit_a, fit_b, lm_tol = 1e-9, mode_tol = 1e-9) {
+    expect_equal(as.numeric(fit_b$log_marginal),
+                 as.numeric(fit_a$log_marginal),
+                 tolerance = lm_tol,
+                 info = "log_marginal differs")
+    if (is.matrix(fit_a$modes) && is.matrix(fit_b$modes)) {
+        expect_equal(dim(fit_b$modes), dim(fit_a$modes))
+        expect_equal(as.numeric(fit_b$modes), as.numeric(fit_a$modes),
+                     tolerance = mode_tol, info = "modes differ")
+    }
+    expect_equal(as.numeric(fit_b$theta_mean),
+                 as.numeric(fit_a$theta_mean),
+                 tolerance = 1e-9, info = "theta_mean differs")
+}
+
+test_that("checkpoint fit equals an un-checkpointed fit (ICAR, no copy)", {
+    sim <- .ck_sim_joint(seed = 11L)
+    prior <- c(list(type = "icar", sigma_grid = c(0.4, 0.6, 0.8, 1.0)),
+               sim$adj)
+    path <- tempfile(fileext = ".ckpt")
+    on.exit(unlink(path), add = TRUE)
+
+    fit_plain <- .ck_fit(sim, prior)
+    fit_ckpt  <- .ck_fit(sim, prior,
+                         control = list(checkpoint = list(path = path,
+                                                          resume = FALSE)))
+    .ck_expect_equiv(fit_plain, fit_ckpt)
+    expect_true(file.exists(path))
+    expect_gt(file.size(path), 16)  # header (magic + fingerprint) + >= 1 record
+})
+
+test_that("resume loads completed cells and re-solves nothing", {
+    sim <- .ck_sim_joint(seed = 12L)
+    prior <- c(list(type = "icar", sigma_grid = c(0.4, 0.6, 0.8, 1.0)),
+               sim$adj)
+    path <- tempfile(fileext = ".ckpt")
+    on.exit(unlink(path), add = TRUE)
+
+    fit1 <- .ck_fit(sim, prior,
+                    control = list(checkpoint = list(path = path,
+                                                     resume = FALSE)))
+    size_after_1 <- file.size(path)
+
+    # Resume: every cell coordinate is already on disk, so the driver loads all
+    # of them and appends nothing. Identical result, unchanged file size.
+    fit2 <- .ck_fit(sim, prior,
+                    control = list(checkpoint = list(path = path,
+                                                     resume = TRUE)))
+    .ck_expect_equiv(fit1, fit2)
+    expect_equal(file.size(path), size_after_1,
+                 info = "resume re-appended cells it should have loaded")
+})
+
+test_that("a torn tail (killed mid-write) is discarded and re-solved", {
+    sim <- .ck_sim_joint(seed = 13L)
+    prior <- c(list(type = "icar", sigma_grid = c(0.4, 0.6, 0.8, 1.0)),
+               sim$adj)
+    path <- tempfile(fileext = ".ckpt")
+    on.exit(unlink(path), add = TRUE)
+
+    fit_full <- .ck_fit(sim, prior,
+                        control = list(checkpoint = list(path = path,
+                                                         resume = FALSE)))
+    full_bytes <- readBin(path, "raw", n = file.size(path))
+
+    # Simulate a process killed partway: keep the header plus part of the
+    # records, chopping the final record mid-payload. The loader must stop at
+    # the torn boundary (checksum / short read), keep the intact records, and
+    # the resume must re-solve the rest to the same answer.
+    keep <- as.integer(length(full_bytes) * 0.6)
+    torn <- full_bytes[seq_len(keep)]
+    writeBin(torn, path)
+
+    fit_resumed <- .ck_fit(sim, prior,
+                           control = list(checkpoint = list(path = path,
+                                                            resume = TRUE)))
+    .ck_expect_equiv(fit_full, fit_resumed)
+})
+
+test_that("resume onto a different dataset is rejected (fingerprint)", {
+    sim_a <- .ck_sim_joint(seed = 14L)
+    sim_b <- .ck_sim_joint(seed = 99L)  # different responses
+    prior <- c(list(type = "icar", sigma_grid = c(0.4, 0.6, 0.8)), sim_a$adj)
+    path <- tempfile(fileext = ".ckpt")
+    on.exit(unlink(path), add = TRUE)
+
+    .ck_fit(sim_a, prior,
+            control = list(checkpoint = list(path = path, resume = FALSE)))
+    expect_error(
+        .ck_fit(sim_b, prior,
+                control = list(checkpoint = list(path = path, resume = TRUE))),
+        "fingerprint"
+    )
+})
+
+# The latent structure is part of what a cell's result depends on, and the
+# joint kernel's fingerprint used to fold only the solver settings, the axis
+# layout, the coupling name and the per-arm data -- never blocks_spec, and never
+# the copy map. Same data, same grid, changed field: every per-cell key still
+# matched, the header fingerprint still matched, and the resume returned modes
+# and log-marginals solved under the model the user had since changed, with no
+# error and no warning. gcol33/tulpa#419.
+
+# A ring on the same n_s: same latent total, same axis count, same everything
+# the old fingerprint saw, different adjacency.
+.ck_ring_adj <- function(n_s) {
+    nbr <- lapply(seq_len(n_s), function(s) {
+        c(if (s == 1L) n_s else s - 1L, if (s == n_s) 1L else s + 1L)
+    })
+    n_neighbors <- vapply(nbr, length, integer(1))
+    list(adj_row_ptr = as.integer(c(0L, cumsum(n_neighbors))),
+         adj_col_idx = as.integer(unlist(nbr)) - 1L,
+         n_neighbors = as.integer(n_neighbors),
+         n_spatial_units = n_s)
+}
+
+test_that("resume onto a changed adjacency is rejected (fingerprint)", {
+    sim <- .ck_sim_joint(seed = 21L)
+    prior_chain <- c(list(type = "icar", sigma_grid = c(0.4, 0.6, 0.8)),
+                     sim$adj)
+    prior_ring  <- c(list(type = "icar", sigma_grid = c(0.4, 0.6, 0.8)),
+                     .ck_ring_adj(sim$adj$n_spatial_units))
+    path <- tempfile(fileext = ".ckpt")
+    on.exit(unlink(path), add = TRUE)
+
+    .ck_fit(sim, prior_chain,
+            control = list(checkpoint = list(path = path, resume = FALSE)))
+    expect_error(
+        .ck_fit(sim, prior_ring,
+                control = list(checkpoint = list(path = path, resume = TRUE))),
+        "fingerprint"
+    )
+    # The two fields really are different models, so a resume that was accepted
+    # would have returned the wrong answer rather than a harmless one.
+    fit_chain <- .ck_fit(sim, prior_chain)
+    fit_ring  <- .ck_fit(sim, prior_ring)
+    expect_gt(max(abs(as.numeric(fit_ring$log_marginal) -
+                      as.numeric(fit_chain$log_marginal))), 1e-6)
+})
+
+test_that("resume onto a promoted copy block is rejected (fingerprint)", {
+    # Promoting an arm to a copy block rescales that arm's field contribution
+    # through arm_scale, so every cell's result moves; the copy map was not in
+    # the fingerprint either.
+    sim <- .ck_sim_joint(seed = 22L)
+    prior <- c(list(type = "icar", sigma_grid = c(0.4, 0.6, 0.8)), sim$adj)
+    copy <- list(arm = "pos", alpha_grid = c(0.8, 1.0, 1.2))
+    path <- tempfile(fileext = ".ckpt")
+    on.exit(unlink(path), add = TRUE)
+
+    .ck_fit(sim, prior,
+            control = list(checkpoint = list(path = path, resume = FALSE)))
+    expect_error(
+        .ck_fit(sim, prior, copy = copy,
+                control = list(checkpoint = list(path = path, resume = TRUE))),
+        "fingerprint"
+    )
+})
+
+test_that("an unchanged latent structure still resumes", {
+    # The negative control for the two above: the added folds must not make
+    # every resume a mismatch.
+    sim <- .ck_sim_joint(seed = 23L)
+    prior <- c(list(type = "icar", sigma_grid = c(0.4, 0.6, 0.8)), sim$adj)
+    path <- tempfile(fileext = ".ckpt")
+    on.exit(unlink(path), add = TRUE)
+
+    fit_plain <- .ck_fit(sim, prior)
+    .ck_fit(sim, prior,
+            control = list(checkpoint = list(path = path, resume = FALSE)))
+    fit_resume <- .ck_fit(sim, prior,
+                          control = list(checkpoint = list(path = path,
+                                                           resume = TRUE)))
+    .ck_expect_equiv(fit_plain, fit_resume)
+})
+
+test_that("resume = FALSE starts over rather than resuming stale data", {
+    sim_a <- .ck_sim_joint(seed = 15L)
+    sim_b <- .ck_sim_joint(seed = 77L)
+    prior <- c(list(type = "icar", sigma_grid = c(0.4, 0.6, 0.8)), sim_a$adj)
+    path <- tempfile(fileext = ".ckpt")
+    on.exit(unlink(path), add = TRUE)
+
+    .ck_fit(sim_a, prior,
+            control = list(checkpoint = list(path = path, resume = FALSE)))
+    # A fresh (resume = FALSE) run on different data removes the old file first,
+    # so no fingerprint error and the result matches a plain fit of sim_b.
+    fit_b_plain <- .ck_fit(sim_b, prior)
+    fit_b_fresh <- .ck_fit(sim_b, prior,
+                           control = list(checkpoint = list(path = path,
+                                                            resume = FALSE)))
+    .ck_expect_equiv(fit_b_plain, fit_b_fresh)
+})
+
+test_that("checkpoint is equivalent on the parallel outer-grid path", {
+    sim <- .ck_sim_joint(seed = 16L)
+    prior <- c(list(type = "icar", sigma_grid = c(0.4, 0.6, 0.8, 1.0, 1.2)),
+               sim$adj)
+    path <- tempfile(fileext = ".ckpt")
+    on.exit(unlink(path), add = TRUE)
+
+    fit_plain <- .ck_fit(sim, prior, control = list(n_threads_outer = 2L))
+    fit_ckpt  <- .ck_fit(sim, prior,
+                         control = list(n_threads_outer = 2L,
+                                        checkpoint = list(path = path,
+                                                          resume = FALSE)))
+    .ck_expect_equiv(fit_plain, fit_ckpt)
+
+    # Half the records survive a kill; the parallel resume re-solves the rest.
+    full_bytes <- readBin(path, "raw", n = file.size(path))
+    keep <- as.integer(length(full_bytes) * 0.5)
+    writeBin(full_bytes[seq_len(keep)], path)
+    fit_resumed <- .ck_fit(sim, prior,
+                           control = list(n_threads_outer = 2L,
+                                          checkpoint = list(path = path,
+                                                            resume = TRUE)))
+    .ck_expect_equiv(fit_plain, fit_resumed)
+})
+
+test_that("checkpoint resume is equivalent on the sparse grid path", {
+    sim <- .ck_sim_joint(seed = 17L, alpha_true = 1.1)
+    prior <- c(list(type = "bym2",
+                    sigma_grid = c(0.5, 0.7),
+                    rho_grid   = c(0.5, 0.8)),
+               sim$adj)
+    copy_spec <- list(arm = "pos", alpha_grid = c(1.0, 1.2))
+    path <- tempfile(fileext = ".ckpt")
+    on.exit(unlink(path), add = TRUE)
+
+    fit_plain <- .ck_fit(sim, prior, copy = copy_spec,
+                         control = list(force_sparse = TRUE))
+    fit_full  <- .ck_fit(sim, prior, copy = copy_spec,
+                         control = list(force_sparse = TRUE,
+                                        checkpoint = list(path = path,
+                                                          resume = FALSE)))
+    .ck_expect_equiv(fit_plain, fit_full)
+
+    full_bytes <- readBin(path, "raw", n = file.size(path))
+    keep <- as.integer(length(full_bytes) * 0.55)
+    writeBin(full_bytes[seq_len(keep)], path)
+    fit_resumed <- .ck_fit(sim, prior, copy = copy_spec,
+                           control = list(force_sparse = TRUE,
+                                          checkpoint = list(path = path,
+                                                            resume = TRUE)))
+    .ck_expect_equiv(fit_plain, fit_resumed)
+})
+
+# gcol33/tulpa#161: the outer Pareto-k diagnostic re-solves the inner joint
+# marginal with its own cheaper knobs (capped max_iter, looser tol, factor-reuse
+# inner_refresh). Those knobs are part of the checkpoint fingerprint, so the
+# diagnostic's fingerprint legitimately differs from the main grid's. It must run
+# checkpoint-free rather than open the fit's checkpoint and abort with a
+# fingerprint mismatch AFTER the expensive main grid has already completed. The
+# main grid stays the sole owner of the checkpoint (byte-identical resume).
+
+test_that("diagnose_k fit with a checkpoint completes (single-block copy) [#161]", {
+    sim <- .ck_sim_joint(seed = 21L, alpha_true = 1.1)
+    prior <- c(list(type = "bym2", sigma_grid = c(0.4, 0.6, 0.8),
+                    rho_grid = c(0.4, 0.8)), sim$adj)
+    copy_spec <- list(arm = "pos", alpha_grid = c(0.9, 1.1, 1.3))
+    path <- tempfile(fileext = ".ckpt")
+    on.exit(unlink(path), add = TRUE)
+
+    # Pre-fix this aborts at the Pareto-k pass with "fingerprint mismatch" after
+    # the main grid; post-fix it completes with a finite result.
+    fit <- .ck_fit(sim, prior, copy = copy_spec,
+                   control = list(diagnose_k = TRUE,
+                                  checkpoint = list(path = path, resume = TRUE)))
+    expect_true(is.finite(fit$log_marginal[which.max(fit$weights)]))
+    expect_true(file.exists(path))
+
+    # The main grid still owns the checkpoint: a resume loads its completed cells
+    # and re-appends nothing (the diagnostic never wrote to the file), and the fit
+    # is equivalent to the first run.
+    sz <- file.size(path)
+    fit_re <- .ck_fit(sim, prior, copy = copy_spec,
+                      control = list(diagnose_k = TRUE,
+                                     checkpoint = list(path = path, resume = TRUE)))
+    expect_equal(file.size(path), sz,
+                 info = "resume re-appended cells (did the diagnostic pollute the ckpt?)")
+    .ck_expect_equiv(fit, fit_re)
+})
+
+test_that("diagnose_k fit with a checkpoint completes (multi-block copy) [#161]", {
+    sim <- .ck_sim_joint(seed = 22L, alpha_true = 1.0)
+    sp  <- list(sim$responses$occ$spatial_idx, sim$responses$pos$spatial_idx)
+    blk <- list(type = "bym2", spatial_idx = sp,
+                n_spatial_units = sim$adj$n_spatial_units,
+                adj_row_ptr = sim$adj$adj_row_ptr,
+                adj_col_idx = sim$adj$adj_col_idx,
+                n_neighbors = sim$adj$n_neighbors, scale_factor = 1.0,
+                sigma_grid = c(0.4, 0.6, 0.8), rho_grid = c(0.4, 0.8))
+    copy_spec <- list(arm = "pos", block = 1L, alpha_grid = c(0.8, 1.0, 1.2))
+    path <- tempfile(fileext = ".ckpt")
+    on.exit(unlink(path), add = TRUE)
+
+    ctrl <- list(max_iter = 50L, tol = 1e-8, n_threads = 1L, verbose = FALSE,
+                 diagnose_k = TRUE, integration = "grid",
+                 checkpoint = list(path = path, resume = TRUE))
+    fit <- tulpa_nested_laplace_joint(sim$responses, list(blk), copy = copy_spec,
+                                      control = ctrl)
+    expect_true(all(is.finite(fit$theta_mean)))
+    expect_true(file.exists(path))
+
+    sz <- file.size(path)
+    fit_re <- tulpa_nested_laplace_joint(sim$responses, list(blk), copy = copy_spec,
+                                         control = ctrl)
+    expect_equal(file.size(path), sz,
+                 info = "resume re-appended cells (did the diagnostic pollute the ckpt?)")
+    expect_equal(as.numeric(fit_re$log_marginal), as.numeric(fit$log_marginal),
+                 tolerance = 1e-9)
+    expect_equal(as.numeric(fit_re$theta_mean), as.numeric(fit$theta_mean),
+                 tolerance = 1e-9)
+})
+
+test_that("control$checkpoint validates its argument", {
+    sim <- .ck_sim_joint(seed = 18L)
+    prior <- c(list(type = "icar", sigma_grid = c(0.5, 0.7)), sim$adj)
+    expect_error(
+        .ck_fit(sim, prior, control = list(checkpoint = list(resume = TRUE))),
+        "path"
+    )
+    expect_error(
+        .ck_fit(sim, prior,
+                control = list(checkpoint = list(path = tempfile(),
+                                                 resume = "yes"))),
+        "resume"
+    )
+})

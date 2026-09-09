@@ -1,0 +1,186 @@
+// pc_prior.h
+// Penalized-complexity (PC) prior on a scale parameter. Single source of truth
+// shared by the GP, temporal, spatiotemporal, TVC and HSGP hyperparameter
+// priors, on every scale any of them samples.
+//
+// The PC prior (Simpson et al. 2017) places an exponential prior on the
+// standard deviation sigma with rate lambda = -log(alpha)/U, so that
+// P(sigma > U) = alpha:
+//
+//   log p(sigma) = log(lambda) - lambda * sigma
+//
+// Samplers parameterize the scale differently (sigma, variance sigma2, log
+// variance, precision tau = 1/sigma^2, log precision, log sigma). Each needs
+// the density on ITS scale, i.e. the base density plus the log-Jacobian of
+// sigma with respect to the sampled coordinate. Every scale is provided here
+// and its chain derived once, so no call site derives its own:
+//
+//   scale          sigma(x)          log|dsigma/dx|
+//   ------------------------------------------------------------------
+//   sigma          x                 0
+//   log_sigma      exp(x)            log_sigma
+//   sigma2         sqrt(x)           -log(2*sigma)
+//   log_sigma2     exp(x/2)          -log(2) + 0.5*log_sigma2
+//   tau            1/sqrt(x)         -log(2) - 1.5*log(tau)
+//   log_tau        exp(-x/2)         -log(2) - 0.5*log_tau
+//
+// Templated over T so the double, tape (ad::Var), forward (fwd::Dual) and arena
+// (arena::Var) paths all share one implementation -- a double-only helper is
+// what forced the AD sites to hand-roll copies in the first place.
+
+#ifndef TULPA_PC_PRIOR_H
+#define TULPA_PC_PRIOR_H
+
+#include <cmath>
+
+#include "autodiff_utils.h"
+
+namespace tulpa {
+
+// The calibration lambda = -log(alpha)/U is defined for U > 0 and alpha in
+// (0, 1) only. At alpha == 1 the rate is 0 and log(rate) is -Inf, so the prior
+// is -Inf at every sigma and takes the whole log-posterior with it; above 1 the
+// rate is negative, so log(rate) is NaN and -rate*sigma grows without bound;
+// at or below 0 the rate is +Inf. Each of those reaches a gradient as a number
+// rather than as a message, which is what this predicate exists to prevent.
+inline bool pc_anchors_valid(double U, double alpha) {
+  return U > 0.0 && alpha > 0.0 && alpha < 1.0;
+}
+
+// Exponential rate lambda calibrated so that P(sigma > U) = alpha.
+inline double pc_rate(double U, double alpha) {
+  return -std::log(alpha) / U;
+}
+
+// Base density, over sigma itself. Every other scale is this plus a Jacobian.
+//
+// Anchors are fixed for the whole fit, so the message a user can act on comes
+// from the entry point that reads them (check_pc_anchors in
+// sampler_model_data.h names the argument). This runs inside gradient loops and
+// inside OpenMP regions, where a throw is std::terminate rather than an R
+// error, so it falls back to a flat prior on sigma the way the SPDE hyperprior
+// at tulpa_priors_spde.h does. The callers keep their change-of-variables
+// terms, so what an unvalidated path gets is flat-on-sigma carried correctly to
+// its own coordinate, never a NaN.
+template <typename T>
+inline T log_prior_sigma_pc(const T& sigma, double U, double alpha) {
+  if (!pc_anchors_valid(U, alpha)) return T(0.0);
+  const double rate = pc_rate(U, alpha);
+  return T(std::log(rate)) - T(rate) * sigma;
+}
+
+// Over log(sigma).
+template <typename T>
+inline T log_prior_log_sigma_pc(const T& log_sigma, double U, double alpha) {
+  const T sigma = math::safe_exp(log_sigma);
+  return log_prior_sigma_pc(sigma, U, alpha) + log_sigma;
+}
+
+// Over the variance sigma2.
+template <typename T>
+inline T log_prior_sigma2_pc(const T& sigma2, double U, double alpha) {
+  const T sigma = math::safe_sqrt(sigma2);
+  return log_prior_sigma_pc(sigma, U, alpha) - math::safe_log(T(2.0) * sigma);
+}
+
+// Over log(sigma2).
+template <typename T>
+inline T log_prior_log_sigma2_pc(const T& log_sigma2, double U, double alpha) {
+  const T sigma = math::safe_exp(log_sigma2 * T(0.5));
+  return log_prior_sigma_pc(sigma, U, alpha)
+       - T(std::log(2.0)) + T(0.5) * log_sigma2;
+}
+
+// Over the precision tau = 1 / sigma^2.
+template <typename T>
+inline T log_prior_tau_pc(const T& tau, double U, double alpha) {
+  const T sigma = T(1.0) / math::safe_sqrt(tau);
+  return log_prior_sigma_pc(sigma, U, alpha)
+       - T(std::log(2.0)) - T(1.5) * math::safe_log(tau);
+}
+
+// Over log(tau).
+template <typename T>
+inline T log_prior_log_tau_pc(const T& log_tau, double U, double alpha) {
+  const T sigma = math::safe_exp(log_tau * T(-0.5));
+  return log_prior_sigma_pc(sigma, U, alpha)
+       - T(std::log(2.0)) - T(0.5) * log_tau;
+}
+
+// ---------------------------------------------------------------------------
+// PC prior on a Matern range, d = 2.
+//
+// Fuglstad et al. 2019 (JASA) "Constructing priors that penalize the
+// complexity of Gaussian random fields" places an exponential prior on
+// range^{-d/2}. For d = 2 that is
+//
+//   pi(range) = lambda * range^{-2} * exp(-lambda / range)
+//   lambda    = -log(alpha) * U,     so that P(range < U) = alpha
+//
+// Note the rate is -log(alpha) * U, NOT -log(alpha) / U: P(range < U) =
+// exp(-lambda / U) = alpha gives lambda = -U * log(alpha).
+//
+// Only the d = 2 form is provided, because that is the form verified against
+// the R nested path (pc_prior_log_density in fit_spde_nested.R). A 1D field
+// (a temporal GP lengthscale) needs the d = 1 density and a different rate
+// calibration; deriving it belongs with the paper open, not here.
+//
+// Both the SPDE field and the NNGP kernels this engine ships parameterize
+// distance as exp(-d / phi) (cov_exponential / cov_matern32 / cov_gaussian in
+// hmc_svc_autodiff.h), so the sampled phi is itself the range and this density
+// applies to it directly.
+
+// Exponential rate calibrated so that P(range < U) = alpha.
+inline double pc_range_rate(double U, double alpha) {
+  return -std::log(alpha) * U;
+}
+
+// Density on the range, evaluated from log(range). Carries no Jacobian: the
+// caller adds the one for its own sampled coordinate.
+template <typename T>
+inline T log_prior_range_pc_at_log(const T& log_range, double U, double alpha) {
+  const double lambda = pc_range_rate(U, alpha);
+  return T(std::log(lambda))
+       - T(2.0) * log_range
+       - T(lambda) * math::safe_exp(-log_range);
+}
+
+// Same density, from the range itself.
+template <typename T>
+inline T log_prior_range_pc(const T& range, double U, double alpha) {
+  return log_prior_range_pc_at_log(math::safe_log(range), U, alpha);
+}
+
+// ---------------------------------------------------------------------------
+// Half-Cauchy scale prior
+// ---------------------------------------------------------------------------
+// Not a PC prior, but it lives here because it needs the same thing the scale
+// table above exists to supply: the density taken to the coordinate it is
+// sampled on. The unnormalized half-Cauchy(0, s) on the SD sigma is
+//
+//   log p(sigma) = -log(1 + sigma^2 / s^2)
+//
+// and the samplers that use it sample log_sigma2, where sigma =
+// exp(log_sigma2 / 2) and so log|dsigma/dlog_sigma2| = -log(2) +
+// 0.5 * log_sigma2. Applying the sigma2-row Jacobian (a full log_sigma2)
+// instead leaves the tail flat in log_sigma2 -- the density stops decaying as
+// sigma2 grows, so the prior is improper and the marginal SD is bounded only
+// by the likelihood. Included, the density integrates to the half-Cauchy
+// normalizer s * pi / 2, whatever coordinate it is integrated in (asserted in
+// test-pc-prior.R over scale in c(0.5, 1.0, 2.5)).
+template <typename T>
+inline T log_prior_sigma_half_cauchy(const T& sigma, double scale) {
+  return -math::safe_log(T(1.0) + sigma * sigma / T(scale * scale));
+}
+
+// Same density, on the sampled log-variance coordinate.
+template <typename T>
+inline T log_prior_log_sigma2_half_cauchy(const T& log_sigma2, double scale) {
+  const T sigma = math::safe_exp(log_sigma2 * T(0.5));
+  return log_prior_sigma_half_cauchy(sigma, scale)
+       - T(std::log(2.0)) + T(0.5) * log_sigma2;
+}
+
+}  // namespace tulpa
+
+#endif  // TULPA_PC_PRIOR_H

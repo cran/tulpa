@@ -1,0 +1,1174 @@
+# The fixed-effect ridge the compiled Laplace kernels apply when no
+# `beta_prior` is supplied: beta ~ N(0, 100^2), i.e. precision 1e-4. Mirrors
+# DEFAULT_TAU_BETA in src/laplace_re_priors.h, which is where the penalty is
+# actually added to the objective; the two must agree or the reported curvature
+# describes a different posterior than the one the mode came from.
+.LAPLACE_DEFAULT_TAU_BETA <- 1e-4
+
+
+#' Fit a model via Laplace approximation
+#'
+#' @description
+#' General-purpose Laplace approximation for latent Gaussian models.
+#' Finds the mode of the latent field (beta + random effects) and
+#' returns the Laplace-approximated marginal likelihood.
+#'
+#' This is the public API for model packages (tulpaGlmm, tulpaObs, etc.)
+#' to call tulpa's Laplace engine. As the low-level engine entry point (not a
+#' front-door fitter), it keeps its numerical controls (`max_iter`, `tol`,
+#' `n_threads`, `return_hessian`) inline in the signature rather than in a
+#' `control` list, so callers assembling many solves pass them positionally.
+#'
+#' @param y Response vector (integer for binomial/poisson/negbin, numeric for gaussian)
+#' @param n_trials Trial sizes (integer vector, used for binomial only)
+#' @param X Fixed-effects design matrix
+#' @param re_list List of RE specifications. Each element is a list with:
+#'   - `idx`: integer vector of group indices (1-based)
+#'   - `n_groups`: number of groups
+#'   - `n_coefs`: coefficients per group (1 = intercept-only, >1 = random slopes)
+#'   - `sigma`: per-coefficient RE standard deviation(s), a diagonal covariance
+#'     (uncorrelated, lme4 `(x || g)`). A scalar is recycled to `n_coefs`.
+#'   - `Z`: slope design matrix (n_obs x n_coefs) when `n_coefs > 1`; `NULL`
+#'     means intercept-only.
+#'   - `L` / `cov`: optional `n_coefs x n_coefs` covariance for a *correlated*
+#'     term (lme4 `(1 + x | g)`) -- supply either a lower-triangular Cholesky
+#'     factor `L` (covariance = `L L'`) or the covariance matrix `cov`. When
+#'     present these take precedence over `sigma`; the off-diagonal enters both
+#'     the joint Hessian (mode finding) and the marginal fixed-effect SE.
+#' @param family Character: `"binomial"`, `"poisson"`, `"neg_binomial_2"`, `"gaussian"`
+#' @param phi Dispersion parameter. For `gaussian` / `lognormal` this is the
+#'   residual VARIANCE (matching the R-side family registry and [tulpa()]);
+#'   the SD-parameterized compiled kernels receive `sqrt(phi)` internally.
+#'   For `neg_binomial_2` the size, `beta` the precision, `t` the scale.
+#' @param phi2 Optional second dispersion: the Student-t degrees of freedom
+#'   (`family = "t"`; default 4 when `NULL`). Non-spatial path only.
+#' @param spatial Optional spatial specification (tulpa_spatial object)
+#' @param weights Optional observation weights (numeric vector, length `length(y)`).
+#'   Scales each observation's log-density, score and Fisher curvature by the
+#'   same `w_i`, on the spatial route as well as the non-spatial one, so the
+#'   mode and the marginal precision `H_beta` describe one weighted model.
+#'   `NULL` (default) uses 1.
+#' @param offset Optional observation-level offset on the linear predictor
+#'   (numeric vector, length `length(y)`). `NULL` (default) uses 0.
+#' @param max_iter Maximum Newton iterations (default 100)
+#' @param tol Convergence tolerance (default 1e-6)
+#' @param n_threads Number of threads (default 1)
+#' @param return_hessian Logical: return the fixed-effect Hessian block? (default TRUE)
+#' @param beta_prior Optional Gaussian prior on the fixed effects. `NULL`
+#'   (default) keeps the weak built-in prior `beta ~ N(0, 100^2)`. Otherwise a
+#'   list with element `sd` (prior standard deviation, required) and optional
+#'   `mean` (prior mean, default 0). Each may be a scalar (applied to every
+#'   coefficient) or a length-`ncol(X)` vector. Adds
+#'   `sum((beta - mean)^2 / (2 * sd^2))` to the negative log-posterior, so the
+#'   mode is the penalized (MAP) estimate. A coefficient's `sd` may be `+Inf`,
+#'   which sets its precision to 0 (no penalty on that coefficient). Not
+#'   supported on the spatial path.
+#'
+#' @param return_re_cov If `TRUE`, additionally return per-group marginal
+#'   posterior covariance blocks `Cov(u_g | y, Sigma)` -- one
+#'   `n_coefs x n_coefs` matrix per (RE term, group), with the fixed effects
+#'   and other groups marginalized out (each block is a diagonal block of the
+#'   full inverse Hessian, not the inverse of a diagonal block). Used by the EM
+#'   M-step for a full random-effect covariance. Non-spatial multi-RE path only.
+#'
+#' @param return_joint_hessian If `TRUE`, additionally return `H_joint`: the
+#'   full joint posterior precision of the latent field `[beta | random
+#'   effects]` at the mode, as a symmetric sparse matrix. This is the matrix the
+#'   Laplace approximation takes the determinant of, so it is what an exact
+#'   derivative of the log-marginal has to differentiate through; `H_beta` is
+#'   only its fixed-effect Schur complement. Costs one extra copy of the
+#'   Hessian, so it is off by default. Non-spatial multi-RE path only.
+#'
+#' @param X_zi Optional zero-inflation design matrix (`length(y)` rows). When
+#'   supplied the latent fixed-effect block becomes `[beta_count | beta_zi]` and
+#'   the family's compiled zero-inflated kernel is used. Non-spatial path only.
+#' @param compute_skew If `TRUE`, additionally return the inner-Laplace
+#'   reliability material at `skew_idx`: `inner_skew` (gamma_3, Rue Martino &
+#'   Chopin 2009's cubic term), and the importance curve `inner_is_z` /
+#'   `inner_is_log_joint` the inner Pareto-k-hat is fitted from. Costs one
+#'   linear solve plus a fixed batch of objective evaluations per probed index.
+#'   Non-spatial path only.
+#' @param skew_idx 1-based latent indices to probe (in the `[beta | random
+#'   effects]` layout of `mode`). `NULL` with `compute_skew = TRUE` probes every
+#'   latent index.
+#' @param debias Subspace debias: a list with `idx` (1-based
+#'   latent indices to correct by Metropolis along the Gaussian-conditional-mean
+#'   surface through the mode) and optional `n_iter` / `warmup` / `thin`. The
+#'   result then carries `debias_draws` (`n_kept x length(idx)`, the sampled
+#'   `x_S - mode_S`), `debias_sigma_ss` (the inner Laplace's own marginal
+#'   covariance of `x_S`), `debias_accept` and `debias_idx`. `NULL` (default) or
+#'   an empty `idx` leaves the solve bit-for-bit as it was and consumes no
+#'   random number. Non-spatial path only.
+#' @param zi_prior_sd Prior SD on the zero-inflation coefficients,
+#'   `beta_zi ~ N(0, zi_prior_sd^2)` (default 2.5, matching the samplers'
+#'   `ModelData::zi_prior_sd`). It is what keeps the logit identified when a
+#'   level contributes no zeros, where the likelihood alone drives `beta_zi` to
+#'   `-Inf`. `+Inf` removes the penalty. Ignored when `X_zi` is `NULL`.
+#'
+#' @return A list with:
+#'   - `mode`: full mode vector (beta, then RE values per term)
+#'   - `log_marginal`: Laplace-approximated log-marginal likelihood
+#'   - `n_iter`: number of Newton iterations
+#'   - `converged`: logical, whether the stopping rule was met
+#'   - `score_max`: largest absolute component of the joint penalized score at
+#'     the returned mode -- the residual the solve actually achieved, which is a
+#'     different question from `converged` and the one anything differentiating
+#'     through the mode depends on
+#'   - `log_det_Q`: log-determinant of the Hessian
+#'   - `H_beta`: fixed-effect block of the Hessian (if return_hessian = TRUE)
+#'   - `cov_blocks`: list of per-group posterior covariance matrices, one per
+#'     (RE term, group) in term-major then group order (if return_re_cov = TRUE)
+#'
+#' @examples
+#' set.seed(1)
+#' n <- 200L
+#' X <- cbind(1, rnorm(n))
+#' eta <- X %*% c(-0.3, 0.8)
+#' y <- rbinom(n, 1, plogis(eta))
+#' fit <- tulpa_laplace(y, rep(1L, n), X, family = "binomial")
+#' fit$mode          # posterior mode of the fixed effects
+#' @export
+tulpa_laplace <- function(y, n_trials, X,
+                          re_list = list(),
+                          family = "binomial",
+                          phi = 1.0,
+                          phi2 = NULL,
+                          spatial = NULL,
+                          weights = NULL,
+                          offset = NULL,
+                          max_iter = 100L, tol = 1e-6,
+                          n_threads = 1L,
+                          return_hessian = TRUE,
+                          beta_prior = NULL,
+                          return_re_cov = FALSE,
+                          X_zi = NULL,
+                          zi_prior_sd = 2.5,
+                          return_joint_hessian = FALSE,
+                          compute_skew = FALSE,
+                          skew_idx = NULL,
+                          debias = NULL) {
+
+  n_obs <- length(y)
+  n_fixed <- ncol(X)
+  family <- .canonical_family(family)
+
+  # tulpa_laplace's `phi` is the residual VARIANCE for gaussian / lognormal
+  # (the convention of the R-side registry, which builds H_beta below); the
+  # compiled kernels parameterize by the residual SD. Convert once here so the
+  # mode-finding and the Hessian describe the same model (the kernel expects the
+  # SD, not the variance).
+  phi_kernel <- .phi_to_kernel(family, phi)
+  if (!is.null(phi2)) {
+    .phi2_or_stop(family, phi2)
+    if (!is.null(spatial)) {
+      stop("`phi2` is not threaded through the spatial Laplace kernels; drop ",
+           "`phi2` or `spatial`.", call. = FALSE)
+    }
+  }
+
+  # Validate
+  stopifnot(is.numeric(y) || is.integer(y))
+  stopifnot(is.matrix(X))
+  stopifnot(nrow(X) == n_obs)
+  if (!is.null(X_zi) && !is.null(spatial)) {
+    stop("`ziformula` is not threaded through the spatial Laplace kernels; ",
+         "drop one of `ziformula` or `spatial`.", call. = FALSE)
+  }
+
+  # Normalize the optional fixed-effect prior to length-p mean / sd vectors.
+  bp <- .normalize_beta_prior(beta_prior, n_fixed)
+
+  .validate_family_phi(family, phi)
+  .validate_family_support(family, y, n_trials = n_trials,
+                           zi = !is.null(X_zi))
+
+  # The kernel borrows `weights` as a bare pointer and indexes it to N, so a
+  # short vector is an out-of-bounds read that returns a silently wrong mode
+  # rather than failing.
+  if (!is.null(weights)) {
+    if (!is.numeric(weights) || length(weights) != n_obs) {
+      stop(sprintf(paste0(
+        "`weights` must be a numeric vector of length %d (one per ",
+        "observation); got %s of length %d."),
+        n_obs, class(weights)[1], length(weights)), call. = FALSE)
+    }
+    if (anyNA(weights) || any(!is.finite(weights)) || any(weights < 0)) {
+      stop("`weights` must be finite and non-negative.", call. = FALSE)
+    }
+  }
+
+  if (is.null(n_trials)) n_trials <- rep(1L, n_obs)
+
+  # The inner-layer probe and the subspace debias both read the live Cholesky
+  # factor of the multi-RE spec solve, which the spatial kernels do not expose.
+  if (!is.null(spatial) && (isTRUE(compute_skew) || !is.null(debias))) {
+    stop("`compute_skew` / `debias` are only available on the non-spatial ",
+         "multi-RE Laplace path; the spatial kernels expose no probed ",
+         "conditional curve. Drop `spatial`.", call. = FALSE)
+  }
+  debias_req <- .subspace_debias_request(debias)
+
+  if (isTRUE(return_re_cov) && !is.null(spatial)) {
+    stop("`return_re_cov` is only available on the non-spatial multi-RE path. ",
+         "The spatial solvers do not expose per-group posterior covariance ",
+         "blocks; drop `spatial` or `return_re_cov`.", call. = FALSE)
+  }
+
+  # Route based on number of RE terms and spatial type
+  if (!is.null(spatial)) {
+    if (!is.null(bp)) {
+      stop("`beta_prior` is not supported on the spatial Laplace path. ",
+           "The spatial solvers use the built-in weak fixed-effect prior; ",
+           "drop `beta_prior`, or use NUTS for a custom fixed-effect prior ",
+           "under a spatial field.", call. = FALSE)
+    }
+    # Spatial path: use first RE term (single-block)
+    if (length(re_list) == 0) {
+      # No formula-side RE: genuine no-RE fit (n_re_groups = 0). The areal
+      # kernels (laplace_mode_spatial / _bym2 / _rsr) all guard their RE block
+      # with `if (n_re_groups > 0)` and size the latent vector as
+      # p + n_re_groups + n_spatial_units, so 0 means zero RE dims. Injecting a
+      # 1-group sigma = 1 random intercept here would add a spurious latent that
+      # confounds with the fixed intercept -- inert at the MAP only
+      # when the intercept is unpenalised, but it perturbs the joint Hessian /
+      # marginal likelihood and would bias the intercept under a beta_prior.
+      # Matches the SPDE (fit_spde.R) and GP (laplace_gp_at) no-RE convention.
+      re_idx <- rep(0L, n_obs); n_re_groups <- 0L; sigma_re <- 1.0
+    } else {
+      re_idx <- re_list[[1]]$idx
+      n_re_groups <- re_list[[1]]$n_groups
+      sigma_re <- re_list[[1]]$sigma
+    }
+    result <- dispatch_laplace_spatial(
+      y, n_trials, X, re_idx, n_re_groups, sigma_re,
+      spatial, family, phi_kernel, max_iter, tol, n_threads, offset = offset,
+      weights = weights
+    )
+  } else {
+    # All non-spatial paths: use cpp_laplace_fit_multi_re
+    # (handles single RE, multiple RE, slopes, weights, offset)
+    if (length(re_list) == 0) {
+      # No random effects: fit a pure fixed-effects model (n_terms = 0 in the
+      # kernel, so the latent vector is beta only). No dummy 1-group RE is
+      # injected: a global random intercept (sigma = 1) would confound
+      # with the fixed intercept once a `beta_prior` is active: the prior pulls
+      # the penalised beta toward its mean while the unpenalised RE absorbs the
+      # difference, biasing the fixed-effect MAP (the penalty's effective
+      # precision on the intercept collapses to 1). An empty RE set removes the
+      # spurious latent entirely so the MAP is the true penalised optimum.
+      re_idx_list <- list()
+      re_ngroups <- integer(0)
+      re_sigma_list <- list()
+    } else {
+      re_idx_list <- lapply(re_list, function(r) as.integer(r$idx))
+      re_ngroups <- vapply(re_list, function(r) as.integer(r$n_groups), integer(1))
+    }
+
+    re_ncoefs <- vapply(
+      if (length(re_list) > 0) re_list else list(list(n_coefs = 1L)),
+      function(r) as.integer(r$n_coefs %||% 1L), integer(1)
+    )
+
+    if (length(re_list) > 0) {
+      # `pack` is the value the C++ kernel consumes: a length-n_coefs marginal-SD
+      # vector (diagonal) or a packed lower-triangular Cholesky (correlated).
+      re_sigma_list <- lapply(re_list, function(r) .re_cov_spec(r)$pack)
+    }
+
+    # Per-term RE design: an intercept-only term carries no Z (the kernel
+    # defaults to a column of 1s); a slope term -- including a single random
+    # slope `(0 + x | g)` with n_coefs == 1 -- carries its own design Z.
+    re_Z_list <- lapply(
+      if (length(re_list) > 0) re_list else list(list(n_coefs = 1L)),
+      function(r) r$Z
+    )
+
+    # The kernel needs the Z / n_coefs metadata whenever any term has a
+    # non-intercept design: a correlated/uncorrelated slope (n_coefs > 1) or a
+    # single random slope that supplied its own Z.
+    has_design <- any(re_ncoefs > 1L) ||
+      any(vapply(re_Z_list, Negate(is.null), logical(1)))
+
+    # The joint curvature is what the marginal fixed-effect precision is built
+    # from below, so it is requested whenever a Hessian is wanted -- not only
+    # when the caller asked to see it. Attached to the result only if they did.
+    want_joint <- isTRUE(return_joint_hessian) || isTRUE(return_hessian)
+
+    result <- cpp_laplace_fit_multi_re(
+      y = as.numeric(y),
+      n = as.integer(n_trials),
+      X = X,
+      re_idx_list = re_idx_list,
+      re_ngroups = re_ngroups,
+      re_sigma_list = re_sigma_list,
+      family = family,
+      phi = phi_kernel,
+      max_iter = as.integer(max_iter),
+      tol = tol,
+      n_threads = as.integer(n_threads),
+      re_Z_list = if (has_design) re_Z_list else NULL,
+      re_ncoefs = if (has_design) re_ncoefs else NULL,
+      weights = weights,
+      offset = offset,
+      beta_prior_mean = if (is.null(bp)) NULL else bp$mean,
+      beta_prior_sd   = if (is.null(bp)) NULL else bp$sd,
+      return_re_cov   = isTRUE(return_re_cov),
+      phi2 = phi2 %||% NA_real_,
+      X_zi = X_zi,
+      zi_prior_sd = zi_prior_sd,
+      return_joint_hessian = want_joint,
+      compute_skew = isTRUE(compute_skew),
+      skew_idx = if (is.null(skew_idx)) NULL else as.integer(skew_idx),
+      debias = debias_req
+    )
+    if (want_joint) {
+      result$H_joint <- .laplace_joint_hessian(result)
+    }
+  }
+
+  # SPDE / NNGP Laplace return mode = c(beta, spatial_effects). The
+  # fixed-effect block of the joint Hessian is the *conditional* precision
+  # P(beta | u^*) and under-states uncertainty. For SPDE the marginal block
+  # is obtained by Schur complement on the joint Hessian:
+  #   H_beta^marg = X'WX - X'WA (A'WA + Q_spde)^{-1} A'WX
+  # The dense Z-Schur branch below handles every non-spatial-field path;
+  # the SPDE-specific marginal lives in .marginal_H_beta_spde() and is
+  # invoked at the bottom of this function. NNGP marginal SE is still
+  # outstanding.
+  is_spatial_field <- !is.null(spatial) &&
+    spatial$type %in% c("spde", "gp", "car_proper", "hsgp",
+                        "icar", "car", "bym2")
+
+  # Marginal fixed-effect precision: the Schur complement of the joint
+  # curvature over the random-effect block, corrected to the observed weight
+  # where the kernel's Newton weight is not it (.laplace_marginal_H_fixed).
+  # The joint Hessian already carries the fixed-effect prior and the
+  # random-effect penalty the mode was found under, so nothing is added back.
+  #
+  # This replaced a hand-assembled X'WX - X'WZ (Z'WZ + D^-1)^-1 Z'WX built from
+  # glmm_weights(). That form reaches ONE linear predictor, so a zero-inflation
+  # process fell outside it: it sliced the random effects out of the mode at
+  # ncol(X), which starts inside the ZI block. It also carried the R-side Fisher
+  # weight rather than the curvature the kernel found the mode under -- measured
+  # 1.8% apart on neg_binomial_2, where the joint Hessian matches a direct
+  # finite difference of the negative joint log posterior to 2.8e-7 and the
+  # hand-assembled version does not.
+  if (return_hessian && !is.null(result$mode) && !is_spatial_field) {
+    H_fixed <- .laplace_marginal_H_fixed(
+      H_joint = result$H_joint, mode = result$mode, y = y,
+      n_trials = n_trials, X = X, X_zi = X_zi, re_list = re_list,
+      family = family, phi = phi, phi2 = phi2,
+      weights = weights, offset = offset)
+    if (is.null(H_fixed)) {
+      warning("The marginal fixed-effect precision could not be formed from ",
+              "the joint curvature (a singular random-effect block is the ",
+              "usual cause). Returning H_beta = NULL.", call. = FALSE)
+    }
+    result$H_beta <- H_fixed
+  }
+
+  # The raw triplet is marshalling for .laplace_joint_hessian(); the assembled
+  # H_joint is what callers read, and only when they asked for it.
+  result[c("H_joint_p", "H_joint_i", "H_joint_x", "H_joint_n")] <- NULL
+  if (!isTRUE(return_joint_hessian)) result$H_joint <- NULL
+
+  # Marginal H_beta for spatial-field Laplace via Schur on the joint Hessian.
+  # See .marginal_H_beta_spde() / .marginal_H_beta_gp().
+  if (return_hessian && !is.null(result$mode) && !is.null(spatial)) {
+    if (identical(spatial$type, "spde")) {
+      range_val <- result$range %||% spatial$prior_range[1]
+      sigma_val <- result$sigma %||% spatial$prior_sigma[1]
+      result$H_beta <- tryCatch(
+        .marginal_H_beta_spde(
+          mode = result$mode, X = X, spatial = spatial,
+          family = family, phi = phi,
+          n_trials = n_trials, weights = weights, offset = offset,
+          range_val = range_val, sigma_val = sigma_val,
+          re_idx = re_idx, n_re_groups = n_re_groups, sigma_re = sigma_re
+        ),
+        error = function(e) {
+          warning("Marginal H_beta (SPDE Schur) failed: ", conditionMessage(e),
+                  ". Returning H_beta = NULL.", call. = FALSE)
+          NULL
+        }
+      )
+    } else if (identical(spatial$type, "gp")) {
+      sigma2_val <- result$sigma2_gp %||% spatial$sigma2_gp %||% 1.0
+      phi_gp_val <- result$phi_gp    %||% spatial$phi_gp    %||% 1.0
+      result$H_beta <- tryCatch(
+        .marginal_H_beta_gp(
+          mode = result$mode, X = X, spatial = spatial,
+          family = family, phi = phi,
+          n_trials = n_trials, weights = weights, offset = offset,
+          sigma2_gp = sigma2_val, phi_gp = phi_gp_val,
+          re_idx = re_idx, n_re_groups = n_re_groups, sigma_re = sigma_re
+        ),
+        error = function(e) {
+          warning("Marginal H_beta (NNGP Schur) failed: ", conditionMessage(e),
+                  ". Returning H_beta = NULL.", call. = FALSE)
+          NULL
+        }
+      )
+    } else if (identical(spatial$type, "car_proper")) {
+      result$H_beta <- tryCatch(
+        .marginal_H_beta_car_proper(
+          mode = result$mode, X = X, spatial = spatial,
+          family = family, phi = phi,
+          n_trials = n_trials, weights = weights, offset = offset,
+          tau = result$tau %||% 1.0, rho = result$rho %||% 0.5,
+          re_idx = re_idx, n_re_groups = n_re_groups, sigma_re = sigma_re
+        ),
+        error = function(e) {
+          warning("Marginal H_beta (CAR_proper Schur) failed: ",
+                  conditionMessage(e), ". Returning H_beta = NULL.", call. = FALSE)
+          NULL
+        }
+      )
+    } else if (spatial$type %in% c("icar", "car")) {
+      result$H_beta <- tryCatch(
+        .marginal_H_beta_icar(
+          mode = result$mode, X = X, spatial = spatial,
+          family = family, phi = phi,
+          n_trials = n_trials, weights = weights, offset = offset,
+          re_idx = re_idx, n_re_groups = n_re_groups, sigma_re = sigma_re
+        ),
+        error = function(e) {
+          warning("Marginal H_beta (ICAR/CAR Schur) failed: ",
+                  conditionMessage(e), ". Returning H_beta = NULL.", call. = FALSE)
+          NULL
+        }
+      )
+    } else if (identical(spatial$type, "bym2")) {
+      # The conditional BYM2 kernel hardcodes sigma = 1, rho = 0.5; the marginal
+      # Schur is built at those same fixed hyperparameters.
+      result$H_beta <- tryCatch(
+        .marginal_H_beta_bym2(
+          mode = result$mode, X = X, spatial = spatial,
+          family = family, phi = phi,
+          n_trials = n_trials, weights = weights, offset = offset,
+          sigma_spatial = 1.0, rho = 0.5,
+          re_idx = re_idx, n_re_groups = n_re_groups, sigma_re = sigma_re
+        ),
+        error = function(e) {
+          warning("Marginal H_beta (BYM2 Schur) failed: ",
+                  conditionMessage(e), ". Returning H_beta = NULL.", call. = FALSE)
+          NULL
+        }
+      )
+    } else if (identical(spatial$type, "hsgp")) {
+      result$H_beta <- tryCatch(
+        .marginal_H_beta_hsgp(
+          mode = result$mode, X = X, spatial = spatial,
+          family = family, phi = phi,
+          n_trials = n_trials, weights = weights, offset = offset,
+          phi_basis = result$phi_basis, lambda_eig = result$lambda_eig,
+          sigma2 = result$sigma2 %||% 1.0,
+          lengthscale = result$lengthscale %||% 1.0,
+          re_idx = re_idx, n_re_groups = n_re_groups, sigma_re = sigma_re
+        ),
+        error = function(e) {
+          warning("Marginal H_beta (HSGP Schur) failed: ", conditionMessage(e),
+                  ". Returning H_beta = NULL.", call. = FALSE)
+          NULL
+        }
+      )
+    }
+  }
+
+  # Zero inflation extends the fixed block rather than adding a separate one:
+  # the mode is [beta | beta_zi | RE] and H_beta is now (p + p_zi) square, so
+  # the prefix coef() / vcov() / confint() slice has to count both. The `zi_`
+  # name prefix comes from .zi_design(); a caller supplying X_zi directly gets
+  # positional names rather than a silently short vector.
+  p_zi <- if (is.null(X_zi)) 0L else ncol(X_zi)
+  zi_names <- if (p_zi == 0L) character(0) else
+    colnames(X_zi) %||% paste0("zi_", seq_len(p_zi))
+  .finalize_fit(result, backend = "laplace",
+                n_fixed = n_fixed + p_zi,
+                fixed_names = c(colnames(X), zi_names))
+}
+
+
+#' Resolve a supplied fixed-effect prior to its Gaussian `(mean, sd)` fields
+#'
+#' The one place that decides whether a `beta_prior` argument can be expressed
+#' as a Gaussian prior on the fixed effects at all. [.normalize_beta_prior()]
+#' (per-coefficient) and [.beta_prior_ridge_sd()] (scalar ridge) both resolve
+#' through it and differ only in the shape they recycle the fields to, so a
+#' prior one accepts is a prior the other accepts.
+#'
+#' A prior with no `sd` is an input the fitters cannot express: substituting the
+#' default for it would replace the user's modelling statement with a different
+#' one and leave no trace on the posterior.
+#'
+#' @param beta_prior A list (or `tulpa_prior` object) carrying `sd` and
+#'   optionally `mean`.
+#' @return `list(mean, sd)`, unrecycled.
+#' @keywords internal
+.beta_prior_fields <- function(beta_prior) {
+  if (!is.list(beta_prior)) {
+    stop("`beta_prior` must be NULL or a list with `sd` (and optional `mean`); ",
+         "got ", class(beta_prior)[1], ".", call. = FALSE)
+  }
+  if (is.null(beta_prior$sd)) {
+    if (inherits(beta_prior, "tulpa_prior")) {
+      stop("`beta_prior` is a ",
+           beta_prior$distribution %||% class(beta_prior)[1L],
+           " prior. The fixed-effect prior is Gaussian on every fitter: supply ",
+           "prior_normal(mean, sd) or list(mean = , sd = ).", call. = FALSE)
+    }
+    stop("`beta_prior` must supply `sd` (prior standard deviation on the ",
+         "fixed effects).", call. = FALSE)
+  }
+  list(mean = if (is.null(beta_prior$mean)) 0 else beta_prior$mean,
+       sd = beta_prior$sd)
+}
+
+
+#' Normalize an optional fixed-effect Gaussian prior
+#'
+#' Validates `beta_prior` and recycles scalar `mean` / `sd` to length `p`.
+#' Returns `NULL` (use the built-in weak prior) or `list(mean, sd)` with both
+#' vectors of length `p`. Shared by [tulpa_laplace()] and the EM driver so the
+#' validation rules live in one place.
+#'
+#' @param beta_prior `NULL`, or a list with `sd` (required) and optional `mean`.
+#' @param p Number of fixed effects (`ncol(X)`).
+#' @keywords internal
+.normalize_beta_prior <- function(beta_prior, p) {
+  if (is.null(beta_prior)) return(NULL)
+  fields <- .beta_prior_fields(beta_prior)
+
+  recycle <- function(v, nm) {
+    v <- as.numeric(v)
+    if (length(v) == 1L) return(rep(v, p))
+    if (length(v) == p)  return(v)
+    stop(sprintf("`beta_prior$%s` must have length 1 or %d (ncol(X)); got %d.",
+                 nm, p, length(v)), call. = FALSE)
+  }
+
+  sd   <- recycle(fields$sd, "sd")
+  mean <- recycle(fields$mean, "mean")
+
+  # `sd = +Inf` is allowed and means "no penalty on that coefficient"
+  # (precision 1 / sd^2 = 0). The C++ layer maps +Inf -> tau = 0.
+  if (any(is.na(sd)) || any(sd <= 0)) {
+    stop("`beta_prior$sd` must be positive (Inf allowed = no penalty).",
+         call. = FALSE)
+  }
+  if (any(!is.finite(mean))) {
+    stop("`beta_prior$mean` must be finite.", call. = FALSE)
+  }
+
+  list(mean = mean, sd = sd)
+}
+
+#' Normalize a zero-inflation prior to a scalar SD
+#'
+#' The compiled zero-inflated kernels carry one mean-zero Gaussian prior over
+#' the whole `beta_zi` block (`ModelData::zi_prior_sd` on the sampler paths,
+#' the appended `BetaPrior` tail on the Laplace path), so the prior is a single
+#' SD rather than the per-coefficient `list(mean, sd)` that `beta_prior` takes.
+#' The list form is kept so the two priors read alike at the front door and so a
+#' per-coefficient or non-zero-mean ZI prior can be added without a signature
+#' change.
+#'
+#' @param zi_prior `NULL`, or a list with a scalar `sd`.
+#' @return A scalar prior SD; the engine default when `zi_prior` is `NULL`.
+#' @keywords internal
+.normalize_zi_prior <- function(zi_prior) {
+  if (is.null(zi_prior)) return(.ZI_PRIOR_SD_DEFAULT)
+  if (!is.list(zi_prior)) {
+    stop("`zi_prior` must be NULL or a list with `sd`; got ",
+         class(zi_prior)[1], ".", call. = FALSE)
+  }
+  if (!is.null(zi_prior$mean)) {
+    stop("`zi_prior$mean` is not supported: the compiled zero-inflation ",
+         "kernels carry a mean-zero prior on `beta_zi` (a logit-scale mean of ",
+         "0 puts the prior median structural-zero probability at 0.5). Supply ",
+         "`sd` only.", call. = FALSE)
+  }
+  if (is.null(zi_prior$sd)) {
+    stop("`zi_prior` must supply `sd` (prior standard deviation on the ",
+         "zero-inflation coefficients).", call. = FALSE)
+  }
+  sd <- as.numeric(zi_prior$sd)
+  if (length(sd) != 1L) {
+    stop(sprintf(paste0(
+      "`zi_prior$sd` must be a scalar: the kernels apply one prior SD to the ",
+      "whole zero-inflation block; got length %d."), length(sd)), call. = FALSE)
+  }
+  # `sd = +Inf` means no penalty, matching `beta_prior$sd`.
+  if (is.na(sd) || sd <= 0) {
+    stop("`zi_prior$sd` must be positive (Inf allowed = no penalty).",
+         call. = FALSE)
+  }
+  sd
+}
+
+
+#' Resolve a `beta_prior = list(mean, sd)` to a single ridge SD.
+#'
+#' For the fitters whose fixed-effect prior is a mean-zero Gaussian ridge with a
+#' scalar SD (EP, multinomial, ordinal): validates the unified `beta_prior`
+#' object, enforces a mean of 0, and returns the positive scalar SD. Keeps the
+#' shared prior interface (`beta_prior = list(mean, sd)`) while rejecting the
+#' options those fitters do not implement (a non-zero mean, a per-coefficient
+#' SD). Validation of the supplied object itself is [.beta_prior_fields()],
+#' shared with [.normalize_beta_prior()].
+#'
+#' @param beta_prior `list(mean, sd)`; `mean` must be 0, `sd` a positive scalar.
+#'   `NULL` takes the engine default.
+#' @param default_sd SD used when `beta_prior` is `NULL`. A supplied prior is
+#'   resolved through [.beta_prior_fields()] and never falls back to this.
+#' @keywords internal
+.beta_prior_ridge_sd <- function(beta_prior,
+                                 default_sd = .tulpa_prior_sd("ridge")) {
+  fields <- .beta_prior_fields(beta_prior %||% list(mean = 0, sd = default_sd))
+  m0 <- fields$mean
+  sd <- fields$sd
+  if (any(m0 != 0)) {
+    stop("this fitter supports only a mean-zero fixed-effect prior ",
+         "(`beta_prior$mean` must be 0); use a sampler (mode = 'mala') for a ",
+         "shifted prior.", call. = FALSE)
+  }
+  if (!is.numeric(sd) || length(sd) != 1L || !is.finite(sd) || sd <= 0) {
+    stop("`beta_prior$sd` must be a positive scalar.", call. = FALSE)
+  }
+  sd
+}
+
+
+#' Validate a GLM design bundle (`y`, `X`, `n_trials`) at a fitter's front door.
+#'
+#' Shared by the flagship drivers (`tulpa_nested_laplace()`, `tulpa_gibbs()`, the
+#' `re_cov` fitters) so `nrow(X) == length(y)` and `length(n_trials) ==
+#' length(y)` are enforced in one place -- otherwise a mismatched `n_trials`
+#' (`as.integer(NULL)` -> `integer(0)`) reaches the C++ kernel silently.
+#'
+#' @param y,X Response vector and design matrix.
+#' @param n_trials Binomial denominators, or `NULL` (defaults to 1 per row).
+#' @param where Caller name for the error message.
+#' @return List `list(N, n_trials)` with `n_trials` coerced to a length-`N`
+#'   integer vector.
+#' @keywords internal
+.validate_glm_design <- function(y, X, n_trials, where) {
+  N <- length(y)
+  if (N == 0L) stop(where, ": `y` is empty.", call. = FALSE)
+  if (!is.matrix(X)) {
+    stop(where, ": `X` must be a numeric matrix.", call. = FALSE)
+  }
+  if (nrow(X) != N) {
+    stop(sprintf("%s: nrow(X) (%d) must equal length(y) (%d).",
+                 where, nrow(X), N), call. = FALSE)
+  }
+  n_trials <- if (is.null(n_trials)) rep(1L, N) else as.integer(n_trials)
+  if (length(n_trials) != N) {
+    stop(sprintf("%s: length(n_trials) (%d) must equal length(y) (%d).",
+                 where, length(n_trials), N), call. = FALSE)
+  }
+  if (anyNA(n_trials)) {
+    stop(where, ": `n_trials` must be non-NA integers.", call. = FALSE)
+  }
+  list(N = N, n_trials = n_trials)
+}
+
+
+#' Validate a 0-based/1-based random-effect index against its group count.
+#'
+#' `re_idx` addresses one grouping factor: `0` marks "no random effect" and
+#' `1..n_re_groups` a group. An out-of-range id would index out of bounds in the
+#' C++ kernel, so bound it in R.
+#'
+#' @param re_idx Per-observation group index (length `N`).
+#' @param n_re_groups Number of groups.
+#' @param N Expected length.
+#' @param where Caller name for the error message.
+#' @return `re_idx` coerced to an integer vector.
+#' @keywords internal
+.validate_re_idx <- function(re_idx, n_re_groups, N, where) {
+  if (length(re_idx) != N) {
+    stop(sprintf("%s: length(re_idx) (%d) must equal length(y) (%d).",
+                 where, length(re_idx), N), call. = FALSE)
+  }
+  ri <- as.integer(re_idx)
+  if (anyNA(ri)) {
+    stop(where, ": `re_idx` must be non-NA integers.", call. = FALSE)
+  }
+  if (min(ri) < 0L || max(ri) > n_re_groups) {
+    stop(sprintf(paste0("%s: `re_idx` values must be in [0, n_re_groups = %d] ",
+                        "(0 = no random effect); got range [%d, %d]."),
+                 where, n_re_groups, min(ri), max(ri)), call. = FALSE)
+  }
+  ri
+}
+
+
+#' Interpret an RE term's covariance specification
+#'
+#' Maps one `re_list` element to the two representations the Laplace path needs:
+#' `pack`, the value the C++ kernel consumes (a length-`n_coefs` marginal-SD
+#' vector for a diagonal / uncorrelated term, or a packed lower-triangular
+#' Cholesky of length `n_coefs (n_coefs + 1) / 2` for a correlated one), and
+#' `Q`, the `n_coefs x n_coefs` RE precision `Sigma^{-1}` used to build the
+#' marginal fixed-effect SE. A correlated term is signalled by `r$L` (a lower-
+#' triangular Cholesky factor, `Sigma = L L'`) or `r$cov` (the covariance
+#' matrix); when present these take precedence over `r$sigma`.
+#'
+#' @param r One element of a `re_list` (see [tulpa_laplace()]).
+#' @return `list(pack, Q, diagonal)`.
+#' @keywords internal
+.re_cov_spec <- function(r) {
+  nc <- r$n_coefs %||% 1L
+
+  if (nc > 1L && (!is.null(r$L) || !is.null(r$cov))) {
+    L <- if (!is.null(r$L)) as.matrix(r$L) else t(chol(as.matrix(r$cov)))
+    if (nrow(L) != nc || ncol(L) != nc) {
+      stop(sprintf("RE term `L`/`cov` must be %d x %d (n_coefs); got %d x %d.",
+                   nc, nc, nrow(L), ncol(L)), call. = FALSE)
+    }
+    # Column-major lower-triangular packing, unpacked by the C++ kernel as
+    # L[r, c] = pack[idx] over columns c = 1..nc, rows r = c..nc.
+    pack <- L[lower.tri(L, diag = TRUE)]
+    # Q = Sigma^{-1} = (L L')^{-1}. t(L) is the upper factor with
+    # (t(L))' t(L) = L L' = Sigma, so chol2inv(t(L)) = Sigma^{-1}.
+    Q <- chol2inv(t(L))
+    return(list(pack = pack, Q = Q, diagonal = FALSE))
+  }
+
+  # Diagonal (uncorrelated) covariance: per-coefficient marginal SD.
+  sig <- r$sigma
+  if (length(sig) == 1L && nc > 1L) sig <- rep(sig, nc)
+  list(pack = sig, Q = diag(1 / (sig^2 + 1e-10), nc), diagonal = TRUE)
+}
+
+
+#' Dispatch spatial Laplace to the correct C++ backend
+#'
+#' `weights` is the per-observation likelihood weight. It reaches the same
+#' `BuiltinFamilyResponse::weights` channel the non-spatial route uses, which
+#' scales each row's log-density, score and Fisher curvature by the same `w_i`,
+#' so the mode these kernels return and the marginal precision
+#' `.marginal_H_beta_*()` builds at it describe one model.
+#' @keywords internal
+dispatch_laplace_spatial <- function(y, n_trials, X, re_idx, n_re_groups,
+                                     sigma_re, spatial, family, phi,
+                                     max_iter, tol, n_threads, offset = NULL,
+                                     weights = NULL) {
+
+  spatial_type <- spatial$type
+  off_arg <- if (is.null(offset)) NULL else as.numeric(offset)
+  wt_arg  <- if (is.null(weights)) NULL else as.numeric(weights)
+
+  if (spatial_type %in% c("icar", "car")) {
+    adj <- spatial$adjacency
+    adj_sparse <- adjacency_to_csr_tulpa(adj)
+
+    cpp_laplace_fit_spatial(
+      y = as.numeric(y), n = as.integer(n_trials), X = X,
+      re_idx = as.numeric(re_idx), n_re_groups = as.integer(n_re_groups),
+      sigma_re = sigma_re,
+      spatial_idx = as.integer(spatial$spatial_idx %||% seq_len(nrow(adj))),
+      n_spatial_units = as.integer(nrow(adj)),
+      adj_row_ptr = as.integer(adj_sparse$row_ptr),
+      adj_col_idx = as.integer(adj_sparse$col_idx),
+      n_neighbors = as.integer(adj_sparse$n_neighbors),
+      tau_spatial = 1.0,
+      family = family, phi = phi,
+      max_iter = as.integer(max_iter), tol = tol,
+      n_threads = as.integer(n_threads),
+      offset_nullable = off_arg,
+      weights_nullable = wt_arg
+    )
+  } else if (spatial_type == "bym2") {
+    adj <- spatial$adjacency
+    adj_sparse <- adjacency_to_csr_tulpa(adj)
+
+    cpp_laplace_fit_bym2(
+      y = as.numeric(y), n = as.integer(n_trials), X = X,
+      re_idx = as.numeric(re_idx), n_re_groups = as.integer(n_re_groups),
+      sigma_re = sigma_re,
+      spatial_idx = as.integer(spatial$spatial_idx %||% seq_len(nrow(adj))),
+      n_spatial_units = as.integer(nrow(adj)),
+      adj_row_ptr = as.integer(adj_sparse$row_ptr),
+      adj_col_idx = as.integer(adj_sparse$col_idx),
+      n_neighbors = as.integer(adj_sparse$n_neighbors),
+      sigma_spatial = 1.0, rho = 0.5,
+      scale_factor = spatial$scale_factor %||% 1.0,
+      family = family, phi = phi,
+      max_iter = as.integer(max_iter), tol = tol,
+      n_threads = as.integer(n_threads),
+      offset_nullable = off_arg,
+      weights_nullable = wt_arg
+    )
+  } else if (spatial_type == "spde") {
+    # SPDE Laplace at fixed hyperparameters (uses spec's prior modes), with an
+    # optional iid RE block threaded into the [beta, re, w_mesh] latent layout.
+    # Nested integration over (range, sigma) is opt-in via fit_spde().
+    laplace_spde_at(
+      y = y, n_trials = n_trials, X = X, spatial = spatial,
+      family = family, phi = phi,
+      range = NULL, sigma = NULL,
+      re_idx = re_idx, n_re_groups = n_re_groups, sigma_re = sigma_re,
+      max_iter = max_iter, tol = tol, n_threads = n_threads,
+      offset = offset, weights = weights
+    )
+  } else if (spatial_type == "gp") {
+    # NNGP Laplace at fixed hyperparameters, with an optional iid RE block
+    # threaded into cpp_laplace_fit_gp's [beta, re, w_gp] latent layout.
+    laplace_gp_at(
+      y = y, n_trials = n_trials, X = X, spatial = spatial,
+      family = family, phi = phi,
+      sigma2_gp = NULL, phi_gp = NULL,
+      re_idx = re_idx, n_re_groups = n_re_groups, sigma_re = sigma_re,
+      max_iter = max_iter, tol = tol, n_threads = n_threads,
+      offset = offset, weights = weights
+    )
+  } else if (spatial_type == "car_proper") {
+    # Proper-CAR Laplace at a fixed (tau, rho), the conditional counterpart of
+    # the nested CAR_proper integrator (same make_car_proper_latent_blocks
+    # factory). tau / rho default from the spec; recorded on the result.
+    laplace_car_proper_at(
+      y = y, n_trials = n_trials, X = X, spatial = spatial,
+      family = family, phi = phi, tau = NULL, rho = NULL,
+      re_idx = re_idx, n_re_groups = n_re_groups, sigma_re = sigma_re,
+      max_iter = max_iter, tol = tol, n_threads = n_threads,
+      offset = offset, weights = weights
+    )
+  } else if (spatial_type == "hsgp") {
+    # HSGP Laplace at a fixed (sigma2, lengthscale), the conditional counterpart
+    # of the nested HSGP integrator (same make_hsgp_block basis). Defaults from
+    # the spec; recorded on the result.
+    laplace_hsgp_at(
+      y = y, n_trials = n_trials, X = X, spatial = spatial,
+      family = family, phi = phi, sigma2 = NULL, lengthscale = NULL,
+      re_idx = re_idx, n_re_groups = n_re_groups, sigma_re = sigma_re,
+      max_iter = max_iter, tol = tol, n_threads = n_threads,
+      offset = offset, weights = weights
+    )
+  } else {
+    stop(sprintf("Spatial type '%s' not yet supported in Laplace", spatial_type),
+         call. = FALSE)
+  }
+}
+
+
+#' SPDE Laplace at given hyperparameters
+#'
+#' Single-point Laplace approximation for an SPDE spatial field at a fixed
+#' (range, sigma). Used by both `dispatch_laplace_spatial` (single-point
+#' path) and `fit_spde` (single-point branch) so the call site stays a
+#' single source of truth.
+#'
+#' @param y Response vector.
+#' @param n_trials Trial sizes (binomial).
+#' @param X Fixed-effects design matrix.
+#' @param spatial A `tulpa_spatial` object of type `"spde"`.
+#' @param family Distribution family.
+#' @param phi Dispersion parameter (negbin / gamma only).
+#' @param range Spatial range (NULL -> use `spatial$prior_range[1]`).
+#' @param sigma Marginal SD (NULL -> use `spatial$prior_sigma[1]`).
+#' @param max_iter Newton iterations.
+#' @param tol Newton tolerance.
+#' @param n_threads OpenMP threads.
+#' @param weights Optional per-observation likelihood weights (length
+#'   `length(y)`), scaling each row's log-density, score and Fisher curvature.
+#' @return The raw `cpp_laplace_fit_spde` result list (mode, log_det_Q,
+#'   log_marginal, n_iter, converged), augmented with `range`, `sigma`,
+#'   and the spatial spec for downstream prediction.
+#' @keywords internal
+laplace_spde_at <- function(y, n_trials, X, spatial,
+                             family = "binomial", phi = 1.0,
+                             range = NULL, sigma = NULL,
+                             re_idx = NULL, n_re_groups = 0L, sigma_re = 1.0,
+                             max_iter = 100L, tol = 1e-6, n_threads = 1L,
+                             offset = NULL, weights = NULL) {
+  if (is.null(range)) range <- spatial$prior_range[1]
+  if (is.null(sigma)) sigma <- spatial$prior_sigma[1]
+
+  # Fractional nu: the operator-based rational SPDE (Bolin & Kirchner 2020) with
+  # BRASIL coefficients. Assembled in R (the validated oracle)
+  # and solved by the precomputed C++ fit; the integer branch below is the exact
+  # FEM construction. Both branches return the same [beta (p), re (n_re_groups),
+  # mesh (n_mesh)] mode layout, so the beta / spatial_effects split is shared.
+  if (.spde_nu_is_fractional(spatial$nu)) {
+    result <- .spde_laplace_fractional_at(
+      y = y, n_trials = n_trials, X = X, spatial = spatial,
+      family = family, phi = phi, range = range, sigma = sigma,
+      re_idx = re_idx, n_re_groups = n_re_groups, sigma_re = sigma_re,
+      max_iter = max_iter, tol = tol, n_threads = n_threads, offset = offset,
+      weights = weights,
+      order = spatial$rational_order %||% 2L
+    )
+  } else {
+    .kt <- .spde_kappa_tau(range, sigma, spatial$nu)
+    kappa <- .kt$kappa
+    tau_spde <- .kt$tau_spde
+    alpha <- as.integer(round(spatial$nu)) + 1L
+    rat <- rational_spde_coefficients(spatial$nu)
+
+    # iid RE block laid out between beta and the mesh field. No RE -> zero dims.
+    if (is.null(re_idx)) re_idx <- rep(0L, length(y))
+
+    result <- cpp_laplace_fit_spde(
+      y = as.numeric(y),
+      n_trials = as.integer(n_trials %||% rep(1L, length(y))),
+      X = as.matrix(X),
+      re_idx = as.numeric(re_idx),
+      n_re_groups = as.integer(n_re_groups),
+      sigma_re = sigma_re,
+      A_x = spatial$A_x, A_i = spatial$A_i, A_p = spatial$A_p,
+      n_obs = length(y), n_mesh = spatial$n_mesh,
+      C0_diag = spatial$C0_diag,
+      G1_x = spatial$G1_x, G1_i = spatial$G1_i, G1_p = spatial$G1_p,
+      kappa = kappa, tau_spde = tau_spde,
+      family = family, phi = phi, alpha = alpha,
+      max_iter = as.integer(max_iter), tol = tol,
+      n_threads = as.integer(n_threads),
+      rational_poles_nullable = if (!rat$is_integer) rat$poles else NULL,
+      rational_weights_nullable = if (!rat$is_integer) rat$weights else NULL,
+      offset_nullable = if (is.null(offset)) NULL else as.numeric(offset),
+      weights_nullable = if (is.null(weights)) NULL else as.numeric(weights)
+    )
+
+    result$range <- range
+    result$sigma <- sigma
+    result$spatial <- spatial
+  }
+
+  # Split the mode into fixed effects and the mesh field so every caller (the
+  # fit_spde single-point branch and the nested CCD refit) reads beta /
+  # spatial_effects directly instead of re-slicing the mode.
+  p <- ncol(X)
+  mesh_start <- p + as.integer(n_re_groups)
+  result$beta <- result$mode[seq_len(p)]
+  result$spatial_effects <-
+    result$mode[(mesh_start + 1L):(mesh_start + spatial$n_mesh)]
+  result
+}
+
+
+#' Map a spatial_gp covariance spec to the Laplace cov_type integer
+#'
+#' The Laplace NNGP kernel (`laplace_core.cpp`) supports three covariance
+#' functions: 0 = exponential, 1 = Matern(nu=1.5), 2 = Matern(nu=2.5).
+#' Anything else is rejected with a clear error rather than silently
+#' falling back to a different covariance.
+#'
+#' @keywords internal
+gp_cov_type_for_laplace <- function(spatial) {
+  cov <- spatial$cov %||% "exponential"
+  if (cov == "exponential") return(0L)
+  if (cov == "matern") {
+    nu <- spatial$nu %||% 1.5
+    if (isTRUE(all.equal(nu, 1.5))) return(1L)
+    if (isTRUE(all.equal(nu, 2.5))) return(2L)
+    stop("NNGP Laplace supports Matern with nu in {1.5, 2.5}; ",
+         "got nu = ", format(nu), ". Set nu = 1.5 or 2.5.",
+         call. = FALSE)
+  }
+  stop(sprintf(
+    "NNGP Laplace supports cov in {'exponential','matern'}; got '%s'. ",
+    cov),
+    "Use HMC for gaussian / spherical covariances.",
+    call. = FALSE)
+}
+
+#' NNGP Laplace at given hyperparameters
+#'
+#' Single-point Laplace approximation for a Matern/exponential GP spatial
+#' field at fixed (sigma2_gp, phi_gp). Used by `dispatch_laplace_spatial`
+#' when `spatial$type == "gp"`. The neighbor structure is read straight
+#' off the validated spec -- call `validate_gp(spatial, data)` first if
+#' constructing manually.
+#'
+#' @param y Response vector.
+#' @param n_trials Trial sizes (binomial).
+#' @param X Fixed-effects design matrix.
+#' @param spatial A `tulpa_gp` spec, validated (i.e., `neighbor_info` populated).
+#' @param family Distribution family.
+#' @param phi Dispersion parameter (negbin / gamma only).
+#' @param sigma2_gp Marginal variance (NULL -> 1.0).
+#' @param phi_gp Range / decay parameter (NULL -> 1.0).
+#' @param max_iter Newton iterations.
+#' @param tol Newton tolerance.
+#' @param n_threads OpenMP threads.
+#' @param weights Optional per-observation likelihood weights (length
+#'   `length(y)`), scaling each row's log-density, score and Fisher curvature.
+#' @return The raw `cpp_laplace_fit_gp` result list, augmented with
+#'   `sigma2_gp`, `phi_gp`, and the spatial spec.
+#' @keywords internal
+laplace_gp_at <- function(y, n_trials, X, spatial,
+                           family = "binomial", phi = 1.0,
+                           sigma2_gp = NULL, phi_gp = NULL,
+                           re_idx = NULL, n_re_groups = 0L, sigma_re = 1.0,
+                           max_iter = 100L, tol = 1e-6, n_threads = 1L,
+                           offset = NULL, weights = NULL) {
+  if (is.null(spatial$neighbor_info)) {
+    stop("spatial_gp() spec is unvalidated (neighbor_info is NULL). ",
+         "Call validate_gp(spatial, data) first, or fit through tulpa() ",
+         "which validates automatically.", call. = FALSE)
+  }
+  if (is.null(sigma2_gp)) sigma2_gp <- spatial$sigma2_gp %||% 1.0
+  if (is.null(phi_gp))    phi_gp    <- spatial$phi_gp    %||% 1.0
+
+  cov_type <- gp_cov_type_for_laplace(spatial)
+  ni <- spatial$neighbor_info
+  n_spatial <- spatial$n_spatial %||% nrow(spatial$unique_coords)
+  nn <- spatial$nn %||% ncol(ni$nn_idx)
+
+  # nn_order in cpp_laplace_fit_gp expects 0-based indexing, matching the
+  # convention in test-gpu-nngp.R. spatial_gp() stores order_idx as 1-based.
+  nn_order_0 <- as.integer((ni$nn_order %||% seq_len(n_spatial)) - 1L)
+
+  # iid RE block laid out between beta and the GP field (cpp_laplace_fit_gp's
+  # n_re_groups > 0 path). No RE -> zero dims, dummy re_idx.
+  if (is.null(re_idx)) re_idx <- rep(0L, length(y))
+
+  result <- cpp_laplace_fit_gp(
+    y = as.numeric(y),
+    n = as.integer(n_trials %||% rep(1L, length(y))),
+    X = as.matrix(X),
+    re_idx = as.numeric(re_idx),
+    n_re_groups = as.integer(n_re_groups),
+    sigma_re = sigma_re,
+    coords = as.matrix(spatial$unique_coords),
+    nn_idx = as.matrix(ni$nn_idx),
+    nn_dist = as.matrix(ni$nn_dist),
+    nn_order = nn_order_0,
+    n_spatial = as.integer(n_spatial),
+    nn = as.integer(nn),
+    sigma2_gp = sigma2_gp,
+    phi_gp = phi_gp,
+    cov_type = cov_type,
+    family = family,
+    phi = phi,
+    max_iter = as.integer(max_iter),
+    tol = tol,
+    n_threads = as.integer(n_threads),
+    offset_nullable = if (is.null(offset)) NULL else as.numeric(offset),
+    # Per-obs 1-based location index so repeated coordinates share one field
+    # node (n_spatial unique locations < N). NULL keeps the identity map.
+    obs_to_loc_nullable = if (is.null(spatial$obs_to_loc)) NULL else
+      as.integer(spatial$obs_to_loc),
+    weights_nullable = if (is.null(weights)) NULL else as.numeric(weights)
+  )
+
+  result$sigma2_gp <- sigma2_gp
+  result$phi_gp <- phi_gp
+  result$spatial <- spatial
+  result
+}
+
+
+#' Proper-CAR Laplace at given hyperparameters
+#'
+#' Single-point Laplace for a proper-CAR areal field at a fixed `(tau, rho)`,
+#' the conditional counterpart of the nested CAR_proper integrator. Reuses the
+#' shared `make_car_proper_latent_blocks` factory + dense spec solver via
+#' `cpp_laplace_fit_car_proper`, so the mode + log-marginal equal the nested
+#' kernel at that one grid cell. `tau` / `rho` default to the spec's fields (or
+#' `tau = 1`, `rho` = midpoint of the eigenvalue-derived `rho_bounds`) and are
+#' recorded on the result.
+#' @keywords internal
+laplace_car_proper_at <- function(y, n_trials, X, spatial,
+                                  family = "binomial", phi = 1.0,
+                                  tau = NULL, rho = NULL,
+                                  re_idx = NULL, n_re_groups = 0L, sigma_re = 1.0,
+                                  max_iter = 100L, tol = 1e-6, n_threads = 1L,
+                                  offset = NULL, weights = NULL) {
+  adj <- spatial$adjacency
+  if (is.null(adj)) stop("car_proper spec needs an `adjacency`.", call. = FALSE)
+  n_units <- nrow(as.matrix(adj))
+  csr <- adjacency_to_csr_tulpa(adj)
+  # Exact extraction: `spatial$rho` would partial-match `rho_bounds` (length 2).
+  if (is.null(tau)) tau <- spatial[["tau"]] %||% 1.0
+  if (is.null(rho)) rho <- spatial[["rho"]] %||% mean(spatial[["rho_bounds"]] %||% c(0, 1))
+  if (is.null(re_idx)) re_idx <- rep(0L, length(y))
+
+  result <- cpp_laplace_fit_car_proper(
+    y = as.numeric(y), n = as.integer(n_trials %||% rep(1L, length(y))),
+    X = as.matrix(X), re_idx = as.numeric(re_idx),
+    n_re_groups = as.integer(n_re_groups), sigma_re = sigma_re,
+    spatial_idx = as.integer(spatial$spatial_idx %||% seq_len(n_units)),
+    n_spatial_units = as.integer(n_units),
+    adj_row_ptr = as.integer(csr$row_ptr), adj_col_idx = as.integer(csr$col_idx),
+    n_neighbors = as.integer(csr$n_neighbors),
+    tau_spatial = as.numeric(tau), rho = as.numeric(rho),
+    family = family, phi = phi,
+    max_iter = as.integer(max_iter), tol = tol, n_threads = as.integer(n_threads),
+    offset_nullable = if (is.null(offset)) NULL else as.numeric(offset),
+    weights_nullable = if (is.null(weights)) NULL else as.numeric(weights)
+  )
+  result$tau <- tau
+  result$rho <- rho
+  result$spatial <- spatial
+  result
+}
+
+
+#' HSGP Laplace at given hyperparameters
+#'
+#' Single-point Laplace for a Hilbert-space GP field at a fixed
+#' `(sigma2, lengthscale)`, the conditional counterpart of the nested HSGP
+#' integrator. Reuses the shared `make_hsgp_block` factory + dense spec solver
+#' (DENSE_BASIS scatter) via `cpp_laplace_fit_hsgp`, so the mode equals the
+#' nested kernel at that one grid cell. `sigma2` / `lengthscale` default to the
+#' spec's fields (or `1`) and are recorded on the result.
+#' @keywords internal
+laplace_hsgp_at <- function(y, n_trials, X, spatial,
+                            family = "binomial", phi = 1.0,
+                            sigma2 = NULL, lengthscale = NULL,
+                            re_idx = NULL, n_re_groups = 0L, sigma_re = 1.0,
+                            max_iter = 100L, tol = 1e-6, n_threads = 1L,
+                            offset = NULL, weights = NULL) {
+  cm <- spatial$coords_matrix
+  if (is.null(cm)) {
+    stop("spatial_gp(approx='hsgp') spec is unvalidated (coords_matrix is NULL). Call ",
+         "validate_hsgp(spatial, data) first, or fit through tulpa() which ",
+         "validates automatically.", call. = FALSE)
+  }
+  # Exact extraction: `spatial$c` would partial-match `coords_matrix`.
+  basis <- cpp_hsgp_basis_2d(as.matrix(cm), as.integer(spatial[["m"]]),
+                             as.numeric(spatial[["c"]]))
+  if (is.null(sigma2))      sigma2      <- spatial[["sigma2"]]      %||% 1.0
+  if (is.null(lengthscale)) lengthscale <- spatial[["lengthscale"]] %||% 1.0
+  if (is.null(re_idx)) re_idx <- rep(0L, length(y))
+
+  result <- cpp_laplace_fit_hsgp(
+    y = as.numeric(y), n = as.integer(n_trials %||% rep(1L, length(y))),
+    X = as.matrix(X), re_idx = as.numeric(re_idx),
+    n_re_groups = as.integer(n_re_groups), sigma_re = sigma_re,
+    phi_basis = basis$phi_basis, lambda_eig = basis$lambda_eig,
+    sigma2 = as.numeric(sigma2), lengthscale = as.numeric(lengthscale),
+    family = family, phi = phi,
+    max_iter = as.integer(max_iter), tol = tol, n_threads = as.integer(n_threads),
+    offset_nullable = if (is.null(offset)) NULL else as.numeric(offset),
+    weights_nullable = if (is.null(weights)) NULL else as.numeric(weights)
+  )
+  result$sigma2      <- sigma2
+  result$lengthscale <- lengthscale
+  result$phi_basis   <- basis$phi_basis
+  result$lambda_eig  <- basis$lambda_eig
+  result$spatial     <- spatial
+  result
+}
+
+
+#' Convert adjacency matrix to CSR for tulpa C++
+#' @keywords internal
+adjacency_to_csr_tulpa <- function(adj) {
+  if (inherits(adj, "sparseMatrix")) adj <- as.matrix(adj)
+  n <- nrow(adj)
+  row_ptr <- integer(n + 1)
+  col_idx <- integer(0)
+  n_neighbors <- integer(n)
+  for (i in seq_len(n)) {
+    neighbors <- which(adj[i, ] != 0)
+    neighbors <- neighbors[neighbors != i]   # never list a node as its own neighbour
+    n_neighbors[i] <- length(neighbors)
+    col_idx <- c(col_idx, neighbors - 1L)
+    row_ptr[i + 1] <- row_ptr[i] + length(neighbors)
+  }
+  list(row_ptr = row_ptr, col_idx = col_idx, n_neighbors = n_neighbors)
+}
