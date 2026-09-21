@@ -88,13 +88,11 @@
              "Blocks with their own per-arm scaling (lf, hsgp_mo) or a ",
              "precomputed precision (tgmrf) do not take a copy.", call. = FALSE)
     }
-    if (!is.null(spec$alpha_grid)) {
-        alpha_axis <- as.numeric(spec$alpha_grid)
-    } else {
-        # Default: a small log-spaced alpha grid with 0 included so the
-        # "no copy" base model carries posterior mass when supported.
-        alpha_axis <- .nl_grid_axis("copy_alpha")
-    }
+    # `alpha_grid` states the nodes; `alpha_n` raises the resolution of the
+    # engine's own axis, which carries 0 (so the "no copy" base model keeps
+    # posterior mass) plus a log-spaced slab.
+    alpha_axis <- .nl_copy_alpha_axis(spec[["alpha_grid"]], spec[["alpha_n"]],
+                                      what = "`copy`")
     if (length(alpha_axis) == 0L) {
         stop("`copy$alpha_grid` must have at least one non-negative value.",
              call. = FALSE)
@@ -724,6 +722,27 @@
     cpp_grid
 }
 
+# Cross the active per-arm dispersion axes of `phi_axes` (the
+# `.normalise_phi_grid()` list) onto a latent outer grid as a Cartesian product:
+# every latent row repeated once per dispersion cell, latent rows varying
+# fastest, the dispersion columns appended as `phi_<arm>`. Returns the crossed
+# grid and `latent_row`, the latent row each crossed cell repeats. The cell
+# layout depends only on the latent row count and each axis's node count, so
+# two responses whose axes share node counts share it, whatever the nodes are.
+.joint_multi_cross_phi <- function(joint_grid, phi_axes, axis_names) {
+    active <- phi_axes[vapply(phi_axes, length, integer(1)) > 0L]
+    phi_extra <- do.call(expand.grid,
+                          c(active, list(KEEP.OUT.ATTRS = FALSE,
+                                          stringsAsFactors = FALSE)))
+    joint_idx <- expand.grid(joint = seq_len(nrow(joint_grid)),
+                               phi   = seq_len(nrow(phi_extra)),
+                               KEEP.OUT.ATTRS = FALSE)
+    grid <- cbind(joint_grid[joint_idx$joint, , drop = FALSE],
+                  as.matrix(phi_extra[joint_idx$phi, , drop = FALSE]))
+    colnames(grid) <- c(axis_names, paste0("phi_", names(active)))
+    list(grid = grid, latent_row = joint_idx$joint)
+}
+
 # Extract the per-arm dispersion override list from a `joint_grid` carrying
 # `phi_<arm>` columns. Returns NULL when no such column exists (the kernel
 # then uses each arm's parse-time scalar phi); otherwise a length-n_arms list
@@ -739,40 +758,340 @@
     out
 }
 
-# Add the regularizing (sigma, alpha) hyperprior to a per-cell log-marginal
-# vector for a multi-block `joint_grid`. With multiple copy blocks the prior
-# is baked on the first block carrying a (sigma, alpha) axis pair. Single
-# source of truth for the main dispatch and the Pareto-k re-evaluation.
-.joint_multi_add_hp <- function(log_marginal, joint_grid, axis_offsets, B,
-                                fn_sigma, fn_alpha, fn_phi = NULL) {
-    if (is.null(fn_sigma) && is.null(fn_alpha) && is.null(fn_phi))
-        return(log_marginal)
-    view_map <- integer(0)
-    for (b_idx in seq_len(B)) {
-        cols_b  <- (axis_offsets[b_idx] + 1L):axis_offsets[b_idx + 1L]
-        bare_b  <- sub("^b[0-9]+\\.", "", colnames(joint_grid)[cols_b])
-        i_sigma <- match("sigma", bare_b)
-        i_alpha <- match("alpha", bare_b)
-        if (!is.na(i_sigma) && is.na(view_map["sigma"])) {
-            view_map["sigma"] <- cols_b[i_sigma]
+# --- regularizing hyperpriors on a multi-block grid ------------------------
+#
+# `prior_sigma` and `prior_alpha` name a ROLE -- the donor field amplitude and
+# the copy coefficient -- and a multi-block grid can carry that role on several
+# blocks at once: an occurrence field copied onto two arms carries `b1.alpha`
+# and `b2.alpha`. Two shapes state which axes one density reaches.
+#
+#   * ONE spec, `list(<family>, <params>)`: the density applies to EVERY block
+#     axis of that role. That is the reading `prior_phi` already takes across
+#     the per-arm dispersion axes, and the one a single-block grid's single
+#     axis cannot distinguish. Each axis carries its own copy of the density
+#     and each axis's atom / continuum split is normalised against that axis's
+#     own cell widths -- `.hyper_atom_fold_scale()` reads one spec's own
+#     `log_prior` against its own continuum -- so N axes take N independent
+#     applications and no normalizer is shared between blocks.
+#   * A LIST of per-block entries, `list(list(block = , prior = ), ...)`, keyed
+#     by 1-based block index the way a multi-block `copy` spec keys its blocks.
+#     A block the list does not name carries no density on that axis.
+#
+# Parsing returns NULL (flat), one density function (the first shape), or a
+# `tulpa_block_hyperprior`: density functions named by block index.
+
+# One named element of a list, NULL where the list carries no such name.
+.joint_hp_field <- function(x, name) {
+    i <- match(name, names(x))
+    if (is.na(i)) NULL else x[[i]]
+}
+
+# Is `spec` the per-block shape? Every element of the scalar shape is a family
+# name or a parameter vector; every element of this one is a list naming a
+# block.
+.joint_is_block_hyperprior <- function(spec) {
+    if (!is.list(spec) || length(spec) == 0L) return(FALSE)
+    all(vapply(spec, function(e) is.list(e) && "block" %in% names(e),
+               logical(1)))
+}
+
+# Parse a `prior_sigma` / `prior_alpha` argument. `multi_block` says whether
+# the fit's `prior` is a list of blocks: the per-block shape names blocks of
+# such a list, so on the single-block path it is refused rather than read as a
+# malformed family spec.
+.joint_parse_hyperprior <- function(spec, axis_label, multi_block = FALSE) {
+    if (is.null(spec)) return(NULL)
+    if (!.joint_is_block_hyperprior(spec)) {
+        return(.joint_parse_sigma_prior(spec, axis_label))
+    }
+    if (!isTRUE(multi_block)) {
+        stop("`", axis_label, "` is a per-block list, which names blocks of a ",
+             "list-of-blocks `prior`; this fit takes the single-block joint ",
+             "path, where the axis is unique. Pass the spec itself, e.g. ",
+             "list(\"pc.prec\", c(U, alpha)).", call. = FALSE)
+    }
+    out <- list()
+    for (i in seq_along(spec)) {
+        e <- spec[[i]]
+        b <- .joint_hp_field(e, "block")
+        if (length(b) != 1L || !is.numeric(b) || !is.finite(b) ||
+            b != round(b) || b < 1) {
+            stop("`", axis_label, "[[", i, "]]$block` must be a single 1-based ",
+                 "block index into `prior`.", call. = FALSE)
         }
-        if (!is.na(i_alpha) && is.na(view_map["alpha"])) {
-            view_map["alpha"] <- cols_b[i_alpha]
+        key <- as.character(as.integer(b))
+        if (key %in% names(out)) {
+            stop("`", axis_label, "` names block ", key, " twice. Each block ",
+                 "takes at most one hyperprior on a given axis.", call. = FALSE)
+        }
+        p <- .joint_hp_field(e, "prior")
+        if (is.null(p)) {
+            stop("`", axis_label, "[[", i, "]]` names block ", key, " but ",
+                 "carries no `prior` field. Each entry is ",
+                 "list(block = <index>, prior = list(<family>, <params>)).",
+                 call. = FALSE)
+        }
+        out[[key]] <- .joint_parse_sigma_prior(
+            p, sprintf("%s[[%d]]$prior", axis_label, i))
+    }
+    structure(out, class = "tulpa_block_hyperprior")
+}
+
+# The density one hyperprior applies to block `b`: the stated density wherever
+# the caller stated one, that block's own entry where the caller keyed the
+# prior per block, NULL where neither reaches this block.
+.joint_hp_fn_for_block <- function(fn, b) {
+    if (is.null(fn)) return(NULL)
+    if (is.function(fn)) return(fn)
+    .joint_hp_field(fn, as.character(b))
+}
+
+# The block indices a per-block hyperprior names. A stated single density names
+# none -- it reaches every block carrying the axis -- so this is `integer(0)`
+# for it as well as for an absent prior.
+.joint_hp_named_blocks <- function(fn) {
+    if (is.null(fn) || is.function(fn)) return(integer(0))
+    as.integer(names(fn))
+}
+
+# The grid column carrying one axis role in each block that has it, named by
+# 1-based block index. A block with no axes at all (a latent-factor block
+# carries a 1 x 0 grid) contributes none: its column span is empty, which
+# `seq.int(length.out =)` reads as empty where a `from:to` range would run
+# backwards into the neighbouring block's columns.
+.joint_block_axis_cols <- function(axis_names, axis_offsets, B, role) {
+    out <- integer(0)
+    for (b_idx in seq_len(B)) {
+        n_b <- axis_offsets[b_idx + 1L] - axis_offsets[b_idx]
+        if (n_b <= 0L) next
+        cols_b <- seq.int(axis_offsets[b_idx] + 1L, length.out = n_b)
+        i <- match(role, sub("^b[0-9]+\\.", "", axis_names[cols_b]))
+        if (is.na(i)) next
+        out[as.character(b_idx)] <- cols_b[i]
+    }
+    out
+}
+
+# Which columns of a multi-block `joint_grid` each hyperprior applies to, and
+# with which density. One entry per applied (column, role): `col` indexes the
+# grid, `role` is `"sigma"` / `"alpha"` / `"phi"`, `block` is the 1-based block
+# index (NA for a per-arm phi axis) and `fn` the density folded onto it.
+# Single source of the mapping, so the fold below and the axis quadrature
+# (`.joint_multi_hp_specs()`) name the same columns and the same densities.
+.joint_multi_hp_cols <- function(joint_grid, axis_offsets, B,
+                                 fn_sigma, fn_alpha, fn_phi = NULL) {
+    cn  <- colnames(joint_grid)
+    out <- list()
+    fns <- list(sigma = fn_sigma, alpha = fn_alpha)
+    for (role in c("sigma", "alpha")) {
+        if (is.null(fns[[role]])) next
+        cols <- .joint_block_axis_cols(cn, axis_offsets, B, role)
+        for (k in seq_along(cols)) {
+            b_idx <- as.integer(names(cols)[k])
+            fn    <- .joint_hp_fn_for_block(fns[[role]], b_idx)
+            if (is.null(fn)) next
+            out[[length(out) + 1L]] <- list(col = as.integer(cols[[k]]),
+                                            role = role, block = b_idx, fn = fn)
         }
     }
     # phi_<arm> dispersion axes are not block-prefixed; carry them straight
     # through so a single `fn_phi` re-weights each on the joint grid.
-    phi_cols <- if (is.null(fn_phi)) character(0)
-                else grep("^phi_", colnames(joint_grid), value = TRUE)
-    if (length(view_map) == 0L && length(phi_cols) == 0L) return(log_marginal)
-    view <- joint_grid[, c(view_map, match(phi_cols, colnames(joint_grid))),
-                       drop = FALSE]
-    colnames(view) <- c(names(view_map), phi_cols)
-    hp <- .joint_hp_vec_for_grids(view, fn_sigma, fn_alpha, fn_phi)
-    if (!is.null(hp) && length(hp) == length(log_marginal)) {
-        log_marginal <- log_marginal + hp
+    if (!is.null(fn_phi)) {
+        for (j in grep("^phi_", cn)) {
+            out[[length(out) + 1L]] <- list(col = as.integer(j), role = "phi",
+                                            block = NA_integer_, fn = fn_phi)
+        }
     }
-    log_marginal
+    out
+}
+
+# Which axes each regularizing hyperprior reaches, and refusal of a per-block
+# entry naming a block that carries no axis of that role. Read off the axis
+# layout, so a mis-keyed prior is refused before the first inner solve rather
+# than applied to nothing. Returns NULL when no hyperprior is active, else one
+# record per role: the scope the caller stated it at, the blocks it reaches and
+# the grid columns those are.
+.joint_check_multi_hyperpriors <- function(axis_names, axis_offsets, B,
+                                           fn_sigma, fn_alpha) {
+    roles <- list(prior_sigma = "sigma", prior_alpha = "alpha")
+    fns   <- list(prior_sigma = fn_sigma, prior_alpha = fn_alpha)
+    out   <- list()
+    for (label in names(roles)) {
+        fn <- fns[[label]]
+        if (is.null(fn)) next
+        role    <- roles[[label]]
+        cols    <- .joint_block_axis_cols(axis_names, axis_offsets, B, role)
+        carried <- as.integer(names(cols))
+        unnamed <- setdiff(.joint_hp_named_blocks(fn), carried)
+        if (length(unnamed)) {
+            stop("`", label, "` names block",
+                 if (length(unnamed) > 1L) "s " else " ",
+                 paste(unnamed, collapse = ", "),
+                 ", which carr", if (length(unnamed) > 1L) "y" else "ies",
+                 " no `", role, "` axis. ",
+                 if (length(carried))
+                     paste0("The blocks carrying one are ",
+                            paste(carried, collapse = ", "),
+                            " (grid column",
+                            if (length(carried) > 1L) "s " else " ",
+                            paste(axis_names[cols], collapse = ", "), ").")
+                 else paste0("No block of this fit carries a `", role,
+                             "` axis."),
+                 call. = FALSE)
+        }
+        applied <- if (is.function(fn)) carried
+                   else intersect(carried, .joint_hp_named_blocks(fn))
+        out[[role]] <- list(
+            scope  = if (is.function(fn)) "every_block" else "per_block",
+            blocks = as.integer(applied),
+            axes   = as.character(axis_names[cols[as.character(applied)]]))
+    }
+    if (length(out) == 0L) NULL else out
+}
+
+# The axis specs a multi-block joint grid's cell measure is built from: the
+# specs read off `grid`'s columns with the folded axes marked, the copy scale's
+# declared atom mass, and the caller's hyperprior roles
+# (`.joint_multi_hp_specs()`), with each free-covariance block measured under
+# the design `logchol` declares (`.joint_multi_declared_axes()`). The one
+# construction behind the weights and the screen that ranks the cells before any
+# is solved.
+.joint_multi_measure_specs <- function(grid, folded_axes, joint_grid,
+                                       axis_offsets, B, fn_sigma, fn_alpha,
+                                       fn_phi, copy_slab, copy_atom_mass,
+                                       logchol) {
+    specs <- .joint_axis_specs_from_grid(grid, copy_slab = copy_slab,
+                                         folded_axes = folded_axes,
+                                         logchol = logchol)
+    specs <- lapply(specs, function(sp) {
+        if (!is.null(sp$atom_mass)) sp$atom_mass <- copy_atom_mass
+        sp
+    })
+    .joint_multi_hp_specs(specs, joint_grid, axis_offsets, B,
+                          fn_sigma, fn_alpha, fn_phi)
+}
+
+# The hyperprior family of each arm, keyed by arm name, as the default
+# hyperprior reads it.
+.joint_multi_hp_families <- function(arms, arm_names) {
+    stats::setNames(
+        vapply(arms, function(a) as.character(a$family %||% ""), character(1)),
+        arm_names)
+}
+
+# The outer integration of a multi-block joint result whose `log_marginal`
+# already carries the folded hyperprior: the hyperprior record over
+# `joint_grid`, the cell measure `log_quad` and the axis supports over
+# `res$theta_grid` from the specs that record marks, and the integration
+# weights, with `dnode` the design weights of a CCD design (NULL on a tensor
+# grid). Returns the result and the specs its measure was built from.
+.joint_multi_attach_integration <- function(res, joint_grid, axis_offsets, B,
+                                            prepared, hp_families,
+                                            fn_sigma, fn_alpha, fn_phi,
+                                            copy_slab, copy_atom_mass,
+                                            dnode = NULL,
+                                            hyperprior = "proper", hp_declared) {
+    hp <- .joint_multi_hyperprior(
+        joint_grid, fn_sigma, fn_alpha, fn_phi, blocks = prepared,
+        families = hp_families, copy_atom_mass = copy_atom_mass,
+        hyperprior = hyperprior, declared = hp_declared)
+    res$log_hyperprior          <- hp$lp
+    res$log_hyperprior_axes     <- hp$axes
+    res$log_hyperprior_declined <- hp$declined
+    specs <- .joint_multi_measure_specs(
+        res$theta_grid, hp$axes, joint_grid, axis_offsets, B,
+        fn_sigma, fn_alpha, fn_phi, copy_slab, copy_atom_mass,
+        logchol = hp_declared$logchol)
+    res$log_quad     <- .hyper_log_quad_weights(res$theta_grid, specs)
+    res$axis_support <- .hyper_grid_supports(res$theta_grid, specs)
+    res$weights      <- .joint_integration_weights(res$log_marginal, dnode,
+                                                   log_quad = res$log_quad)
+    list(res = res, specs = specs)
+}
+
+# Attach each hyperprior to the axis spec of the column it applies to, so the
+# axis quadrature knows what the fold below will apply to that axis. That is
+# what keeps the copy scale's declared point mass at its declared prior
+# probability (`.hyper_atom_fold_scale()`).
+.joint_multi_hp_specs <- function(specs, joint_grid, axis_offsets, B,
+                                  fn_sigma, fn_alpha, fn_phi = NULL) {
+    if (is.null(specs)) return(specs)
+    if (is.null(fn_sigma) && is.null(fn_alpha) && is.null(fn_phi)) return(specs)
+    entries <- .joint_multi_hp_cols(joint_grid, axis_offsets, B,
+                                    fn_sigma, fn_alpha, fn_phi)
+    if (length(entries) == 0L) return(specs)
+    named <- colnames(joint_grid)[vapply(entries, function(e) e[["col"]],
+                                         integer(1))]
+    lapply(specs, function(sp) {
+        j <- match(sp$name, named)
+        if (is.na(j)) return(sp)
+        # The joint driver's hyperprior families are densities on the axis's
+        # natural scale.
+        sp$log_prior <- entries[[j]][["fn"]]
+        sp$log_prior_coord <- "natural"
+        sp
+    })
+}
+
+# Add the regularizing (sigma, alpha) hyperprior to a per-cell log-marginal
+# vector for a multi-block `joint_grid`. Each applied axis is folded through
+# the SAME `.joint_hp_vec_for_grids()` the single-block path uses, one column
+# at a time, so the atom / continuum reading of a copy scale's zero is that
+# axis's own. The per-axis contributions are summed before the one addition to
+# `log_marginal`, so a grid carrying a single axis of each role reproduces the
+# whole-view call to the bit. Single source of truth for the main dispatch and
+# the Pareto-k re-evaluation.
+.joint_multi_add_hp <- function(log_marginal, joint_grid, axis_offsets, B,
+                                fn_sigma, fn_alpha, fn_phi = NULL,
+                                blocks = NULL, families = NULL,
+                                copy_atom_mass = .TULPA_COPY_ATOM_MASS,
+                                hyperprior = "proper", declared) {
+    log_marginal + .joint_multi_hyperprior(
+        joint_grid, fn_sigma, fn_alpha, fn_phi, blocks = blocks,
+        families = families, copy_atom_mass = copy_atom_mass,
+        hyperprior = hyperprior, declared = declared)$lp
+}
+
+# The hyperprior record over a multi-block `joint_grid` (`.joint_hyperprior()`):
+# the caller's densities on the roles they name, and with `blocks` supplied what
+# `hyperprior` gives every other axis of each block. `declared` is what the
+# fit's declared grid fixes (`.joint_multi_declared_axes()`).
+.joint_multi_hyperprior <- function(joint_grid, fn_sigma, fn_alpha, fn_phi = NULL,
+                                    blocks = NULL, families = NULL,
+                                    copy_atom_mass = .TULPA_COPY_ATOM_MASS,
+                                    hyperprior = "proper", declared) {
+    .joint_hyperprior(joint_grid, blocks %||% list(), families,
+                      user = list(sigma = fn_sigma, alpha = fn_alpha,
+                                  phi = fn_phi),
+                      copy_atom_mass = copy_atom_mass,
+                      hyperprior = if (is.null(blocks)) "flat" else hyperprior,
+                      declared = declared)
+}
+
+# What a multi-block joint grid declares (`.hp_declare()`): the columns it
+# integrates -- each block axis declared on more than one node, and each per-arm
+# dispersion axis carrying a grid, named as the joint grid names them -- and each
+# free-covariance block's design. Read off the declared per-block grids rather
+# than any evaluated grid, so the tensor, a CCD design and every batch the driver
+# evaluates share one answer.
+.joint_multi_declared_axes <- function(block_grids, axis_names,
+                                       phi_axes = NULL) {
+    offsets <- cumsum(c(0L, vapply(block_grids, ncol, integer(1))))
+    latent  <- character(0)
+    logchol <- list()
+    for (b in seq_along(block_grids)) {
+        if (!ncol(block_grids[[b]])) next
+        g <- block_grids[[b]]
+        colnames(g) <- as.character(axis_names)[(offsets[b] + 1L):offsets[b + 1L]]
+        d <- .hp_declare(g)
+        latent  <- c(latent, d$axes)
+        logchol <- c(logchol, d$logchol)
+    }
+    phi <- if (length(phi_axes)) {
+        active <- vapply(phi_axes, function(v) length(unique(v)) > 1L, logical(1))
+        paste0("phi_", names(phi_axes)[active])
+    }
+    list(axes = c(latent, phi), logchol = logchol)
 }
 
 # Multi-block joint outer Pareto-k-hat. Builds the re-evaluation closure
@@ -843,7 +1162,10 @@
              debias           = NULL,
              # Corrected integrated Laplace: the
              # kernel-facing request list, off by default for the same reason.
-             cila             = NULL) {
+             cila             = NULL,
+             # Per-cell log hyperprior + log cell measure a screened solve
+             # ranks with, in `theta_mat` row order.
+             screen_log_offset = NULL) {
         .cpp_joint_multi(
             arms_list           = arms,
             copy_arms           = as.integer(cp$copy_arms_zero),
@@ -875,7 +1197,8 @@
             fixed_block_constraints = fixed_block_constraints,
             debias              = debias,
             cila                = cila,
-            inner_sparse_override = as.integer(inner_sparse_override))
+            inner_sparse_override = as.integer(inner_sparse_override),
+            screen_log_offset   = screen_log_offset)
     }
 }
 
@@ -889,11 +1212,17 @@
                                          axis_offsets, B, arm_names,
                                          fn_sigma, fn_alpha, fn_phi = NULL,
                                          max_iter, tol,
-                                         diagnose_k = TRUE, diagnose_draws = 500L,
+                                         diagnose_k = TRUE,
+                                         diagnose_draws = .nl_diag("k_samples"),
                                          n_threads_outer = 1L, proposal = NULL,
                                          pareto_k_by_arm = FALSE,
-                                         k_bootstrap = 1000L, k_tail_points = NULL,
-                                         k_conf_bands = NULL) {
+                                         k_bootstrap = .nl_diag("k_bootstrap"),
+                                         k_tail_points = NULL,
+                                         k_conf_bands = NULL,
+                                         placement_axes = character(0),
+                                         hp_blocks = NULL, hp_families = NULL,
+                                         copy_atom_mass = .TULPA_COPY_ATOM_MASS,
+                                         hyperprior = "proper", hp_declared) {
     res$pareto_k        <- NA_real_
     res$pareto_k_is_ess <- NA_real_
     res$pareto_k_scope  <- "outer (hyperparameter) Gaussian proposal"
@@ -917,6 +1246,10 @@
     # knobs$tol / refresh), so its checkpoint fingerprint would differ from the
     # main grid's; run it checkpoint-free so it neither collides with nor
     # appends to the fit's checkpoint file.
+    # Importance draws are laid on each axis's unconstraining transform, the
+    # identity on a free-covariance block's columns, so they read the density in
+    # the column coordinates.
+    k_declared <- .hp_declare_on_columns(hp_declared)
     solve_fn <- function(theta_mat, x_init_per_cell = NULL) {
         r <- .joint_with_quiet_opts(call_kernel(
             theta_mat,
@@ -928,7 +1261,10 @@
             tol_             = max(knobs$tol, as.numeric(tol)),
             inner_refresh_   = knobs$refresh))
         .joint_multi_add_hp(r$log_marginal, theta_mat, axis_offsets, B,
-                            fn_sigma, fn_alpha, fn_phi)
+                            fn_sigma, fn_alpha, fn_phi,
+                            blocks = hp_blocks, families = hp_families,
+                            copy_atom_mass = copy_atom_mass,
+                            hyperprior = hyperprior, declared = k_declared)
     }
 
     if (!isTRUE(diagnose_k)) {
@@ -938,7 +1274,8 @@
         # (the CCD mode-Hessian, when the CCD grid path built one) is threaded
         # through here too -- it is available independent of `diagnose_k`.
         res <- .k_attach_declined(res, .k_decline("not_requested"))
-        return(.joint_attach_pareto_k_placement(res, solve_fn, proposal = proposal))
+        return(.joint_attach_pareto_k_placement(res, solve_fn, proposal = proposal,
+                                                extra_axes = placement_axes))
     }
 
     # Per-cell warm start (nearest grid mode, serial + parallel) when modes are
@@ -1042,10 +1379,10 @@
                                   hessian_pd_mode = 0L,
                                   step_curvature_mode = 0L,
                                   diagnose_k = TRUE,
-                                  diagnose_draws = 500L,
+                                  diagnose_draws = .nl_diag("k_samples"),
                                   pareto_k_by_arm = FALSE,
                                   pareto_k_threads = NULL,
-                                  k_bootstrap = 1000L,
+                                  k_bootstrap = .nl_diag("k_bootstrap"),
                                   k_tail_points = NULL,
                                   k_conf_bands = NULL,
                                   diagnose_skew = TRUE,
@@ -1061,6 +1398,10 @@
                                   adaptive_stride = 2L,
                                   adaptive_max_frac = 0.75,
                                   adaptive_min_cells = 48,
+                                  copy_atom_mass = .TULPA_COPY_ATOM_MASS,
+                                  copy_slab = "exponential",
+                                  placement_axes = character(0),
+                                  hyperprior = "proper",
                                   timer = NULL) {
     tm <- timer %||% .tulpa_timer()
     integration <- match.arg(integration, c("auto", "ccd", "grid",
@@ -1074,6 +1415,7 @@
     arm_names <- names(responses) %||% paste0("arm", seq_along(responses))
 
     cp <- .resolve_copy_multi(copy, responses, prior_list)
+    hp_families <- .joint_multi_hp_families(arms, arm_names)
 
     # Per-block axis grids (with copy-block parameterisation if applicable).
     B <- length(prior_list)
@@ -1096,6 +1438,23 @@
         paste0("b", b, ".", cn)
     }))
     d_axes <- as.integer(axis_offsets[B + 1L])
+
+    # Which axes the regularizing hyperpriors reach. Read off the axis layout,
+    # before the first inner solve, so a per-block entry naming a block that
+    # carries no such axis is refused rather than paid for.
+    hyperprior_axes <- .joint_check_multi_hyperpriors(
+        as.character(axis_names), axis_offsets, B, fn_sigma, fn_alpha)
+    if (isTRUE(verbose)) {
+        for (role in names(hyperprior_axes)) {
+            rec <- hyperprior_axes[[role]]
+            if (length(rec$axes) > 1L && identical(rec$scope, "every_block")) {
+                message("tulpa joint: prior_", role, " applies to ",
+                        paste(rec$axes, collapse = ", "),
+                        " (one spec, every block carrying the axis). ",
+                        "Key it per block to regularize them differently.")
+            }
+        }
+    }
 
     blocks_spec <- lapply(seq_along(prepared), function(b) {
         .joint_block_spec_for_cpp(prepared[[b]], n_arms, b, arms = arms)
@@ -1146,6 +1505,7 @@
     phi_axes <- .normalise_phi_grid(phi_grid, arm_names)
     has_phi  <- !is.null(phi_axes) &&
                 any(vapply(phi_axes, length, integer(1)) > 0L)
+    hp_declared  <- .joint_multi_declared_axes(block_grids, axis_names, phi_axes)
 
     # Node placement for the LATENT axes. CCD integrates on a
     # central composite design around the joint hyperparameter mode; it declines
@@ -1181,7 +1541,17 @@
     if (identical(integration, "ccd") && !ccd_requested) {
         integration_declined <- "axis_count"
     }
+    # What placing the design cost, in inner solves. Carried on the placement's
+    # own return so a decline reports what it had already paid, and NULL where
+    # no placement ran -- a fit that placed nothing reports no cost rather than
+    # a zero, which would read as a placement that was free.
+    ccd_cost <- NULL
     use_ccd <- ccd_requested
+    # Set only on the Cartesian-product branch below (CCD and the adaptive
+    # grid do not build a dense tensor, so the "reduce the grid" remedy the
+    # post-solve timing check reports does not apply to them).
+    n_cells <- NA_integer_
+    grid_warn_remedy <- NULL
     if (use_ccd) {
         axis_values <- latent_axis_values
 
@@ -1203,12 +1573,19 @@
             if (all(is.finite(m1))) ccd_warm <- m1
         }
 
+        # A CCD design is laid, and its mode found, in the grid's column
+        # coordinates, so the hyperprior it reads is the density in those.
+        ccd_declared <- .hp_declare_on_columns(hp_declared)
         eval_logpost <- function(theta_mat) {
             r <- .joint_with_quiet_opts(call_kernel(
                 theta_mat, x_init = ccd_warm,
                 n_threads_outer = n_threads_outer))
             lp <- .joint_multi_add_hp(r$log_marginal, theta_mat, axis_offsets, B,
-                                      fn_sigma, fn_alpha, fn_phi)
+                                      fn_sigma, fn_alpha, fn_phi,
+                                      blocks = prepared, families = hp_families,
+                                      copy_atom_mass = copy_atom_mass,
+                                      hyperprior = hyperprior,
+                                      declared = ccd_declared)
             # Carry the inner latent modes so the CCD mode-find can advance the
             # warm start per accepted point.
             if (is.matrix(r$modes)) attr(lp, "modes") <- r$modes
@@ -1223,9 +1600,15 @@
             if (length(mode) && all(is.finite(mode))) ccd_warm <<- mode
         }
 
+        # The same atom mass the axis specs below declare, so the mixture the
+        # design splits into is weighted by the prior the grid is integrated
+        # against.
         ccd <- .joint_ccd_grid(axis_names, axis_offsets, prepared, axis_values,
                                eval_logpost, verbose = verbose,
-                               set_warm = set_warm)
+                               set_warm = set_warm,
+                               atom_mass = copy_atom_mass)
+        ccd_cost <- ccd[c("modefind_evals", "modefind_budget",
+                          "modefind_rounds", "modefind_seconds")]
         if (is.null(ccd$grid)) {
             use_ccd <- FALSE
             integration_declined <- as.character(ccd$declined %||% "modefind_failed")
@@ -1233,14 +1616,27 @@
             joint_grid       <- ccd$grid
             dnode            <- ccd$dnode
             integration_used <- "ccd"
+            hp_declared      <- ccd_declared
             # The CCD axes are exactly the leading latent-block columns of
             # joint_grid (axis_names, in order); phi crosses as a separate
             # tensor on top. Carry the mode-Hessian Gaussian over those axes for
             # the outer Pareto-k.
-            ccd_proposal <- list(u_hat   = ccd$u_hat,
-                                 L_scale = ccd$L_scale,
-                                 tags    = ccd$tags,
-                                 cols    = seq_len(d_axes))
+            #
+            # A design that split at a copy atom has no such Gaussian to carry.
+            # Its components are built in log alpha, while the diagnostic
+            # unconstrains the SAME grid on the identity coordinate -- the only
+            # one that represents the alpha = 0 cells the split places. One
+            # Gaussian does not describe a mixture either way, so the diagnostic
+            # keeps its grid-weighted proposal, which the split's spread of
+            # components supports.
+            if (isTRUE(ccd$atom_split)) {
+                ccd_proposal <- NULL
+            } else {
+                ccd_proposal <- list(u_hat   = ccd$u_hat,
+                                     L_scale = ccd$L_scale,
+                                     tags    = ccd$tags,
+                                     cols    = seq_len(d_axes))
+            }
         }
     }
 
@@ -1296,7 +1692,10 @@
                 n_threads_outer = n_threads_outer))
             list(log_marginal = .joint_multi_add_hp(
                      r$log_marginal, theta_mat, axis_offsets, B,
-                     fn_sigma, fn_alpha, fn_phi),
+                     fn_sigma, fn_alpha, fn_phi,
+                     blocks = prepared, families = hp_families,
+                     copy_atom_mass = copy_atom_mass,
+                     hyperprior = hyperprior, declared = hp_declared),
                  modes = NULL)
         }
 
@@ -1326,17 +1725,11 @@
         # available. Once this fit has already declined one, advising the caller
         # to set the option they set is noise, so the advice
         # names the decline instead.
-        remedy <- if (is.na(integration_declined))
+        grid_warn_remedy <- if (is.na(integration_declined))
             "Reduce per-block grid sizes or set control$integration = \"ccd\"." else
             sprintf("Reduce per-block grid sizes; CCD integration declined (%s).",
                     integration_declined)
-        .nl_check_grid_cap(n_cells, .nl_max_grid_cells(), remedy)
-        if (n_cells > .NL_MULTI_GRID_WARN) {
-            warning(sprintf(
-                "Joint multi-block grid has %d cells (>%d). Each cell costs one inner Newton solve. %s",
-                n_cells, .NL_MULTI_GRID_WARN, remedy
-            ), call. = FALSE)
-        }
+        .nl_check_grid_cap(n_cells, .nl_max_grid_cells(), grid_warn_remedy)
 
         joint_grid <- do.call(cbind, lapply(seq_along(block_grids), function(b) {
             block_grids[[b]][idx[[b]], , drop = FALSE]
@@ -1357,23 +1750,14 @@
     # exactly as on the dense path. A phi axis tied to a latent-block axis is
     # not expressible here; fold it into the relevant block's own axis grid.
     if (has_phi && !use_adaptive) {
-        active <- phi_axes[vapply(phi_axes, length, integer(1)) > 0L]
-        phi_extra <- do.call(expand.grid,
-                              c(active, list(KEEP.OUT.ATTRS = FALSE,
-                                              stringsAsFactors = FALSE)))
-        joint_idx <- expand.grid(joint = seq_len(nrow(joint_grid)),
-                                   phi   = seq_len(nrow(phi_extra)),
-                                   KEEP.OUT.ATTRS = FALSE)
-        joint_grid <- cbind(joint_grid[joint_idx$joint, , drop = FALSE],
-                              as.matrix(phi_extra[joint_idx$phi, , drop = FALSE]))
-        phi_cols <- paste0("phi_", names(active))
-        colnames(joint_grid) <- c(axis_names, phi_cols)
+        crossed    <- .joint_multi_cross_phi(joint_grid, phi_axes, axis_names)
+        joint_grid <- crossed$grid
         # phi columns don't belong to any latent block; the C++ entry consumes
         # them via phi_grid_per_arm, not the block axes.
         phi_grid_per_arm_list <- .joint_multi_phi_per_arm(joint_grid, arm_names)
         # Replicate the CCD design weights across the crossed phi cells (NULL on
         # the dense path, where weights are the uniform-cell softmax).
-        if (!is.null(dnode)) dnode <- dnode[joint_idx$joint]
+        if (!is.null(dnode)) dnode <- dnode[crossed$latent_row]
     }
 
     # Announce the engaged outer integrator at selection time:
@@ -1413,6 +1797,21 @@
         }
     }
 
+    # The regularizing hyperprior, folded into log_marginal at the kernel-call
+    # boundary below, and the base tensor's cell measure: known from the grid
+    # alone, so a screened solve ranks its cells with both.
+    hp_base <- .joint_multi_hyperprior(
+        joint_grid, fn_sigma, fn_alpha, fn_phi, blocks = prepared,
+        families = hp_families, copy_atom_mass = copy_atom_mass,
+        hyperprior = hyperprior, declared = hp_declared)
+    screen_offset <- if (as.numeric(prune_tol) > 0)
+        .nl_screen_log_offset(joint_grid, list(hp_base),
+                              specs = .joint_multi_measure_specs(
+                                  joint_grid, hp_base$axes, joint_grid,
+                                  axis_offsets, B, fn_sigma, fn_alpha, fn_phi,
+                                  copy_slab, copy_atom_mass,
+                                  logchol = hp_declared$logchol))
+
     call_kernel_with_tol <- function(tol_prune) {
         call_kernel(
             joint_grid,
@@ -1423,10 +1822,12 @@
             n_threads_outer  = n_threads_outer,
             tile_ids         = tile_partition$tile_ids,
             tile_pilot_cells = tile_partition$tile_pilot_cells,
-            prune_tol        = tol_prune)
+            prune_tol        = tol_prune,
+            screen_log_offset = if (tol_prune > 0) screen_offset)
     }
     tm$mark("setup")
-    res <- call_kernel_with_tol(prune_tol)
+    grid_solve_start <- proc.time()[["elapsed"]]
+    res <- .joint_main_grid_solve(function() call_kernel_with_tol(prune_tol))
     # Safety gate: fall back to the full grid when the
     # cheap-pass ranking is unreliable rather than silently returning a
     # pruned answer.
@@ -1434,14 +1835,19 @@
         res <- .joint_prune_safety_gate(
             res, resolve_full = function() call_kernel_with_tol(0.0))
     }
+    if (!is.null(grid_warn_remedy)) {
+        .nl_multi_grid_warn(proc.time()[["elapsed"]] - grid_solve_start,
+                            n_cells, grid_warn_remedy)
+    }
     tm$mark("grid")
 
     # Bake the regularizing hyperprior on (sigma, alpha) into log_marginal
     #. Multi-block has no in-package refinement passes,
     # so one apply at the kernel-call boundary suffices.
-    res$log_marginal <- .joint_multi_add_hp(res$log_marginal, joint_grid,
-                                            axis_offsets, B, fn_sigma, fn_alpha,
-                                            fn_phi)
+    res <- .nl_fold_hyperprior(res, list(hp_base))
+    # The base tensor's absolute cell measure, read before local CCD refinement
+    # replaces cells by design-weighted clouds whose shares are relative to it.
+    base_grid <- joint_grid
 
     # Local CCD refinement: replace a few high-weight, mutually
     # non-adjacent tensor cells with small curvature-aware node clouds so a coarse
@@ -1470,6 +1876,7 @@
         lc_max_cells <- as.integer(lc$max_cells %||% 8L)
         lc_f0        <- as.numeric(lc$f0 %||% 1.1)
         lc_skew_max  <- as.numeric(lc$skew_max %||% .nl_diag("gamma3_ok"))
+        lc_rank      <- match.arg(lc$rank %||% "weight", .LCCD_RANKS)
         tags_lc <- .joint_ccd_axis_tags(axis_names, axis_offsets, prepared)
         if (!is.null(tags_lc)) {
             eval_nodes <- function(theta_mat, warm) {
@@ -1481,7 +1888,10 @@
                     n_threads_outer = n_threads_outer))
                 list(log_marginal = .joint_multi_add_hp(
                          r$log_marginal, theta_mat, axis_offsets, B,
-                         fn_sigma, fn_alpha, fn_phi),
+                         fn_sigma, fn_alpha, fn_phi,
+                     blocks = prepared, families = hp_families,
+                     copy_atom_mass = copy_atom_mass,
+                     hyperprior = hyperprior, declared = hp_declared),
                      modes = if (is.matrix(r$modes)) r$modes else NULL,
                      cov_blocks = r$cov_block_per_grid)
             }
@@ -1491,7 +1901,7 @@
                 dnode = dnode, latent_axes = axis_names,
                 tags = tags_lc, eval_nodes = eval_nodes,
                 max_cells = lc_max_cells, f0 = lc_f0, verbose = verbose,
-                skew_max = lc_skew_max)
+                skew_max = lc_skew_max, rank = lc_rank)
             if (!is.null(ref)) {
                 joint_grid       <- ref$joint_grid
                 res$log_marginal <- ref$log_marginal
@@ -1505,6 +1915,14 @@
                 # precision is not carried, which is why refinement engages only
                 # when store_Q is off -- the gate above.
                 res$cov_block_per_grid <- ref$cov_blocks
+                # The per-cell linear predictor is not carried either, and
+                # unlike the precision it is not gated: it still indexes the
+                # grid the fit had BEFORE this pass. Dropped rather than read
+                # against the new cells, so the grid-mixture predictive read
+                # falls back to the fit's coefficients instead of drawing from
+                # cells that are no longer the fit's (gcol33/tulpa#850).
+                res$fitted_eta     <- NULL
+                res$fitted_eta_var <- NULL
             }
         }
         tm$mark("grid")
@@ -1513,6 +1931,11 @@
     res$theta_grid   <- joint_grid
     res$theta_names  <- colnames(joint_grid)
     res$axis_offsets <- axis_offsets
+    # Which grid axes each regularizing hyperprior was folded onto, and whether
+    # the caller stated it once (every block carrying that axis) or per block.
+    # NULL where the fit carries none, so a flat fit reports nothing rather
+    # than an empty record.
+    res$hyperprior_axes <- hyperprior_axes
     res$integration  <- integration_used
     # What the caller asked for, and why it did not run. `integration` alone
     # names the integrator that RAN, so a fit reporting "grid" cannot say
@@ -1521,9 +1944,20 @@
     # the difference is one a consumer can act on.
     res$integration_requested <- integration
     res$integration_declined  <- integration_declined
-    # Integration weights fold in the CCD design weights (`dnode`); for the
-    # tensor grid `dnode` is NULL and this is the plain log-marginal softmax.
-    res$weights      <- .joint_integration_weights(res$log_marginal, dnode)
+    res$ccd_modefind_evals    <- ccd_cost$modefind_evals
+    res$ccd_modefind_budget   <- ccd_cost$modefind_budget
+    res$ccd_modefind_rounds   <- ccd_cost$modefind_rounds
+    res$ccd_modefind_seconds  <- ccd_cost$modefind_seconds
+    # Integration weights fold in the CCD design weights (`dnode`) and, on the
+    # tensor grid, the per-cell prior mass of the node each cell sits at. A CCD
+    # design carries its own volume in `dnode`, so `log_quad` applies to the
+    # tensor path alone.
+    integ <- .joint_multi_attach_integration(
+        res, joint_grid, axis_offsets, B, prepared, hp_families,
+        fn_sigma, fn_alpha, fn_phi, copy_slab, copy_atom_mass, dnode = dnode,
+        hyperprior = hyperprior, hp_declared = hp_declared)
+    res         <- integ$res
+    multi_specs <- integ$specs
     # The outer design weight each cell carries, kept beside the integration
     # weight it was folded into: absent on a tensor base (uniform cell weight),
     # the CCD design weights on a global CCD, the partition-of-unity shares of
@@ -1534,6 +1968,30 @@
     # recorded rather than reconstructed.
     res$dnode        <- dnode
     is_ccd <- identical(integration_used, "ccd")
+    # The evidence is read under the same measure the weights take: the cell
+    # masses on a tensor grid, the partition-of-unity design shares on a
+    # locally refined one. A global CCD's design weights reproduce moments and
+    # carry no volume, so no evidence is read off them.
+    if (is_ccd) {
+        res$log_evidence          <- NA_real_
+        res$log_evidence_declined <- "moment_rule_design"
+    } else if (is.null(dnode)) {
+        res <- .nl_attach_evidence(res, res$theta_grid, multi_specs)
+    } else {
+        # A refined cloud's design shares split the base cell it replaced, so
+        # each node's absolute measure is its share of that cell's. The base
+        # tensor is evenly spaced wherever refinement engages, so one cell's
+        # measure serves every node; an uneven base has no single value to share.
+        base_specs <- .joint_axis_specs_from_grid(
+            base_grid, copy_slab = copy_slab,
+            folded_axes = res$log_hyperprior_axes)
+        base_lq <- .hyper_log_quad_weights(base_grid, base_specs, absolute = TRUE)
+        even <- all(is.finite(base_lq)) && diff(range(base_lq)) < 1e-8
+        res <- .nl_attach_evidence(
+            res, res$theta_grid, multi_specs,
+            log_measure = if (even) log(pmax(dnode, 0)) + base_lq[1L]
+                          else rep(NA_real_, length(dnode)))
+    }
     # What kind of weight each cell carries. `integration` names the integrator
     # that ran, which describes a homogeneous support: a tensor cell holds the
     # mass of its own cell, a CCD node holds a design weight. A locally refined
@@ -1582,18 +2040,11 @@
         res, prepared, axis_offsets, joint_grid, cp,
         int_weights = if (is_design_weighted) res$weights else NULL,
         support = prov$read, within = within_cell)
-    if (!is_design_weighted) {
-        # Replace per-axis var-of-means SDs with Laplace-at-mode SDs at the
-        # modal cell. The 3-point grid-profile fit needs the
-        # regular per-axis lattice; on the scattered CCD design the weighted
-        # var-of-means over the design IS the calibrated SD (the corrected
-        # design weights reproduce the Gaussian moments), so it is kept as is.
-        res <- .nl_refit_axis_sd_laplace(res)
-    }
     res$arm_layout    <- .joint_multi_layout(arms, prepared)
     res$blocks        <- prepared
     res$prior         <- prior_list
     res$responses     <- responses
+    res               <- .joint_attach_observations(res, responses)
     res$copy          <- copy
     res$cell_coupling <- cell_coupling
     res$local_ccd_info <- local_ccd_info
@@ -1619,7 +2070,13 @@
                                         pareto_k_by_arm = pareto_k_by_arm,
                                         k_bootstrap = k_bootstrap,
                                         k_tail_points = k_tail_points,
-                                        k_conf_bands = k_conf_bands)
+                                        k_conf_bands = k_conf_bands,
+                                        placement_axes = placement_axes,
+                                        hp_blocks = prepared,
+                                        hp_families = hp_families,
+                                        copy_atom_mass = copy_atom_mass,
+                                        hyperprior = hyperprior,
+                                        hp_declared = hp_declared)
     res <- .nlj_multi_inner_skew_at_theta(res, call_kernel, arm_names,
                                           skew_idx, compute = diagnose_skew)
     fixed <- .joint_fixed_layout(responses)
@@ -1654,7 +2111,6 @@
                 r, prepared, axis_offsets, joint_grid, cp,
                 int_weights = if (is_design_weighted) r$weights else NULL,
                 support = prov$read, within = within_cell)
-            if (!is_design_weighted) r <- .nl_refit_axis_sd_laplace(r)
             r
         })
     res$timing <- tm$timing()
@@ -1719,6 +2175,7 @@
     # sub-block start. `phi_start` (back-compat) is field_starts[1].
     field_starts      <- integer(0)
     field_block_types <- character(0)
+    field_n_fields    <- integer(0)
     for (b in seq_len(B)) {
         block_start[b] <- cur
         type <- tolower(prepared[[b]]$type %||% "")
@@ -1737,6 +2194,7 @@
             block_size[b] <- 2L * n_units
             field_starts      <- c(field_starts, cur)
             field_block_types <- c(field_block_types, "bym2")
+            field_n_fields    <- c(field_n_fields, 1L)
             if (is.null(phi_start)) {
                 phi_start   <- cur
                 theta_start <- cur + n_units
@@ -1755,6 +2213,7 @@
             block_size[b]     <- as.integer(prepared[[b]]$n_fields) * n_units
             field_starts      <- c(field_starts, cur)
             field_block_types <- c(field_block_types, "mcar")
+            field_n_fields    <- c(field_n_fields, as.integer(prepared[[b]]$n_fields))
             if (is.null(phi_start)) phi_start <- cur
         } else if (type == "miid") {
             # Multivariate IID stores p coupled per-group coefficient fields
@@ -1767,6 +2226,7 @@
             if (type %in% c("icar", "car_proper")) {
                 field_starts      <- c(field_starts, cur)
                 field_block_types <- c(field_block_types, type)
+                field_n_fields    <- c(field_n_fields, 1L)
                 if (is.null(phi_start)) {
                     phi_start <- cur
                 }
@@ -1791,6 +2251,7 @@
     if (length(field_starts) > 0L) {
         out$field_starts      <- field_starts
         out$field_block_types <- field_block_types
+        out$field_n_fields    <- field_n_fields
     }
     out
 }
@@ -1857,16 +2318,16 @@
     # Supplied whatever the support: a moment rule needs the domain to form its
     # interval at all, and a density read needs it to place its outer cell edges
     # inside the quantity's own support.
-    domains <- .joint_axis_domains(list(theta_grid = joint_grid,
-                                        axis_offsets = axis_offsets,
-                                        blocks = prepared))
+    geo <- .joint_axis_geometry(list(theta_grid = joint_grid,
+                                     axis_offsets = axis_offsets,
+                                     blocks = prepared))
     qs <- .nl_axis_quantiles(joint_grid, res$log_marginal,
                               res$refining_axis, weights = int_weights,
-                              support = support, domains = domains,
-                              within = within)
+                              support = support, domains = geo$domain,
+                              within = within, atoms = geo$atom)
     res$theta_median <- qs$median
     res$theta_ci_lo  <- qs$ci_lo
     res$theta_ci_hi  <- qs$ci_hi
     res$within_cell_requested <- within
-    .nl_attach_interval_provenance(res, qs, joint_grid, domains)
+    .nl_attach_interval_provenance(res, qs, joint_grid, geo$domain, geo$atom)
 }

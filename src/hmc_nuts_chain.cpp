@@ -55,6 +55,13 @@ HMCResultCpp run_hmc_chain_cpp(
     int riemannian,
     const std::vector<double>& inv_metric_init
 ) {
+  // Every NUTS entry in the package reaches the sampler through this function,
+  // so the gradient gate lives here rather than in the callers. The scope is
+  // what confines a fallback to this fit; nested inside a caller's own scope it
+  // inherits the already-verified state and re-checks nothing.
+  GradientModeFitScope grad_mode_scope;
+  ensure_gradient_verified(q_init, data, layout);
+
 #include "hmc_nuts_chain_setup.h"
 
   // NUTS progress + ETA. A serial caller (single chain,
@@ -70,8 +77,8 @@ HMCResultCpp run_hmc_chain_cpp(
 #endif
   if (g_active_grid_progress == nullptr && !in_parallel) {
     own_progress = make_nuts_progress(n_iter, 1);
-    if (own_progress) g_active_grid_progress = own_progress.get();
   }
+  ActiveGridProgressScope progress_scope(own_progress.get());
 
   for (int iter = 0; iter < n_iter; iter++) {
 #include "hmc_nuts_chain_iter_window.h"
@@ -94,10 +101,7 @@ HMCResultCpp run_hmc_chain_cpp(
     }
   }
 
-  if (own_progress) {
-    g_active_grid_progress->finish();
-    g_active_grid_progress = nullptr;
-  }
+  if (own_progress) own_progress->finish();
 
   result.epsilon = da.final_epsilon();
 
@@ -152,23 +156,8 @@ HMCResult run_hmc_chain(
     int riemannian,
     const std::vector<double>& inv_metric_init
 ) {
-  // Any fallback below is scoped to this fit; the entry mode is restored on
-  // return so it does not leak into the next fit.
-  GradientModeFitScope grad_mode_scope;
-
-  // Runtime gradient check: compare active gradient function against numerical
-  if (g_gradient_mode != GradientMode::NUMERICAL) {
-    bool grad_ok = verify_gradient_runtime(q_init, data, layout, 1e-4);
-    if (!grad_ok) {
-      g_gradient_mode = GradientMode::NUMERICAL;
-      Rcpp::warning(
-        "Gradient mismatch detected: active gradient function disagrees with "
-        "numerical gradients (max rel diff > 1e-4). Falling back to numerical "
-        "gradients (mode='N'). This is slower but correct. Please report this "
-        "as a bug at https://github.com/gcol33/tulpa/issues"
-      );
-    }
-  }
+  // The gradient gate and the fit scope live in run_hmc_chain_cpp, which this
+  // wrapper and every other entry share.
 
   // Run C++ version - pass verbose through for debugging
   HMCResultCpp cpp_result = run_hmc_chain_cpp(

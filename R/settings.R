@@ -15,6 +15,18 @@
 # prior, and the only way to recognise it was to have ONE place that defines
 # it).
 #
+# The outer-k draw budget is the worked example of the drift outrunning the
+# fix (gcol33/tulpa#632). It was consolidated here as `k_samples = 200L` and
+# three of the four backends were swept onto the accessor, but the joint path
+# had renamed its own variable to `diagnose_draws` and raised the value to
+# `500L` (gcol33/tulpa#127), so it matched neither the name nor the number the
+# sweep and its lint were looking for and kept a second default for four
+# releases -- one that banded fits differently, since the budget fixes the PSIS
+# tail fraction. A source lint keyed to a LITERAL only catches the copies that
+# have not been renamed yet; `test-settings.R` therefore keys this family on
+# the concept and separately evaluates each entry point's default against the
+# table.
+#
 # THE RULE. A number that answers "what does the engine do when the user says
 # nothing?" lives here and nowhere else. Consumers of a default call the
 # accessor; they never restate the number. Everything here is a plain value or a
@@ -149,13 +161,15 @@
     joint_car_rho = list(nodes = c(0.5, 0.8, 0.95, 0.99)),
 
     # SPDE range / marginal SD on the registry (multi-block) path. Centred on
-    # the PC-prior mode and deliberately TIGHT (`mode / span` .. `mode * span`):
+    # the prior anchors and deliberately TIGHT (`mode / span` .. `mode * span`):
     # a wide rectangular Cartesian grid with no mode-find runs into a
     # small-range / large-sigma corner where a binary-occupancy field over-fits,
     # and that corner -- carrying the highest inner likelihood -- then dominates
     # the weighted field even though the PC prior disfavours it.
+    # `centre_range` places the range axis on a block that carries neither a
+    # range prior nor coordinates; its range axis then declines a density.
     spde_registry = list(data_dependent = TRUE, n = 5L, span = 1.4,
-                         prior_range = c(1, 0.5), prior_sigma = c(1, 0.5)),
+                         centre_range = 1),
 
     # SPDE range / sigma on the `fit_spde(method = "grid")` path, which scores
     # the PC prior explicitly at every cell and so can afford the wide window
@@ -167,11 +181,109 @@
     tgmrf_axis = list(data_dependent = TRUE, n = 5L, half_width = 2)
 )
 
+# --- default hyperpriors on the outer axes ------------------------------------
+#
+# The prior every outer axis carries when the caller states none. Each is a
+# proper, normalised density, so the posterior over the grid and the evidence
+# the grid reports do not depend on where the nodes were laid (gcol33/tulpa#730).
+# The densities are pc_prior.h's; `R/hyperprior_default.R` binds each axis to one.
+#
+#   * `scale_U`, `scale_alpha` -- the PC prior on a field's standard deviation,
+#     P(sigma > scale_U) = scale_alpha, carried to a variance or a precision
+#     axis by change of variables. One anchor for every SD-type axis, the
+#     recenter fallback and the random-effect covariance included. U = 3 is the
+#     anchor the recenter fallback carried: at U = 1 a logit-scale field of SD 3
+#     read a posterior mean of 1.46 and never triggered placement, against 2.62
+#     at U = 3 and 3.22 flat (the joint auto-grid copy fixture).
+#   * `range_alpha`, `range_extent_fraction` -- the PC prior on a Matern range
+#     (Fuglstad et al. 2019), P(range < rho0) = range_alpha, with rho0 the
+#     fraction below of the coordinate extent (the diagonal of the coordinates'
+#     bounding box), so the anchor carries the data's units. At alpha = 0.5 rho0
+#     is the prior median; 0.2 of the unit square's diagonal is 0.28, the
+#     geometric centre of the `gp_lengthscale` default axis below.
+#   * `lkj_eta` -- the LKJ shape on a free correlation matrix, the value
+#     `re_cov_pc_lkj_prior()` has always defaulted to.
+#   * `nb_size_lambda` -- the rate of the PC prior on a negative-binomial
+#     overdispersion a = 1 / size against the Poisson base model, in the form
+#     R-INLA ships as `pc.mgamma` (`inla.pc.dgamma()`, rinla/R/pc-gamma.R) and
+#     Simpson writes out for the Gamma(1/a, 1/a) mixing distribution ("Priors
+#     part 4", 2022). 7 is R-INLA's `nbinomial` default. No peer-reviewed source
+#     gives this prior: Simpson et al. (2017, Section 8) state that the usual
+#     parameterisation does not separate the overdispersion from the mean.
+#   * `gamma_shape_rate`, `beta_precision_rate` -- the rate of an exponential
+#     prior on a gamma likelihood's shape and on a beta likelihood's precision,
+#     R-INLA's shipped defaults for the same two parameters: `loggamma` with
+#     `param = c(1, 0.01)` on the gamma family's "precision parameter" (hyperid
+#     58001) and `c(1, 0.1)` on the beta family's (hyperid 61001), in
+#     rinla/R/models.R. Both are Gamma(1, rate) on the parameter itself, which
+#     R-INLA names `phi` with the parameterisation tulpa's kernels use (shape
+#     `phi`, rate `phi / mu`; `Beta(mu phi, (1 - mu) phi)`). Neither is a PC
+#     prior: R-INLA ships one for the mean-one Gamma(1/a, 1/a) (`pc.gamma`,
+#     rinla/R/pc-gamma.R) but uses it on no likelihood's shape, so no rate for
+#     it is sourced there.
+.NL_HYPERPRIOR <- list(
+    nb_size_lambda        = 7,
+    gamma_shape_rate      = 0.01,
+    beta_precision_rate   = 0.1,
+    scale_U               = 3,
+    scale_alpha           = 0.01,
+    range_alpha           = 0.5,
+    range_extent_fraction = 0.2,
+    lkj_eta               = 2
+)
+
+.nl_hyperprior <- function(par) {
+    if (!par %in% names(.NL_HYPERPRIOR)) {
+        stop("Unknown default hyperprior setting '", par, "'.", call. = FALSE)
+    }
+    .NL_HYPERPRIOR[[par]]
+}
+
+# The PC anchor pair as `c(U, alpha)`, the shape every `prior_sigma` argument
+# takes.
+.nl_scale_anchor <- function() {
+    c(.NL_HYPERPRIOR$scale_U, .NL_HYPERPRIOR$scale_alpha)
+}
+
 # Materialise a default axis. Geometric when `lo`/`hi` are present, explicit
 # nodes otherwise, with `prepend` nodes in front. Errors on a data-dependent
 # entry -- those need arguments the table cannot hold, so their callers read
 # the shape parameters with `.nl_grid_par()` and build the axis themselves.
-.nl_grid_axis <- function(key) {
+# `n` re-reads the declared axis at a different RESOLUTION: same `lo` / `hi`
+# and the same `prepend` atom, more nodes between them. It is the knob that
+# separates "integrate this more accurately" from "integrate something else"
+# (gcol33/tulpa#633), which matters wherever an axis carries prior structure a
+# caller must not displace -- `copy_alpha` is the atom at 0 plus the slab over
+# [0.1, 3], and replacing it with a raw numeric grid changes what is being
+# integrated rather than how well. `n` counts the SLAB nodes, so the returned
+# length is `n + length(prepend)`. An axis declared as explicit `nodes` has no
+# resolution to vary and refuses.
+#' Read a default nested-Laplace outer-grid axis
+#'
+#' Materialises one of tulpa's own default outer-grid axes -- the values a
+#' `*_grid` argument (e.g. `sigma_grid`, `range_grid`) takes when a caller
+#' does not supply one. Geometric axes are returned as `exp(seq(log(lo),
+#' log(hi), length.out = n))`; axes declared as explicit nodes are returned
+#' as-is. A default is a decision tulpa makes internally and can change
+#' between releases (gcol33/tulpa#633), so a caller that needs to know the
+#' current default -- rather than restate it -- should read it here instead
+#' of duplicating tulpa's own grid table.
+#'
+#' @param key Name of a default axis, e.g. `"field_sd"`, `"copy_alpha"`,
+#'   `"bym2_rho"`, `"gp_var"`, `"gp_lengthscale"`. Unknown keys error.
+#' @param n Optional resolution override: same `lo` / `hi` bounds (and the
+#'   same `prepend` atom, if any) at a different node count. `NULL` uses the
+#'   axis's own declared `n`. Errors for an axis declared as explicit nodes
+#'   (no resolution to vary) or for a data-dependent axis (its shape depends
+#'   on arguments the table does not hold).
+#' @return Numeric vector of grid nodes.
+#' @examples
+#' tulpa_grid_axis("field_sd")
+#' tulpa_grid_axis("copy_alpha", n = 9)
+#' @export
+tulpa_grid_axis <- function(key, n = NULL) .nl_grid_axis(key, n)
+
+.nl_grid_axis <- function(key, n = NULL) {
     spec <- .NL_GRID[[key]]
     if (is.null(spec)) {
         stop("Unknown default grid axis '", key, "'. Known: ",
@@ -182,10 +294,22 @@
              "with .nl_grid_par() and build the axis at the call site.",
              call. = FALSE)
     }
+    if (!is.null(n)) {
+        n <- suppressWarnings(as.integer(n))
+        if (length(n) != 1L || is.na(n) || n < 1L) {
+            stop("Grid axis resolution `n` must be a single integer >= 1.",
+                 call. = FALSE)
+        }
+        if (!is.null(spec$nodes)) {
+            stop("Default grid axis '", key, "' is declared as explicit nodes, ",
+                 "so it has no resolution to raise.", call. = FALSE)
+        }
+    }
     ax <- if (!is.null(spec$nodes)) {
         as.numeric(spec$nodes)
     } else {
-        exp(seq(log(spec$lo), log(spec$hi), length.out = as.integer(spec$n)))
+        exp(seq(log(spec$lo), log(spec$hi),
+                length.out = as.integer(n %||% spec$n)))
     }
     if (!is.null(spec$prepend)) ax <- c(as.numeric(spec$prepend), ax)
     ax
@@ -306,6 +430,44 @@
         miid       = c(".registry", "alpha_grid")
     )
 )
+
+# Whether a path CROSSES the axis fields above itself, or takes them already
+# paired. The registry stores a family's axes PRE-PAIRED -- `.nl_fill_family_axes()`
+# expands them into one row per tuple and every field then has length n_cells --
+# while the joint backends (`.joint_cartesian()`) and the copy block
+# (`.joint_block_axis_grid()`'s `expand.grid`) take one axis per field and cross
+# them. The difference is invisible in the field values: two length-20 vectors
+# are a 20-cell paired grid on one path and a 400-cell crossed one on another.
+# Anything rewriting a field per axis has to know which (`.nl_pilot_block()`),
+# so the property is declared beside the fields rather than inferred at each
+# call site.
+.NL_PATH_CROSSES <- c(registry = FALSE, joint_single = TRUE, copy = TRUE)
+
+.nl_path_crosses <- function(path) {
+    path <- as.character(path %||% "")
+    if (!path %in% names(.NL_PATH_CROSSES)) return(FALSE)
+    isTRUE(unname(.NL_PATH_CROSSES[[path]]))
+}
+
+# The default-axis KEY a (path, family) lays on `field` -- the read half of
+# `.nl_path_axis_fields()`, which names the fields but not where their defaults
+# come from. Path pseudo-types are consulted in the order the path declares
+# them, then the family's own binding, so a field a path re-parameterizes
+# (`.joint_areal`'s `sigma_grid`) resolves to the path's axis and not the
+# family's. NULL when no table binds the field.
+.nl_path_axis_key <- function(type, path = "registry", field) {
+    type <- tolower(type %||% "")
+    spec <- .NL_PATH_AXES[[path]][[type]]
+    toks <- if (is.null(spec)) character(0) else
+        vapply(spec, function(tok) if (identical(tok, ".registry")) type else tok,
+               character(1))
+    for (tk in unique(c(toks, type))) {
+        if (!tk %in% names(.NL_FAMILY_AXES)) next
+        k <- .nl_family_axis_key(tk, field)
+        if (!is.null(k)) return(k)
+    }
+    NULL
+}
 
 # Exact conversions between two spellings of ONE axis, for the paths that
 # parameterize a family differently. Only pairs the ENGINE ITSELF converts are
@@ -480,24 +642,30 @@
     # "decline" is the default because it never loses a trial: of the 35 it
     # changes it improves 7 and worsens none (sign test p = 0.0078) at the same
     # width. It is also the only arm that does not report a substituted spread
-    # as though the stencil had measured it.
+    # as though the stencil had measured it. Under the proper default
+    # hyperpriors (gcol33/tulpa#730) no fit of the seven-row ladder below reaches
+    # the ceiling -- 0 of 2800 axis reads -- so the three ceiling arms are
+    # identical there and the table above is the only one that separates them.
     sd_clamp_policy = "decline",
 
-    # The floor is the OPPOSITE answer, and it is the same table that says so:
+    # The floor is the OPPOSITE answer. Seven rows x 200 seeds under the proper
+    # default hyperpriors, "resolve" placement, paired 95%-level win/loss against
+    # 0.15:
     #
     #   floor            summed dev   won   lost
-    #   0.02 / 0.05          0.7600     0    374
-    #   0.15 (this)          0.1464     -      -
-    #   0.30                 0.2621     0     30
-    #   0.50                 0.4893    39     47
-    #   decline              0.3186     9     22
+    #   0.02 / 0.05          0.7107     0    304
+    #   0.15 (this)          0.1614     -      -
+    #   0.30                 0.2457     0     53
+    #   0.50                 0.5164    23     43
+    #   decline              0.3379    10      3
     #
     # A clamped floor WIDENS a too-narrow axis, which is the direction that
-    # cannot rail, so substituting there is the right move and declining costs
-    # 22 trials against 9. 0.15 is a minimum of the ladder in both directions --
-    # dropping it to 0.05 loses 374 trials and wins none -- and the floor is the
-    # bound that actually binds: it engages on 3 of 7 rows and on every fit of
-    # those rows, where the ceiling reaches 2 of 268 axis reads.
+    # cannot rail, so substituting there is the right move: declining wins 10
+    # trials against 3 at the 95% level and more than doubles the summed
+    # deviation, over-covering at 0.80 and 0.50. 0.15 is a minimum of the ladder
+    # in both directions -- dropping it to 0.05 loses 304 trials and wins none --
+    # and the floor is the bound that actually binds: it engages on 3 of 7 rows
+    # and on every fit of those rows.
     sd_floor_policy = "clamp",
 
     # A recentred axis must survive the map back onto its own support with at
@@ -571,12 +739,21 @@
     max_attempts_joint    = 2L,
     max_attempts_registry = 1L,
 
-    # Weakly-informative PC(U, alpha) prior engaged only on a second attempt,
-    # and only when the user set no `prior_sigma` of their own. `U = 3` is the
-    # retired fixed-grid ceiling, so the shrinkage is felt only PAST where the
-    # old default axis already stopped; `P(sigma > 3) = 0.01` leaves a
-    # data-identified mode essentially untouched.
-    sigma_pc_prior = list("pc.prec", c(U = 3, alpha = 0.01))
+    # The PC prior a second attempt engages when the user set no `prior_sigma`
+    # of their own: the engine's default SD prior, so a fit that needed the
+    # second attempt integrates the same prior as one that did not.
+    sigma_pc_prior = list("pc.prec", c(U = .NL_HYPERPRIOR$scale_U,
+                                       alpha = .NL_HYPERPRIOR$scale_alpha)),
+
+    # Per-axis node count of a PLACEMENT PILOT (`control$recenter_pilot = TRUE`,
+    # `R/nested_laplace_pilot.R`). Placement reads two things off a grid -- the
+    # argmax cell and the FD curvature at it -- and neither needs the resolution
+    # the INTEGRATION needs, so a pilot answers the placement question on a
+    # thinned grid over the same spans and the full grid is solved once, at the
+    # placed axes. Three is the floor that still carries an interior node on
+    # every axis, which is what the rail test reads; a coarser pilot would make
+    # every node a boundary.
+    pilot_n = 3L
 )
 
 # `options(tulpa.recenter.<par> = )` overrides one entry, the same seam the
@@ -605,7 +782,19 @@
     tau_lower  = 0.25,
     tau_upper  = 16,
     rho_lower  = 0.1,
-    rho_upper  = 0.9
+    rho_upper  = 0.9,
+    # The proper-CAR mixing value the `car_proper` spatial axis is HELD at --
+    # a one-point axis on this driver, so the value is part of the model. It was
+    # an inline literal in fit_st_nested() (gcol33/tulpa#673); a selector gets
+    # one default, in one place.
+    rho_spatial = 0.9,
+    # bym2's spatial axis is a field SD (`sigma_spatial`), not a precision --
+    # same span as the single-field default `field_sd` axis (gcol33/tulpa#776).
+    # Its mixing-weight axis (`rho_spatial`, integrated rather than pinned)
+    # reuses the fixed `bym2_rho` node set directly, so it has no lower/upper
+    # knob here.
+    sigma_lower = 0.1,
+    sigma_upper = 3
 )
 
 .nl_st_default <- function(par) {
@@ -625,6 +814,35 @@
 # reports it (`diagnostic_summary()`, `print.laplace_diagnostics()`,
 # `plot_pareto_k()`, `tulpa_reloo()`, the PSIS-LOO warning, the timing verdict)
 # and the Pareto-k proposal loop's own early stop.
+#
+# `k_samples` is the outer Pareto-k's importance-draw budget, one value across
+# all four backends that report the diagnostic. It has to be one value because
+# the k-hat is read against the FIXED bands `k_usable` and `gamma3_*` above:
+# under gcol33/tulpa#631 the budget sets the PSIS tail FRACTION as well as the
+# precision -- `.psis_tail_len(S) = min(S/5, 3 sqrt(S))` gives 20.0% at 200 and
+# 13.6% at 500 -- so two backends scoring the same hyperparameter posterior at
+# two budgets characterise it at two different quantiles of the weight
+# distribution and can report different bands for it (gcol33/tulpa#632).
+#
+# 500 rather than 200, on the record rather than on preference. The joint path
+# was raised from 200 to 500 at gcol33/tulpa#127 (609f262) when outer scoring
+# stopped being adaptive-batched: with the proposal scored ONCE, the single
+# budget carries the whole estimate instead of a batch of it. Every backend
+# scores single-batch now, so that reason covers all four. 13.6% is also the
+# fraction gcol33/tulpa#631 measured the k-hat to be stable at, and the one
+# every shipped outer-k number -- the whole gcol33/tulpa#629 and #630 corpus,
+# including #630's bit-identity baseline -- was read at. At 200 the `S/5` cap
+# binds, which is the published rule's cap rather than the rule itself.
+#
+# What it costs: the grid, SPDE and RE-covariance paths go from 200 to 500
+# inner Laplace solves when `diagnose_k` is on, since one draw is one off-grid
+# re-solve. `control$k_samples` sets it per fit on every front door.
+#
+# `k_samples_ok` / `k_samples_good` are the same budget raised at the entry to a
+# `k_quality` run, where the bootstrap CI has to resolve a named band before the
+# escalation ladder starts; `k_precision_growth` below is what the ladder then
+# multiplies by. They live here for the reason the base value does -- they were
+# written inline at the joint front door, which is how the base value drifted.
 #
 # `gamma3_ok` / `gamma3_unreliable` band the inner-Laplace skewness on the
 # usual skewness-magnitude convention (Bulmer 1979) -- a general reading of
@@ -660,6 +878,22 @@
 # therefore banded only on probed indices whose realized IS efficiency `is_ess
 # / n_draws` falls BELOW this floor, i.e. where correcting the proposal costs
 # at least half a percent of the sample; the raw shape is reported either way.
+#
+# `k_precision_growth` is the factor the `k_quality` escalation multiplies the
+# importance-draw budget by once grid refinement is EXHAUSTED and the miss that
+# remains is a precision miss. A `k_quality` miss has two causes: the k-hat can
+# sit CONFIDENTLY outside the requested band (the grid does not represent the
+# hyperparameter posterior), or its bootstrap CI can STRADDLE a band boundary
+# (the point estimate may already be inside the band and only the interval's
+# width prevents confirming it). Refinement is tried first on BOTH, because it
+# lowers the k-hat itself rather than the noise around it and so can move an
+# ambiguous k INTO the band; the draw budget is what is left when the grid has
+# nothing more to give and the estimate is still ambiguous. The standard error
+# of a GPD shape estimate falls as `1 / sqrt(S)`, so a constant factor buys a
+# constant proportional narrowing per round: at 2 the CI narrows by ~29% per
+# round, which crosses a band boundary for an estimate not already sitting on
+# it, while keeping the round's cost -- one inner Laplace solve per draw -- to
+# one doubling.
 #
 # `skew_correct` decides whether the inner-Laplace marginal quantiles are
 # corrected rather than only graded: a Cornish-Fisher
@@ -986,15 +1220,93 @@
     tune[[par]]
 }
 
+# `axis_sd_ess` is the quadrature effective sample size an outer axis has to
+# reach on its own marginal before its reported SD is read off the WEIGHTS
+# rather than off a parabola at the modal node.
+#
+# The two estimators answer different questions. The weighted SD integrates the
+# axis marginal against the measure the nodes carry, so it is consistent as the
+# grid refines and it is the spread of the posterior the fit actually holds. The
+# 3-point parabola reads the curvature at the mode, so it is a Gaussian summary
+# and it moves with the spacing of the three nodes it reads. Neither is right
+# everywhere: on a grid whose mass has collapsed onto one node the weighted read
+# is a floor at zero, which is the case the parabola was added for.
+#
+# The separating statistic has to come off the WEIGHTS, so that the choice is
+# not one estimator judging the other. `ess = 1 / sum(p^2)` over the axis's own
+# level shares is that statistic: it counts the nodes the marginal actually
+# spreads over, so it is low exactly where a discrete spread is not a spread.
+#
+# MEASURED (`dev_notes/issue621/probe_ess_threshold.R`), sweeping node spacing
+# `h / sd` 0.25 to 4 and the mode's offset inside its cell 0 to 0.9, on a
+# Gaussian axis marginal -- where the parabola is exact by construction, so it
+# says what the weighted read COSTS -- and on a skewed one, where the parabola
+# targets a different number. Worst relative error over every arrangement
+# clearing each threshold:
+#
+#   threshold   weighted (gaussian)  weighted (skew)   parabola (skew)
+#     1.5             1.00                0.526             0.92
+#     2.5             8.5e-04             0.303             0.92
+#     3               9.8e-06             0.074             0.92
+#     4               7.5e-11             0.025             0.92
+#
+# Below 2.5 the weighted read is up to 100 % wrong on a Gaussian and the
+# parabola is exact, so that is the regime the parabola serves; at 3 the
+# weighted read is exact on a Gaussian to 1e-05 and within 7.4 % on a skewed
+# marginal, against the parabola's 92 %. Across grids of ONE skewed density at
+# `ess >= 3` the weighted read spans 0.974 to 1.074 of the truth while the
+# parabola spans 0.080 to 0.642, which is the grid dependence gcol33/tulpa#621
+# reports as a factor of two on a copy axis.
+# `edge_mass_lift` is how far above a FLAT marginal an outer axis's boundary
+# node has to sit before the axis is NAMED as holding boundary mass
+# (`.nl_axis_edge_mass()`, `$outer_grid_edge_mass_axes`). Same currency as the
+# rail's `.NL_RECENTER$edge_mass_mult`, `lift = m * w_edge`, and for the same
+# reason: a fixed share of the marginal makes a longer axis a weaker detector of
+# the same posterior. The two thresholds are separate because the labels are:
+# the rail is a rescue TRIGGER on an axis whose span misses its own mode, and
+# this is a report on an axis that truncates its own marginal whatever the
+# argmax does.
+#
+# `1` is the point at which the boundary node carries what a flat marginal would
+# put there, and it is read off the mass such a grid leaves OUTSIDE its span
+# (`dev_notes/issue622/probe_edge_mass_lift.R`: 1400 arrangements over four
+# marginal shapes, five node counts and 35 spans, the reference being the mass
+# beyond the outer CELL EDGE, which is what a reported interval extends to):
+#
+#   lift >= 0.75   410 arrangements   least truncated 0.0074   median 0.258
+#   lift >= 1.00   338               least truncated 0.0074   median 0.540
+#   lift >= 1.25   287               least truncated 0.0304   median 0.726
+#
+# Against "more than 5 % of the marginal left outside", a lift of 1 catches 60 %
+# of the truncating arrangements at a false-alarm rate of 0.011, and the worst
+# arrangement it names falsely leaves 4.6 % outside -- i.e. just under the
+# definition. It is a one-sided read: a high lift means the span truncates, a low
+# one does not certify that it does not, which is why it is reported rather than
+# acted on. On gcol33/tulpa#622's own cases the lifts are 0.62 (the observed
+# fit), 1.80, 3.06 and 3.96, so the two the issue asks to see named are named and
+# the near-flat one is not.
+#
+# Those arrangements are equally spaced, so their cells all carry one width and
+# the sweep sizes the threshold in a currency no cell width enters. That is the
+# currency `.nl_axis_edge_mass()` reads it in: the "span" measure keeps the
+# widths a node's own spacing gives it and drops only the domain closure of the
+# outermost cell, which is not a width the sweep could have seen
+# (gcol33/tulpa#660).
 .NL_DIAG <- list(
     within_cell          = "box_uniform",
     grid_resolved        = 1,
+    axis_sd_ess          = 3,
+    edge_mass_lift       = 1,
     k_usable             = 0.7,
-    k_samples            = 200L,
+    k_samples            = 500L,
+    k_samples_ok         = 800L,
+    k_samples_good       = 2000L,
+    k_bootstrap          = 1000L,
     gamma3_ok            = 0.5,
     gamma3_unreliable    = 1.0,
     centre_unreliable    = Inf,
     inner_k_material_ess = 0.995,
+    k_precision_growth   = 2,
     skew_correct         = TRUE,
     debias_select_band   = "ok",
     debias_closure_pcor  = 0.5,
@@ -1013,6 +1325,49 @@
 }
 
 
+
+# --- cheap-pass grid screening -----------------------------------------------
+#
+# The outer driver can rank every cell with a short warm-started Newton run and
+# skip the full inner solve wherever the screening weight is negligible. Two
+# numbers set that: the weight below which a cell is dropped, and how many
+# Newton steps the screen takes per cell.
+#
+# `iters` is a cost-vs-fidelity trade, not a convergence budget: the screen only
+# has to RANK the cells, and every cell it ranks is warm-started from its
+# already-screened lattice neighbour, so the quasi-mode it lands on is close to
+# the cell's own mode after very few steps. Each extra step is paid on every
+# cell of the grid, including the ones the screen goes on to keep, so a depth
+# above what the ranking needs makes screening cost more than the solves it
+# avoids.
+#
+# `min_keep` is the floor on how many cells the screen leaves to the full pass,
+# whatever the tolerance says. The tolerance is a normalised weight, so what it
+# cuts at is a gap in nats, `-(log(prune_tol) + log(Z))`; the whole range a
+# caller would type is a few tens of nats, and on a log-marginal surface
+# spanning thousands the screen keeps one cell at every setting. A kept set of
+# one is a point mass: the placement pass reads a curvature stencil off the
+# cells that were solved, finds none, and the axis is reported where it was laid
+# rather than where the posterior is. A central second difference along one axis
+# needs three collinear nodes, so five is the argmax cell plus a two-sided
+# neighbourhood on the two axes an outer grid most often carries.
+#
+# The value is mirrored by `CHEAP_SCREEN_MIN_KEEP` in `src/nested_laplace_grid.h`
+# -- the driver applies it, and a C++ constant cannot read this registry -- and
+# the two are pinned together by test.
+.NL_SCREEN <- list(
+    prune_tol = 1e-3,
+    iters     = 2L,
+    min_keep  = 5L
+)
+
+.nl_screen <- function(par) {
+    if (!par %in% names(.NL_SCREEN)) {
+        stop("Unknown screening setting '", par, "'.", call. = FALSE)
+    }
+    .NL_SCREEN[[par]]
+}
+
 # --- default fixed-effect prior ----------------------------------------------
 #
 # The Gaussian prior a fitter puts on the fixed effects when the caller supplies
@@ -1027,6 +1382,19 @@
 # block already carries.
 .TULPA_PRIOR <- list(
     beta_sd = 2.5
+)
+
+# --- response-scale prediction intervals read over draws ---------------------
+#
+# `predict(type = "response", se.fit = TRUE)` on a zero-inflated fit reads its
+# bounds as quantiles of the mixture mean over draws of the fixed block, because
+# the mean moves with the count and the zero-inflation predictors at once and no
+# endpoint map exists. The seed is pinned (and restored afterwards) so the
+# interval is a function of the fit alone; `ndraws` bounds the Monte Carlo error
+# of a 2.5% quantile at roughly 0.25 percentage points of tail probability.
+.PREDICT_ZI <- list(
+    seed   = 285603L,
+    ndraws = 4000L
 )
 
 # Which setting each front door reads. A fitter names itself here rather than
@@ -1061,4 +1429,144 @@
 # fitter's `beta_prior` argument takes.
 .tulpa_default_beta_prior <- function(consumer = "tulpa") {
     list(mean = 0, sd = .tulpa_prior_sd(consumer))
+}
+
+# --- how far refinement may move an outer axis --------------------------------
+#
+# The adaptive-grid and var-of-means passes add nodes to an outer axis after the
+# first grid has been solved. How far they may move it is a three-rung ladder:
+#
+#   "none"     the axis takes no refinement nodes at all.
+#   "densify"  nodes may be added strictly inside the span the axis's declared
+#              nodes already cover; none may be placed past either end node.
+#   "extend"   nodes may also be placed beyond the end nodes, one and two
+#              declared steps out (`.hyper_propose_axis_extension()`).
+#
+# Which rung an axis starts on is a question of PROVENANCE, not of axis name. A
+# caller who wrote the nodes down stated where the fit integrates, so refinement
+# resolves that range more finely and does not leave it; a mode outside it shows
+# up as mass at the edge. An axis the engine placed carries no such statement, so
+# refinement may follow the posterior out. `auto_grid()` is how a wrapper package
+# that computed a default of its own says which side its axis is on -- the same
+# marker the recentring pass reads, so one declaration answers both questions.
+.NL_AXIS_REFINE_MODES <- c("none", "densify", "extend")
+
+.NL_AXIS_REFINE <- list(
+    stated = "densify",
+    placed = "extend"
+)
+
+.nl_axis_refine <- function(par) {
+    if (!par %in% names(.NL_AXIS_REFINE)) {
+        stop("Unknown axis-refinement setting '", par, "'.", call. = FALSE)
+    }
+    .NL_AXIS_REFINE[[par]]
+}
+
+# --- natural domain of a bounded outer axis ----------------------------------
+#
+# The set of values an axis's parameter is DEFINED on. This is a fact of the
+# parameterisation, not of any grid: a proper-CAR precision `Q = D - rho W` is
+# positive definite only for `rho < 1 / lambda_max`, and `lambda_max(D^-1 W)` is
+# 1 on any connected graph, so 1 bounds that axis above whatever the adjacency
+# is. A quadrature rule may place its nodes anywhere inside such a domain, but
+# the cell EDGES it closes the outermost nodes with are an extrapolation half a
+# node step past them, and an extrapolation has no reason of its own to stay
+# inside. Declaring the domain is what lets `.hyper_axis_support()` refuse to
+# report a support outside it (gcol33/tulpa#657), so the class of bug is
+# unreachable rather than repaired one axis at a time.
+#
+# Keyed on the BARE axis name -- a multi-block grid prefixes its columns with
+# the block that owns them (`b1.rho_car`) -- so every claim here has to hold for
+# that name on every path that uses it. `rho` names four different parameters
+# across the families: the BYM2 mixing weight on (0, 1), the proper-CAR
+# correlation on the adjacency eigenvalue interval, the AR1 autocorrelation and
+# a multi-output cross-field correlation on (-1, 1). Their upper end is 1 in all
+# four; their lower ends disagree (0, `1 / lambda_min`, -1), and `1 / lambda_min`
+# can sit below -1, so only the upper end is stated here. A spec built by a
+# block that knows which of the four it holds declares the tighter interval
+# itself through `hyper_axis_spec(bounds = )`, and the two are intersected.
+#
+# `open` says whether the endpoint is a member of the domain. Every endpoint
+# here is open: it is the value at which the parameterisation degenerates -- a
+# singular `Q` at `rho = 1`, a zero scale -- so a support reaching it is one no
+# sampler can be handed. A closed endpoint would be one the model can be
+# evaluated AT; the field exists so such an axis is expressible in this table
+# rather than as a branch in the support rule.
+#
+# `.positive` is not an axis name (the leading dot marks a pseudo-entry, as in
+# `.NL_FAMILY_AXES`): it is the domain of every axis integrated in log.
+# `.hyper_axis_scale()` already holds which names those are, and a quantity
+# integrated in log is a positive one, so membership is read off that function
+# rather than from a second name list drifting against it.
+.NL_AXIS_DOMAIN <- list(
+    rho       = list(bounds = c(-Inf, 1),  open = c(TRUE, TRUE)),
+    rho_car   = list(bounds = c(-Inf, 1),  open = c(TRUE, TRUE)),
+    .positive = list(bounds = c(0, Inf),   open = c(TRUE, TRUE))
+)
+
+.nl_axis_domain_entry <- function(key) {
+    if (!key %in% names(.NL_AXIS_DOMAIN)) {
+        stop("Unknown axis domain '", key, "'.", call. = FALSE)
+    }
+    .NL_AXIS_DOMAIN[[key]]
+}
+
+# --- joint CCD placement cost ------------------------------------------------
+#
+# What PLACING a central composite design costs, in the only unit that matters
+# on an expensive model: inner Newton solves. The mode-find behind
+# `.joint_ccd_grid()` reads the outer log-posterior through the same solve the
+# outer grid pays for once per cell, so a placement round is not bookkeeping --
+# it is `1 + 2d + 4 C(d, 2)` full inner solves, 33 of them at `d = 4`, and the
+# round caps below bound how many rounds a placement takes without knowing what
+# a round costs. Left at the caps alone, placement can spend roughly 1976 solves
+# at `d = 4` to place a 25-node design.
+#
+# `evals_per_cell` states the ceiling in the currency the caller already has:
+# the tensor grid the design replaces. At `1` a placement may not spend more
+# inner solves than integrating that tensor grid would have, so a placement that
+# succeeds never costs more than the integration it avoids and one that runs out
+# caps the wasted spend at the same number rather than at the round caps'
+# worst case.
+#
+# `budget_floor` exempts the DESIGNED first attempt (`first_rounds` rounds from
+# the grid-median seed, plus its closing stencil). That attempt is the path the
+# CCD was built for and its cost does not grow with the grid, so a small tensor
+# grid would otherwise decline every placement on arithmetic that only bounds
+# the ESCALATION -- the joint-grid seed, the step calibration and the
+# `max_rounds` rescue mode-find, which is where the unbounded cost lives. Set it
+# `FALSE` to make `evals_per_cell` a hard cap on the whole placement.
+#
+# The five loop caps live here rather than as literal argument defaults because
+# the budget is PROJECTED from them: the up-front decline computes the cheapest
+# placement that could still produce a design, and it has to read the same
+# numbers the loops run on.
+#
+# The mode-find measures a FULL finite-difference stencil every round. A
+# curvature-reuse path -- an axial-only stencil plus a symmetric rank-1 secant
+# update of the off-diagonal block between refreshes, `1 + 2d` evaluations a
+# round instead of `1 + 2d + 4 C(d, 2)` -- shipped in 0.2.14 opt-in and was
+# measured and REMOVED in 0.2.15 (gcol33/tulpa#662): over 16 paired fits it
+# spent no fewer inner solves (evals ratio 1.046 at d = 3, 1.000 at d = 4,
+# winning 0 of 8 and 2 of 8 pairs) because the secant model lengthened the walk
+# by roughly the per-round saving, and it centred the design somewhere worse --
+# the best inner log-marginal on the design fell by up to 7.5 nats at d = 3 and
+# 16.3 at d = 4. Do not reintroduce one without re-reading
+# `dev_notes/issue662/RESULTS662.md`.
+.CCD_PLACEMENT <- list(
+    evals_per_cell   = 1,
+    budget_floor     = TRUE,
+    first_rounds     = 8L,
+    max_rounds       = 30L,
+    calibrate_rounds = 4L,
+    seed_max_pts     = 256L,
+    max_halve        = 6L
+)
+
+.ccd_placement <- function(par) {
+    if (!par %in% names(.CCD_PLACEMENT)) {
+        stop("Unknown CCD placement setting '", par, "'.", call. = FALSE)
+    }
+    .CCD_PLACEMENT[[par]]
 }

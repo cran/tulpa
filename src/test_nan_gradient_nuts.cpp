@@ -1,6 +1,7 @@
 // test_nan_gradient_nuts.cpp
-// Test-only entry point: a NUTS chain whose gradient is non-finite where its
-// log-posterior is not.
+// Test-only entry points: NUTS chains whose gradient misbehaves in a way the
+// model, not the sampler, controls -- one arm non-finite where its
+// log-posterior is not, one arm raising an exception mid-chain.
 //
 // The leaf divergence test used to inspect the position vector and the
 // log-posterior and never the momentum. The default leapfrog op sequence ends
@@ -21,6 +22,7 @@
 #include <Rcpp.h>
 #include <cmath>
 #include <limits>
+#include <stdexcept>
 #include <vector>
 
 #include "hmc_sampler.h"
@@ -37,6 +39,14 @@ namespace {
 // model_data because the gradient hook is a plain function pointer and the two
 // arms are run one after the other from a single-threaded probe.
 bool g_plant_nan = false;
+
+// Whether the hand-coded gradient throws, and after how many evaluations. The
+// same "gradient the model controls" lever as g_plant_nan, aimed at the other
+// way a chain can end: an exception raised from inside the iteration loop, the
+// shape a model's own Rcpp::stop or a field transform's Cholesky failure takes.
+// -1 disables.
+int g_throw_after = -1;
+int g_grad_calls  = 0;
 
 struct NormalData { int K = 0; };
 
@@ -58,6 +68,9 @@ void normal_gradient(const std::vector<double>& params, const ModelData& data,
                      const ParamLayout& layout, std::vector<double>& grad,
                      double* log_post_out) {
     (void)data;
+    if (g_throw_after >= 0 && ++g_grad_calls > g_throw_after) {
+        throw std::runtime_error("planted gradient failure");
+    }
     const int n = static_cast<int>(params.size());
     grad.assign(n, 0.0);
     double lp = 0.0;
@@ -120,7 +133,7 @@ namespace tulpa_hmc {
 // [[Rcpp::export]]
 Rcpp::List cpp_test_nan_gradient_nuts(bool plant_nan, int K = 3,
                                        int n_iter = 40, int n_warmup = 20,
-                                       int seed = 1) {
+                                       int seed = 1, bool bypass_gate = true) {
     if (K < 1) Rcpp::stop("K must be >= 1");
 
     NormalData nd;
@@ -132,7 +145,18 @@ Rcpp::List cpp_test_nan_gradient_nuts(bool plant_nan, int K = 3,
     std::vector<double> init(layout.total_params, 0.3);
     std::vector<double> inv_metric_vec;
 
+    g_throw_after = -1; g_grad_calls = 0;
     g_plant_nan = plant_nan;
+    // Two things to measure, and they need opposite settings of the entry gate.
+    // bypass_gate = true asks what the chain does with a NaN raised DURING a
+    // trajectory, so it declares the gradient already verified and the planted
+    // NaN reaches the leapfrog. bypass_gate = false asks whether
+    // run_hmc_chain_cpp verifies at all -- this probe enters it directly, past
+    // both the R wrapper and the multi-chain producer, which is the entry class
+    // that used to skip the check (gcol33/tulpa#684). The scope restores the
+    // flag and the mode on return, so nothing leaks to the next fit.
+    tulpa_hmc::GradientModeFitScope grad_scope;
+    tulpa_hmc::g_gradient_verified = bypass_gate;
     tulpa_hmc::HMCResultCpp result = tulpa_hmc::run_hmc_chain_cpp(
         init, data, layout, n_iter, n_warmup, /*L=*/0, /*chain_id=*/1,
         static_cast<unsigned int>(seed), /*verbose=*/false,
@@ -162,6 +186,52 @@ Rcpp::List cpp_test_nan_gradient_nuts(bool plant_nan, int K = 3,
         Rcpp::_["n_samples"]   = n_sample,
         Rcpp::_["n_moved"]     = n_moved
     );
+}
+
+// Test-only: the same chain, ended by an exception raised from the gradient
+// after `throw_after` evaluations. Always errors; what it is for is the state
+// it leaves behind, read by cpp_test_nuts_progress_active() below.
+// [[Rcpp::export]]
+void cpp_test_nuts_gradient_throws(int throw_after = 30, int K = 3,
+                                   int n_iter = 40, int n_warmup = 20,
+                                   int seed = 1) {
+    if (K < 1) Rcpp::stop("K must be >= 1");
+
+    NormalData nd;
+    tulpa::LikelihoodSpec spec;
+    ModelData data;
+    ParamLayout layout;
+    build_normal_model(K, nd, spec, data, layout);
+
+    std::vector<double> init(layout.total_params, 0.3);
+    std::vector<double> inv_metric_vec;
+
+    g_plant_nan = false;
+    g_grad_calls = 0;
+    g_throw_after = throw_after;
+    // The flags are file-scope and the call below leaves by an exception, so
+    // reset them on the way out however that happens -- a later probe in the
+    // same session must run a clean chain.
+    struct FlagReset {
+        ~FlagReset() { g_throw_after = -1; g_grad_calls = 0; }
+    } flag_reset;
+
+    tulpa_hmc::GradientModeFitScope grad_scope;
+    tulpa_hmc::g_gradient_verified = true;
+    (void) tulpa_hmc::run_hmc_chain_cpp(
+        init, data, layout, n_iter, n_warmup, /*L=*/0, /*chain_id=*/1,
+        static_cast<unsigned int>(seed), /*verbose=*/false,
+        /*max_treedepth=*/6, tulpa::MassMatrixType::DIAG,
+        /*adapt_delta=*/0.8, /*riemannian=*/0, inv_metric_vec);
+}
+
+// Test-only: whether a NUTS progress reporter is registered process-wide right
+// now. Outside a running chain this must be false; a true reading between fits
+// means some chain left the global pointing at a reporter its own frame has
+// already destroyed, and every later chain will tick that freed object.
+// [[Rcpp::export]]
+bool cpp_test_nuts_progress_active() {
+    return tulpa_hmc::g_active_grid_progress != nullptr;
 }
 
 // The two predicates the leaf reads, driven directly. `leapfrog_state_nonfinite`

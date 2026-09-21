@@ -48,7 +48,7 @@ skip_on_cran()
     arm_pos <- list(y = sim$y_pos, n_trials = rep(1L, length(sim$y_pos)),
                     X = sim$Xpos, spatial_idx = sim$spi_pos,
                     re_idx = rep(0, length(sim$y_pos)), n_re_groups = 0L,
-                    sigma_re = 1.0, family = "gaussian", phi = 0.5)
+                    sigma_re = 1.0, family = "gaussian", phi = 0.25)
     prior <- list(type = "bym2", n_spatial_units = adj$n_spatial_units,
                   adj_row_ptr = adj$adj_row_ptr, adj_col_idx = adj$adj_col_idx,
                   n_neighbors = adj$n_neighbors, scale_factor = 1.0,
@@ -86,7 +86,8 @@ test_that("sparse parallel path matches serial (no phi axis)", {
 test_that("sparse parallel path matches serial (phi_grid axis)", {
     skip_if_not(parallel::detectCores() >= 2L, "needs multi-core")
     n_outer <- max(2L, min(4L, parallel::detectCores() - 1L))
-    phi_grid <- list(pos = c(0.35, 0.5, 0.7))
+    # Residual VARIANCE nodes: residual SD 0.35, 0.5 and 0.7.
+    phi_grid <- list(pos = c(0.35, 0.5, 0.7)^2)
     for (seed in 7300L + seq_len(3L)) {
         sim <- .spar_sim(seed)
         .spar_expect_equiv(.spar_fit(sim, 1L, phi_grid),
@@ -121,7 +122,7 @@ test_that("inner parallel scatter matches serial on a single outer cell", {
     arm_pos <- list(y = y_pos, n_trials = rep(1L, length(y_pos)), X = Xpos,
                     spatial_idx = spi_pos, re_idx = rep(0, length(y_pos)),
                     n_re_groups = 0L, sigma_re = 1.0, family = "gaussian",
-                    phi = 0.5)
+                    phi = 0.25)
     prior <- list(type = "icar", n_spatial_units = adj$n_spatial_units,
                   adj_row_ptr = adj$adj_row_ptr, adj_col_idx = adj$adj_col_idx,
                   n_neighbors = adj$n_neighbors, sigma_grid = 1.0)  # 1 cell

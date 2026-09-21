@@ -138,6 +138,64 @@ inline void check_nn_order(const Rcpp::IntegerVector& ord, int n_loc,
     }
 }
 
+// The kernel a continuous-time temporal GP is built from, read off a spec list
+// under `cov` / `nu` / `period`. One reader, asked by `temporal_gp()` and by a
+// GP-evolving temporally-varying coefficient, so the two cannot come to accept
+// different sets of kernels or different smoothnesses. Matern is closed-form
+// only at nu in {1/2, 3/2, 5/2} (see temporal_gp_kernel.h); R rejects the rest
+// at construction and this is the backstop for a consumer building the spec by
+// hand. `who` names the door in the message.
+struct TemporalGPKernel {
+    TemporalCovType cov_type = TemporalCovType::EXPONENTIAL;
+    double nu = 0.5;
+    double period = 1.0;
+};
+
+inline TemporalGPKernel read_temporal_gp_kernel(const Rcpp::List& spec,
+                                                const char* who) {
+    static const tulpa::EnumEntry<tulpa::TemporalCovType> cov_table[] = {
+        {"exponential", tulpa::TemporalCovType::EXPONENTIAL},
+        {"matern",      tulpa::TemporalCovType::MATERN},
+        {"gaussian",    tulpa::TemporalCovType::GAUSSIAN},
+        {"periodic",    tulpa::TemporalCovType::PERIODIC}};
+    TemporalGPKernel k;
+    k.cov_type = tulpa::parse_enum(
+        Rcpp::as<std::string>(spec["cov"]), cov_table,
+        tulpa::TemporalCovType::EXPONENTIAL);
+    if (spec.containsElementNamed("nu") && !Rf_isNull(spec["nu"]))
+        k.nu = Rcpp::as<double>(spec["nu"]);
+    if (spec.containsElementNamed("period") && !Rf_isNull(spec["period"]))
+        k.period = Rcpp::as<double>(spec["period"]);
+    if (k.cov_type == tulpa::TemporalCovType::MATERN &&
+        std::abs(k.nu - 0.5) > 1e-12 &&
+        std::abs(k.nu - 1.5) > 1e-12 &&
+        std::abs(k.nu - 2.5) > 1e-12) {
+        Rcpp::stop("%s: Matern smoothness nu = %g has no closed form here; use "
+                   "0.5, 1.5 or 2.5.", who, k.nu);
+    }
+    if (k.cov_type == tulpa::TemporalCovType::PERIODIC && !(k.period > 0.0)) {
+        Rcpp::stop("%s: the periodic kernel's period must be positive (got %g).",
+                   who, k.period);
+    }
+    return k;
+}
+
+// A GP lengthscale's bounded support, read as `phi_prior_lower` /
+// `phi_prior_upper` and refused unless lower < upper. The bounds hold the
+// interval the logit map runs over, so an inverted pair is a support the
+// sampler cannot be in rather than a wide one.
+inline void read_temporal_gp_phi_bounds(const Rcpp::List& spec, const char* who,
+                                        double& lower, double& upper) {
+    if (spec.containsElementNamed("phi_prior_lower"))
+        lower = Rcpp::as<double>(spec["phi_prior_lower"]);
+    if (spec.containsElementNamed("phi_prior_upper"))
+        upper = Rcpp::as<double>(spec["phi_prior_upper"]);
+    if (!(lower < upper)) {
+        Rcpp::stop("%s: lengthscale bounds must satisfy lower < upper "
+                   "(got %g, %g).", who, lower, upper);
+    }
+}
+
 // Spec-solver-style inputs kept alive together: data borrows spec & resp (and
 // resp borrows y / n_trials), so the whole struct must outlive the kernel run.
 // `y` aliases the caller's NumericVector (no copy) -- it must outlive too.
@@ -158,7 +216,7 @@ inline void build_sampler_model_inputs(
     const Rcpp::NumericVector& y,
     const Rcpp::IntegerVector& n_trials,
     const Rcpp::NumericMatrix& X,
-    const std::string& family, double phi, double sigma_beta,
+    const std::string& family, double phi, double phi2, double sigma_beta,
     const std::vector<double>& offset,        // empty => no offset
     double sigma_re_scale,
     const Rcpp::Nullable<Rcpp::List>& re_spec,
@@ -193,6 +251,12 @@ inline void build_sampler_model_inputs(
     in.resp.N        = N;
     in.resp.family   = family;
     in.resp.phi      = phi;
+    // Before prepare(), not after: prepare() is where a family that NEEDS a
+    // second dispersion reads it, and tweedie hard-errors when it is NaN there.
+    // Assigning it on the way out left family = "tweedie" unreachable on every
+    // sampler backend (gcol33/tulpa#694). NA_REAL is a NaN and means "family
+    // default" for the families that have one (e.g. t df = 4).
+    in.resp.phi2     = phi2;
     in.resp.weights  = nullptr;
     in.resp.prepare();
 
@@ -661,33 +725,11 @@ inline void build_sampler_model_inputs(
             gp.n_obs = in.data.n_times;
             gp.n_groups = in.data.n_temporal_groups;
             gp.group_index = in.data.temporal_group_idx;
-            static const tulpa::EnumEntry<tulpa::TemporalCovType> cov_table[] = {
-                {"exponential", tulpa::TemporalCovType::EXPONENTIAL},
-                {"matern",      tulpa::TemporalCovType::MATERN},
-                {"gaussian",    tulpa::TemporalCovType::GAUSSIAN},
-                {"periodic",    tulpa::TemporalCovType::PERIODIC}};
-            gp.cov_type = tulpa::parse_enum(
-                Rcpp::as<std::string>(tp["cov"]), cov_table,
-                tulpa::TemporalCovType::EXPONENTIAL);
-            if (tp.containsElementNamed("nu") && !Rf_isNull(tp["nu"]))
-                gp.nu = Rcpp::as<double>(tp["nu"]);
-            if (tp.containsElementNamed("period") && !Rf_isNull(tp["period"]))
-                gp.period = Rcpp::as<double>(tp["period"]);
-            // Matern is closed-form only at nu in {1/2, 3/2, 5/2} (see
-            // temporal_gp_kernel.h); R rejects the rest, and this is the
-            // backstop for a consumer building the spec by hand.
-            if (gp.cov_type == tulpa::TemporalCovType::MATERN &&
-                std::abs(gp.nu - 0.5) > 1e-12 &&
-                std::abs(gp.nu - 1.5) > 1e-12 &&
-                std::abs(gp.nu - 2.5) > 1e-12) {
-                Rcpp::stop("build_sampler_model_inputs: temporal GP Matern "
-                           "smoothness nu = %g has no closed form here; use "
-                           "0.5, 1.5 or 2.5.", gp.nu);
-            }
-            if (gp.cov_type == tulpa::TemporalCovType::PERIODIC && !(gp.period > 0.0)) {
-                Rcpp::stop("build_sampler_model_inputs: temporal GP period must "
-                           "be positive (got %g).", gp.period);
-            }
+            const TemporalGPKernel gk =
+                read_temporal_gp_kernel(tp, "temporal_gp()");
+            gp.cov_type = gk.cov_type;
+            gp.nu       = gk.nu;
+            gp.period   = gk.period;
             gp.shared = true;
             in.data.temporal_gp_parameterization =
                 (tp.containsElementNamed("parameterization") &&
@@ -697,30 +739,23 @@ inline void build_sampler_model_inputs(
                             in.data.temporal_gp_sigma2_prior_U,
                             in.data.temporal_gp_sigma2_prior_alpha,
                             "temporal_gp() scale");
-            if (tp.containsElementNamed("phi_prior_lower"))
-                in.data.temporal_gp_phi_prior_lower = Rcpp::as<double>(tp["phi_prior_lower"]);
-            if (tp.containsElementNamed("phi_prior_upper"))
-                in.data.temporal_gp_phi_prior_upper = Rcpp::as<double>(tp["phi_prior_upper"]);
-            if (!(in.data.temporal_gp_phi_prior_lower <
-                  in.data.temporal_gp_phi_prior_upper)) {
-                Rcpp::stop("build_sampler_model_inputs: temporal GP lengthscale "
-                           "bounds must satisfy lower < upper (got %g, %g).",
-                           in.data.temporal_gp_phi_prior_lower,
-                           in.data.temporal_gp_phi_prior_upper);
-            }
+            read_temporal_gp_phi_bounds(tp, "temporal_gp()",
+                                        in.data.temporal_gp_phi_prior_lower,
+                                        in.data.temporal_gp_phi_prior_upper);
         }
         else Rcpp::stop("build_sampler_model_inputs: temporal type '%s' is not "
                         "supported on the sampler path (use 'rw1'/'rw2'/'ar1'/"
                         "'gp').", ttype.c_str());
     }
 
-    // --- Spatially-varying coefficients (NNGP). compute_param_layout keys the
-    //     SVC block on data.has_svc, allocating log_sigma2_svc / log_phi_svc /
-    //     the [n_svc x n_obs] fields; the generic log-post adds
-    //     eta_i += sum_j X_svc[i,j] * w_j(s_i). NNGP conventions match the GP
-    //     field (coords row-major; nn_idx 1-based; nn_order 0-based); the SVC
-    //     kernel derives neighbour-pair distances from coords, so no
-    //     nn_neighbor_dist is needed. ---
+    // --- Spatially-varying coefficients. compute_param_layout keys the SVC
+    //     block on data.has_svc, allocating log_sigma2_svc / log_phi_svc / the
+    //     field coefficients (an [n_svc x n_obs] NNGP field, or [n_svc x
+    //     m_total] HSGP basis coefficients); the generic log-post adds
+    //     eta_i += sum_j X_svc[i,j] * w_j(s_i). X_svc (row-major [n_obs x
+    //     n_svc]) and n_svc/n_obs are read identically on both branches --
+    //     compute_svc_prior()'s HSGP arm reads data.svc_data.n_svc/n_obs same
+    //     as the NNGP arm.
     if (svc_spec.isNotNull()) {
         Rcpp::List sv = Rcpp::as<Rcpp::List>(svc_spec);
         auto& s = in.data.svc_data;
@@ -734,48 +769,67 @@ inline void build_sampler_model_inputs(
         }
         s.n_obs = n_obs;
         s.n_svc = n_svc;
-        s.nn = Rcpp::as<int>(sv["nn"]);
         s.coords.resize(2 * (std::size_t)n_obs);
         for (int i = 0; i < n_obs; ++i) {
             s.coords[2 * (std::size_t)i]     = coords(i, 0);
             s.coords[2 * (std::size_t)i + 1] = coords(i, 1);
         }
-        Rcpp::IntegerMatrix nnix = Rcpp::as<Rcpp::IntegerMatrix>(sv["nn_idx"]);
-        Rcpp::NumericMatrix nnd  = Rcpp::as<Rcpp::NumericMatrix>(sv["nn_dist"]);
-        check_nn_tables(nnix, nnd, n_obs, s.nn, SVC_WHO);
-        s.nn_idx.resize((std::size_t)n_obs * s.nn);
-        s.nn_dist.resize((std::size_t)n_obs * s.nn);
-        for (int i = 0; i < n_obs; ++i)
-            for (int j = 0; j < s.nn; ++j) {
-                s.nn_idx[(std::size_t)i * s.nn + j]  = nnix(i, j);
-                s.nn_dist[(std::size_t)i * s.nn + j] = nnd(i, j);
-            }
-        Rcpp::IntegerVector nord = Rcpp::as<Rcpp::IntegerVector>(sv["nn_order"]);
-        check_nn_order(nord, n_obs, SVC_WHO, "nn_order");
-        s.nn_order.assign(nord.begin(), nord.end());
-        Rcpp::IntegerVector nordi = Rcpp::as<Rcpp::IntegerVector>(sv["nn_order_inv"]);
-        check_nn_order(nordi, n_obs, SVC_WHO, "nn_order_inv");
-        s.nn_order_inv.assign(nordi.begin(), nordi.end());
         Rcpp::IntegerVector svci = Rcpp::as<Rcpp::IntegerVector>(sv["svc_indices"]);
         check_vec_len(svci.size(), n_svc, SVC_WHO, "svc_indices");
         s.svc_indices.assign(svci.begin(), svci.end());
         Rcpp::NumericVector xsvc = Rcpp::as<Rcpp::NumericVector>(sv["X_svc"]);
         check_vec_len(xsvc.size(), (R_xlen_t)n_obs * n_svc, SVC_WHO, "X_svc");
         s.X_svc.assign(xsvc.begin(), xsvc.end());   // row-major [n_obs x n_svc]
-        s.cov_type = static_cast<CovType>(Rcpp::as<int>(sv["cov_type"]));
         in.data.has_svc = true;
-        in.data.svc_is_hsgp = false;
-        read_pc_anchors(sv, "phi_prior_U", "phi_prior_alpha",
-                        in.data.svc_phi_prior_U, in.data.svc_phi_prior_alpha,
-                        "spatial_svc() range");
+
+        const std::string svc_approx = sv.containsElementNamed("approx")
+            ? Rcpp::as<std::string>(sv["approx"]) : "nngp";
+        if (svc_approx == "hsgp") {
+            // Hilbert-space GP: one shared Laplacian basis (all SVC terms sit
+            // at the same coordinates; only each term's own sigma2/lengthscale
+            // scales the spectral density -- see compute_svc_prior()'s HSGP
+            // arm), built by setup_hsgp_2d() -- the single source of truth
+            // every HSGP path (spatial field, SVC) uses (gcol33/tulpa#813).
+            in.data.svc_is_hsgp = true;
+            const int m     = Rcpp::as<int>(sv["m"]);
+            const double cc = Rcpp::as<double>(sv["c"]);
+            in.data.svc_hsgp_m_per_dim = m;
+            in.data.svc_hsgp_boundary_factor = cc;
+            tulpa_hsgp::setup_hsgp_2d(s.coords, n_obs, m, cc, /*shared=*/true,
+                                      in.data.svc_hsgp_data);
+        } else {
+            in.data.svc_is_hsgp = false;
+            s.nn = Rcpp::as<int>(sv["nn"]);
+            Rcpp::IntegerMatrix nnix = Rcpp::as<Rcpp::IntegerMatrix>(sv["nn_idx"]);
+            Rcpp::NumericMatrix nnd  = Rcpp::as<Rcpp::NumericMatrix>(sv["nn_dist"]);
+            check_nn_tables(nnix, nnd, n_obs, s.nn, SVC_WHO);
+            s.nn_idx.resize((std::size_t)n_obs * s.nn);
+            s.nn_dist.resize((std::size_t)n_obs * s.nn);
+            for (int i = 0; i < n_obs; ++i)
+                for (int j = 0; j < s.nn; ++j) {
+                    s.nn_idx[(std::size_t)i * s.nn + j]  = nnix(i, j);
+                    s.nn_dist[(std::size_t)i * s.nn + j] = nnd(i, j);
+                }
+            Rcpp::IntegerVector nord = Rcpp::as<Rcpp::IntegerVector>(sv["nn_order"]);
+            check_nn_order(nord, n_obs, SVC_WHO, "nn_order");
+            s.nn_order.assign(nord.begin(), nord.end());
+            Rcpp::IntegerVector nordi = Rcpp::as<Rcpp::IntegerVector>(sv["nn_order_inv"]);
+            check_nn_order(nordi, n_obs, SVC_WHO, "nn_order_inv");
+            s.nn_order_inv.assign(nordi.begin(), nordi.end());
+            s.cov_type = static_cast<CovType>(Rcpp::as<int>(sv["cov_type"]));
+            read_pc_anchors(sv, "phi_prior_U", "phi_prior_alpha",
+                            in.data.svc_phi_prior_U, in.data.svc_phi_prior_alpha,
+                            "spatial_svc() range");
+        }
         if (sv.containsElementNamed("sigma2_prior_scale"))
             in.data.svc_sigma2_prior_scale = Rcpp::as<double>(sv["sigma2_prior_scale"]);
         // svc_parameterization defaults to 1 (non-centered), matching the
-        // spatial_svc() front door: each term's field is reconstructed as
+        // spatial_svc() front door: each NNGP term's field is reconstructed as
         // w_j = f(z_j, sigma2_j, phi_j) and the stored draws are transformed
         // back on the way out. This removes the funnel that attenuates a weakly
         // identified field's amplitude, which is the regime consumer packages
-        // (occupancy, ...) fit in.
+        // (occupancy, ...) fit in. Ignored on the HSGP branch (already
+        // non-centered by construction).
         in.data.svc_parameterization =
             sv.containsElementNamed("svc_parameterization")
                 ? Rcpp::as<int>(sv["svc_parameterization"]) : 1;
@@ -812,8 +866,28 @@ inline void build_sampler_model_inputs(
         if (st == "rw1")      t.structure = TemporalType::RW1;
         else if (st == "rw2") t.structure = TemporalType::RW2;
         else if (st == "ar1") t.structure = TemporalType::AR1;
+        else if (st == "gp") {
+            // A coefficient evolving as a continuous-time GP: the field is
+            // indexed by the same n_times distinct instants, and time_values
+            // carries where they actually sit -- that spacing is what this
+            // structure is for, and rw1 / rw2 / ar1 have no use for it.
+            t.structure = TemporalType::GP;
+            Rcpp::NumericVector tvals =
+                Rcpp::as<Rcpp::NumericVector>(tv["time_values"]);
+            check_vec_len(tvals.size(), t.n_times, TVC_WHO, "time_values");
+            t.time_values.assign(tvals.begin(), tvals.end());
+            const TemporalGPKernel gk =
+                read_temporal_gp_kernel(tv, "temporal_tvc(structure = \"gp\")");
+            t.cov_type = gk.cov_type;
+            t.nu       = gk.nu;
+            t.period   = gk.period;
+            read_temporal_gp_phi_bounds(tv,
+                                        "temporal_tvc(structure = \"gp\")",
+                                        in.data.tvc_gp_phi_prior_lower,
+                                        in.data.tvc_gp_phi_prior_upper);
+        }
         else Rcpp::stop("build_sampler_model_inputs: TVC structure '%s' is not "
-                        "supported (use 'rw1'/'rw2'/'ar1').", st.c_str());
+                        "supported (use 'rw1'/'rw2'/'ar1'/'gp').", st.c_str());
         t.cyclic = tv.containsElementNamed("cyclic") && Rcpp::as<bool>(tv["cyclic"]);
         tulpa_tvc::validate_tvc_data(t);
         read_pc_anchors(tv, "sigma_prior_U", "sigma_prior_alpha",
@@ -825,6 +899,9 @@ inline void build_sampler_model_inputs(
     in.layout = tulpa_hmc::compute_param_layout(in.data);
 }
 
+// Starting positions for parameters whose support is a declared interval,
+// where the coordinate's own origin is not a sensible place to begin.
+//
 // Start a multi-scale range at the geometric mean of its declared bounds
 // rather than at the origin's phi = 1.
 //
@@ -838,9 +915,80 @@ inline void build_sampler_model_inputs(
 // starting a regional range of a few units at 1 wastes warmup walking there. A
 // caller-supplied init is left alone: an explicit starting position is the
 // caller's choice, including for a resumed chain.
+// A continuous-time GP's lengthscale starts at a FRACTION of the spread of its
+// own time instants rather than at the midpoint of the declared support. The
+// default support is (0.01, 10) and both GP doors standardize their time
+// values, so the midpoint is a lengthscale five times the data's own spread:
+// every pair of instants is then correlated to within rounding, the dense
+// T x T covariance is numerically rank-one, and its Cholesky jitter binds at
+// the starting point.
+//
+// Measured on a 24-instant irregular fixture, deviation of the runtime
+// gradient check on the lengthscale against the starting ratio
+// lengthscale / sd(time): Matern 5/2 clean at 0.1 / 0.25 / 0.5 / 1.0, then
+// 9.3e-04 at 2.0 and 2.4e-03 at 5.0; Gaussian clean at 0.1 / 0.25, then
+// 1.2e-03 at 0.5, 3.2e-03 at 1.0, 6.5e-03 at 2.0 and 8.3e-03 at 5.0 -- the
+// smoothness ladder of a floor binding, not a wrong derivative. The fraction
+// is read against the SD, which is what those ratios are stated in, and 0.2
+// clears the smoothest kernel's threshold of 0.25 with margin.
+//
+// Only the CENTERED parameterization evaluates that log-determinant in the
+// target, so only it fell back to numerical gradients; the non-centered
+// default reaches the Cholesky through `f = L z` alone. Both start here, since
+// a lengthscale five times the spread is not a place either wants to begin
+// (gcol33/tulpa#847, gcol33/tulpa#851).
+constexpr double kGpPhiInitFraction = 0.2;
+
+// The logit of `fraction * sd(time_values)` on the support (lower, upper),
+// or NA when the instants carry no spread or the bounds are not an interval.
+inline double gp_phi_logit_init(const std::vector<double>& time_values,
+                                double b_lo, double b_hi) {
+    if (time_values.size() < 2 || !(b_lo < b_hi)) return NA_REAL;
+    double mean = 0.0;
+    for (double v : time_values) mean += v;
+    mean /= static_cast<double>(time_values.size());
+    double ss = 0.0;
+    for (double v : time_values) ss += (v - mean) * (v - mean);
+    const double spread =
+        std::sqrt(ss / static_cast<double>(time_values.size() - 1));
+    if (!(spread > 0.0)) return NA_REAL;
+
+    // Held off both ends of the support: the logit of an endpoint is infinite.
+    const double pad = 1e-3 * (b_hi - b_lo);
+    double phi0 = kGpPhiInitFraction * spread;
+    phi0 = std::min(std::max(phi0, b_lo + pad), b_hi - pad);
+    const double u = (phi0 - b_lo) / (b_hi - b_lo);
+    return std::log(u / (1.0 - u));
+}
+
+inline void init_gp_lengthscales(std::vector<double>& q,
+                                 const ModelData& data,
+                                 const ParamLayout& layout) {
+    if (layout.logit_phi_tvc_gp_start >= 0) {
+        const double l0 = gp_phi_logit_init(data.tvc_data.time_values,
+                                            data.tvc_gp_phi_prior_lower,
+                                            data.tvc_gp_phi_prior_upper);
+        if (R_finite(l0)) {
+            for (int j = layout.logit_phi_tvc_gp_start;
+                 j < layout.logit_phi_tvc_gp_end; j++) {
+                q[j] = l0;
+            }
+        }
+    }
+    if (layout.is_temporal_gp && layout.logit_phi_temporal_gp_idx >= 0) {
+        const double l0 =
+            gp_phi_logit_init(data.temporal_gp_data.time_values,
+                              data.temporal_gp_phi_prior_lower,
+                              data.temporal_gp_phi_prior_upper);
+        if (R_finite(l0)) q[layout.logit_phi_temporal_gp_idx] = l0;
+    }
+}
+
 inline void init_bounded_support_params(std::vector<double>& q,
                                         const ModelData& data,
                                         const ParamLayout& layout) {
+    init_gp_lengthscales(q, data, layout);
+
     if (!layout.is_multiscale_gp || !data.has_multiscale_gp || data.msgp_is_hsgp) {
         return;
     }
@@ -1048,17 +1196,27 @@ inline Rcpp::CharacterVector sampler_param_names(
             set(q, "svc_w[" + std::to_string(++u) + "]");
     }
 
-    // Temporally-varying coefficients: per-term log_tau (+ logit_rho for AR1)
-    // then the per-group/term/time field.
+    // Temporally-varying coefficients: per-term log_tau (+ logit_rho for AR1),
+    // or the per-term GP amplitude and lengthscale, then the
+    // per-group/term/time field.
     if (layout.has_tvc && data.tvc_data.n_tvc > 0) {
         const int n_tvc = data.tvc_data.n_tvc;
-        for (int j = 0; j < n_tvc; j++)
-            set(layout.log_tau_tvc_start + j,
-                "log_tau_tvc[" + std::to_string(j + 1) + "]");
+        if (layout.log_tau_tvc_start >= 0)
+            for (int j = 0; j < n_tvc; j++)
+                set(layout.log_tau_tvc_start + j,
+                    "log_tau_tvc[" + std::to_string(j + 1) + "]");
         if (layout.logit_rho_tvc_start >= 0)
             for (int j = 0; j < n_tvc; j++)
                 set(layout.logit_rho_tvc_start + j,
                     "logit_rho_tvc[" + std::to_string(j + 1) + "]");
+        if (layout.log_sigma2_tvc_gp_start >= 0)
+            for (int j = 0; j < n_tvc; j++)
+                set(layout.log_sigma2_tvc_gp_start + j,
+                    "log_sigma2_tvc_gp[" + std::to_string(j + 1) + "]");
+        if (layout.logit_phi_tvc_gp_start >= 0)
+            for (int j = 0; j < n_tvc; j++)
+                set(layout.logit_phi_tvc_gp_start + j,
+                    "logit_phi_tvc_gp[" + std::to_string(j + 1) + "]");
         int u = 0;
         for (int q = layout.tvc_w_start; q < layout.tvc_w_end; q++)
             set(q, "tvc_w[" + std::to_string(++u) + "]");

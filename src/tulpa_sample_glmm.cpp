@@ -36,6 +36,7 @@
 #include "vi_meanfield.h"          // compute_meanfield_elbo_grad + entropy grad
 #include "vi_lowrank.h"            // compute_lowrank_elbo_grad + entropy grad
 #include "vi_fullrank.h"           // compute_fullrank_elbo_grad + entropy grad
+#include "sampler_log_prob.h"       // tulpa::sampler_log_prob_rows
 
 using tulpa_hmc::ModelData;
 using tulpa_hmc::ParamLayout;
@@ -163,8 +164,8 @@ Rcpp::List cpp_vi_elbo_grad(
     tulpa::SamplerModelInputs in;
     std::vector<double> offset = tulpa::as_offset_vec(offset_nullable, N);
     tulpa::build_sampler_model_inputs(
-        in, y, n_trials, X, family, phi, sigma_beta, offset, /*sigma_re_scale=*/2.5,
-        R_NilValue, R_NilValue, R_NilValue);
+        in, y, n_trials, X, family, phi, /*phi2=*/NA_REAL, sigma_beta, offset,
+        /*sigma_re_scale=*/2.5, R_NilValue, R_NilValue, R_NilValue);
     const int D = in.layout.total_params;
 
     std::mt19937 rng((unsigned int)seed);
@@ -280,6 +281,9 @@ Rcpp::List cpp_tulpa_sample_glmm(
     int vi_max_iter = 10000,
     int vi_n_draws = 2000,
     double vi_max_grad_norm = 10.0,
+    double vi_tol_grad = 1e-4,
+    double vi_tol_rel_elbo = 0.01,
+    int vi_patience = 50,
     Rcpp::Nullable<Rcpp::NumericVector> offset_nullable = R_NilValue,
     Rcpp::Nullable<Rcpp::List> re_spec = R_NilValue,
     Rcpp::Nullable<Rcpp::List> spatial_spec = R_NilValue,
@@ -296,7 +300,8 @@ Rcpp::List cpp_tulpa_sample_glmm(
     bool ess_adapt_during_warmup = false,
     int ess_adapt_interval = 50,
     int ess_joint_sigma_re = -1,
-    double ess_joint_proposal_sd = 0.1
+    double ess_joint_proposal_sd = 0.1,
+    std::string checkpoint_path = ""
 ) {
     // Argument groups (kept out of the signature so Rcpp::compileAttributes does
     // not fold the comments into the generated wrapper):
@@ -306,7 +311,10 @@ Rcpp::List cpp_tulpa_sample_glmm(
     //       mclmc_adjusted
     //   SMC:   n_particles, n_mcmc_steps, ess_threshold
     //   VI:    vi_variant (0=meanfield,1=lowrank,2=fullrank,3=auto),
-    //       vi_mc_samples, vi_max_iter, vi_n_draws, vi_max_grad_norm
+    //       vi_mc_samples, vi_max_iter, vi_n_draws, vi_max_grad_norm,
+    //       vi_tol_grad / vi_tol_rel_elbo / vi_patience (the stopping rule --
+    //       the budget is rarely what binds, so these are the knobs that
+    //       decide where a VI fit actually stops)
     //   Structure: re_spec / spatial_spec / temporal_spec (null => absent),
     //       sigma_re_scale (half-Cauchy scale on the RE / BYM2 SDs).
     const int N = y.size();
@@ -316,9 +324,8 @@ Rcpp::List cpp_tulpa_sample_glmm(
     tulpa::SamplerModelInputs in;
     std::vector<double> offset = tulpa::as_offset_vec(offset_nullable, N);
     tulpa::build_sampler_model_inputs(
-        in, y, n_trials, X, family, phi, sigma_beta, offset, sigma_re_scale,
+        in, y, n_trials, X, family, phi, phi2, sigma_beta, offset, sigma_re_scale,
         re_spec, spatial_spec, temporal_spec, svc_spec, tvc_spec, zi_spec);
-    in.resp.phi2 = phi2;   // NA_REAL is a NaN => family default (e.g. t df = 4)
     const int D = in.layout.total_params;
     std::vector<double> init(D, 0.0);
     tulpa::init_bounded_support_params(init, in.data, in.layout);
@@ -343,6 +350,14 @@ Rcpp::List cpp_tulpa_sample_glmm(
         Rcpp::stop("a warm start is only carried by the NUTS/HMC kernel; "
                    "backend '%s' takes neither an initial position nor an "
                    "inverse-mass diagonal.", backend.c_str());
+    }
+    // Checkpoint/resume is per-chain (ChainCheckpoint, keyed on chain id), so it
+    // is a NUTS/HMC-only knob like the warm start above: refuse rather than
+    // silently drop it on a backend with no chain concept.
+    if (!is_nuts && !checkpoint_path.empty()) {
+        Rcpp::stop("checkpoint/resume is only carried by the NUTS/HMC kernel; "
+                   "backend '%s' has no per-chain state to checkpoint.",
+                   backend.c_str());
     }
 
     Rcpp::List out;
@@ -398,7 +413,7 @@ Rcpp::List cpp_tulpa_sample_glmm(
         std::vector<tulpa_hmc::HMCResultCpp> chains = tulpa_hmc::run_hmc_parallel_chains_cpp(
             q_init, inv_metric, in.data, n_iter, n_warmup, /*L=*/0, n_chains,
             (unsigned int)seed, verbose, max_treedepth,
-            metric, adapt_delta, /*riemannian=*/0, "");
+            metric, adapt_delta, /*riemannian=*/0, checkpoint_path);
         tulpa_hmc::StackedChains st = tulpa_hmc::stack_hmc_chains(chains, n_chains, D);
         if (st.n_total > 0) Rcpp::colnames(st.draws) = cn;
         out = Rcpp::List::create(
@@ -412,6 +427,11 @@ Rcpp::List cpp_tulpa_sample_glmm(
             Rcpp::Named("accept_prob") = st.accept_prob,
             Rcpp::Named("divergent") = st.divergent,
             Rcpp::Named("treedepth") = st.treedepth,
+            Rcpp::Named("energy") = st.energy,
+            // Post-warmup saturations, summed over chains: written and
+            // checkpointed but read by nothing until gcol33/tulpa#703.
+            Rcpp::Named("n_max_treedepth") = st.n_max_treedepth,
+            Rcpp::Named("n_softabs_rescued") = st.n_softabs_rescued,
             Rcpp::Named("epsilon") = st.epsilon,
             Rcpp::Named("sampler") = "nuts");
         return out;
@@ -448,6 +468,8 @@ Rcpp::List cpp_tulpa_sample_glmm(
             Rcpp::Named("means") = col_means(draws),
             Rcpp::Named("n_samples") = draws.nrow(),
             Rcpp::Named("n_params") = D,
+            Rcpp::Named("log_prob") = tulpa::sampler_log_prob_rows(draws, in.data, in.layout),
+            Rcpp::Named("log_prob_kernel") = Rcpp::wrap(res.log_lik),
             Rcpp::Named("avg_slice_evals") = res.avg_slice_evals,
             Rcpp::Named("n_slice_exhausted") = res.n_slice_exhausted,
             Rcpp::Named("n_degenerate_scale") = res.n_degenerate_scale,
@@ -475,6 +497,8 @@ Rcpp::List cpp_tulpa_sample_glmm(
         out = Rcpp::List::create(
             Rcpp::Named("draws") = draws, Rcpp::Named("means") = col_means(draws),
             Rcpp::Named("n_samples") = draws.nrow(), Rcpp::Named("n_params") = D,
+            Rcpp::Named("log_prob") = tulpa::sampler_log_prob_rows(draws, in.data, in.layout),
+            Rcpp::Named("log_prob_kernel") = Rcpp::wrap(res.log_lik),
             Rcpp::Named("final_epsilon") = res.epsilon_history.empty() ? 0.0
                                             : res.epsilon_history.back(),
             Rcpp::Named("sampler") = "sghmc");
@@ -498,6 +522,8 @@ Rcpp::List cpp_tulpa_sample_glmm(
         out = Rcpp::List::create(
             Rcpp::Named("draws") = draws, Rcpp::Named("means") = col_means(draws),
             Rcpp::Named("n_samples") = draws.nrow(), Rcpp::Named("n_params") = D,
+            Rcpp::Named("log_prob") = tulpa::sampler_log_prob_rows(draws, in.data, in.layout),
+            Rcpp::Named("log_prob_kernel") = Rcpp::wrap(res.log_lik),
             Rcpp::Named("sampler") = "sgld");
         return out;
     }
@@ -515,6 +541,8 @@ Rcpp::List cpp_tulpa_sample_glmm(
         out = Rcpp::List::create(
             Rcpp::Named("draws") = draws, Rcpp::Named("means") = col_means(draws),
             Rcpp::Named("n_samples") = draws.nrow(), Rcpp::Named("n_params") = D,
+            Rcpp::Named("log_prob") = tulpa::sampler_log_prob_rows(draws, in.data, in.layout),
+            Rcpp::Named("log_prob_kernel") = Rcpp::wrap(res.log_lik),
             Rcpp::Named("sampler") = mclmc_adjusted ? "mamclmc" : "mclmc");
         return out;
     }
@@ -535,6 +563,9 @@ Rcpp::List cpp_tulpa_sample_glmm(
         out = Rcpp::List::create(
             Rcpp::Named("draws") = draws, Rcpp::Named("means") = col_means(draws),
             Rcpp::Named("n_samples") = M, Rcpp::Named("n_params") = D,
+            // The final particle set is resampled and equally weighted
+            // (smc_sampler.h), so a plain mean of these is the posterior mean.
+            Rcpp::Named("log_prob") = tulpa::sampler_log_prob_rows(draws, in.data, in.layout),
             Rcpp::Named("log_weights") = Rcpp::wrap(res.log_weights),
             Rcpp::Named("log_evidence") =
                 res.log_evidence_valid ? res.log_evidence : NA_REAL,
@@ -547,6 +578,8 @@ Rcpp::List cpp_tulpa_sample_glmm(
         cfg.variant = static_cast<tulpa::vi::VIVariant>(vi_variant);
         cfg.max_iter = vi_max_iter; cfg.mc_samples = vi_mc_samples;
         cfg.max_grad_norm = vi_max_grad_norm;
+        cfg.tol_grad = vi_tol_grad; cfg.tol_rel_elbo = vi_tol_rel_elbo;
+        cfg.patience = vi_patience;
         cfg.seed = (unsigned int)seed; cfg.verbose = verbose;
         tulpa::vi::validate_vi_config(cfg);
         tulpa::vi::VIResult res = tulpa::vi::fit_vi(in.data, in.layout, D, cfg, nullptr);
@@ -567,9 +600,24 @@ Rcpp::List cpp_tulpa_sample_glmm(
         out = Rcpp::List::create(
             Rcpp::Named("draws") = draws, Rcpp::Named("means") = col_means(draws),
             Rcpp::Named("n_samples") = draws.nrow(), Rcpp::Named("n_params") = D,
+            Rcpp::Named("log_prob") = tulpa::sampler_log_prob_rows(draws, in.data, in.layout),
             Rcpp::Named("elbo") = res.final_elbo,
-            Rcpp::Named("pareto_k") = res.psis_k,
+            // -1 is the kernel's "not computed" sentinel (vi_types.h), and it
+            // is FINITE: passed through, .tulpa_khat_band() read it as a k-hat
+            // and banded it "good", so a diagnostic that never ran reported a
+            // clean pass (gcol33/tulpa#709). A genuine shape CAN be negative,
+            // so the sentinel is translated here, at the one place it is known
+            // to be one, rather than guarded downstream by a sign test.
+            Rcpp::Named("pareto_k") =
+                (res.psis_k < 0.0) ? NA_REAL : res.psis_k,
             Rcpp::Named("converged") = res.converged,
+            // What the run actually did, not just that it stopped: the
+            // iteration it stopped at and the rule that stopped it. Without
+            // these a stop far short of the budget is indistinguishable from
+            // one that used it (gcol33/tulpa#821).
+            Rcpp::Named("vi_iterations") = res.iterations,
+            Rcpp::Named("converged_reason") =
+                res.converged_reason.empty() ? "max_iter" : res.converged_reason,
             Rcpp::Named("sampler") = "vi");
         return out;
     }

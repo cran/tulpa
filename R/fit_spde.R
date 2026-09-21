@@ -17,7 +17,7 @@
 #' @param sigma Marginal standard deviation. If NULL, uses nested Laplace.
 #' @param nested_laplace Logical. If TRUE (default when range/sigma are NULL),
 #'   use nested Laplace approximation over hyperparameters.
-#' @param phi Dispersion parameter (negbin only).
+#' @template phi
 #' @param offset Optional fixed additive term on the linear predictor
 #'   (`eta = offset + X beta + A w`), length `length(y)`; `NULL` -> no offset.
 #' @param re_idx,n_re_groups,sigma_re Optional single iid random-intercept
@@ -33,6 +33,13 @@
 #'   fixed, the Matern hyperparameters). `mode = "nuts"` does not support an
 #'   `offset` or a random-effect term, and its sampler knobs pass via `control`
 #'   (see [tulpa_nuts_spde()]); it returns that sampler's draws object.
+#' @param hyperprior `"proper"` (default) or `"flat"`, the prior the nested
+#'   integration puts on `(range, sigma)`. `"proper"` carries the spec's PC
+#'   range and PC sigma priors. `"flat"` keeps only the anchors the spec was
+#'   given explicitly (`prior_range` / `prior_sigma` passed to
+#'   [spatial_spde()]); an axis whose anchor was defaulted carries no density,
+#'   is named in `log_hyperprior_declined` as `"flat_hyperprior"`, and the
+#'   evidence declines. Not read by `mode = "nuts"`, where `"flat"` errors.
 #' @param control A named list of numerical / tuning knobs (statistical
 #'   arguments stay in the signature above). Recognized entries:
 #'   \itemize{
@@ -50,8 +57,14 @@
 #'       Pareto-\eqn{\hat{k}} accuracy diagnostic (`$pareto_k`) by importance
 #'       sampling the joint `(range, sigma)` posterior on the log scale against
 #'       the Gaussian proposal that orients the integration. See [tulpa_psis()].
-#'     \item `k_samples`: importance draws for `diagnose_k`. Default 200, each
-#'       one extra batched SPDE marginal evaluation.
+#'     \item `k_samples`: importance draws for `diagnose_k`. Default 500, each
+#'       one extra batched SPDE marginal evaluation. It is a precision knob:
+#'       the GPD tail size is held at the fraction the default budget implies,
+#'       so a larger budget sharpens the same k-hat rather than moving it to a
+#'       deeper quantile of the weight distribution (gcol33/tulpa#631).
+#'     \item `k_tail_points`: expert override for that tail size, in upper-tail
+#'       order statistics. Silently capped at 20% of the draws, beyond which
+#'       body ratios enter the tail and bias the shape.
 #'     \item `mode_find`: tuning for the outer `(range, sigma)` mode-find under
 #'       `method = "ccd"`, as `list(factr =, ndeps =, maxit =)`; supply any
 #'       subset. `ndeps` is the central-difference step for `optim()`'s
@@ -80,6 +93,11 @@
 #'     \item `spatial`: the spatial specification (for prediction)
 #'     \item `pareto_k`, `pareto_k_is_ess`: outer Pareto-\eqn{\hat{k}} and its
 #'       importance-sampling ESS (`NA` when `diagnose_k = FALSE`)
+#'     \item `pareto_k_proposal_source`, `pareto_k_first_pass`: which proposal
+#'       family the reported k-hat came from (several candidates are scored and
+#'       the best kept), and the k-hat of the first pass -- the proposal exactly
+#'       as placed, before refinement. A large gap says the placement is poor
+#'       even where the verdict is fine.
 #'     \item `nested`: nested Laplace results (if used)
 #'   }
 #'
@@ -116,9 +134,17 @@ fit_spde <- function(y, X, spatial,
                      phi = 1.0, offset = NULL,
                      re_idx = NULL, n_re_groups = 0L, sigma_re = 1.0,
                      mode = c("laplace", "nuts"),
+                     hyperprior = c("proper", "flat"),
                      control = list()) {
 
   mode <- match.arg(mode)
+  family <- .canonical_family(family)
+  .family_or_stop(family)
+  hyperprior <- .hp_choice(match.arg(hyperprior))
+  if (mode == "nuts" && identical(hyperprior, "flat")) {
+    stop("`hyperprior = \"flat\"` is not read by mode = 'nuts', which samples ",
+         "(range, sigma) under the spec's PC priors.", call. = FALSE)
+  }
   if (!inherits(spatial, "tulpa_spatial") || spatial$type != "spde") {
     stop("spatial must be an SPDE tulpa_spatial object", call. = FALSE)
   }
@@ -149,11 +175,26 @@ fit_spde <- function(y, X, spatial,
   n_grid     <- as.integer(control$n_grid %||% 5L)
   diagnose_k <- isTRUE(control$diagnose_k %||% TRUE)
   k_samples  <- as.integer(control$k_samples %||% .nl_diag("k_samples"))
+  k_tail_pts <- control$k_tail_points
   mode_find  <- .nl_mode_find_tuning("spde", control)
   max_iter   <- as.integer(control$max_iter %||% 100L)
   tol        <- control$tol %||% 1e-6
   n_threads  <- as.integer(control$n_threads %||% 1L)
   checkpoint <- control$checkpoint
+  # The cheap screen, the per-row predictive-variance loop and the two
+  # correction requests, resolved exactly as tulpa_nested_laplace() resolves
+  # them. They were unreachable on this path until the SPDE entry went through
+  # the shared bundle (gcol33/tulpa#699), which hardcoded prune_tol = 0.
+  prune       <- isTRUE(control$prune %||% FALSE)
+  prune_tol   <- .nl_prune_tol_from_control(
+    control,
+    .nl_check_prune_tol(control$prune_tol %||% .nl_screen("prune_tol")))
+  prune_tol_eff <- if (prune) prune_tol else 0
+  screen_it   <- .nl_check_screen_iters(
+    control$screen_iters %||% .nl_screen("iters"))
+  fitted_var  <- isTRUE(control$fitted_var %||% TRUE)
+  debias_req  <- control$subspace_debias
+  cila_req    <- control$cila
 
   if (!is.null(offset)) {
     offset <- as.numeric(offset)
@@ -253,18 +294,50 @@ fit_spde <- function(y, X, spatial,
       G1_x = sp$G1_x, G1_i = sp$G1_i, G1_p = sp$G1_p,
       range_grid = range_vec, sigma_grid = sigma_vec,
       nu = sp$nu,
-      family = family, phi = phi,
+      family = family, phi = .phi_to_kernel(family, phi),
       max_iter = max_iter, tol = tol, n_threads = n_threads,
       checkpoint_path = .ckpt$path,
-      offset_nullable = offset
+      offset_nullable = offset,
+      debias = debias_req, cila = cila_req,
+      prune_tol = prune_tol_eff, screen_iters = screen_it,
+      compute_fitted_var = fitted_var,
+      # The grid and the CCD design weigh a cell by its marginal plus the PC
+      # prior on (log range, log sigma), so a screened solve ranks with both.
+      screen_log_offset = if (prune_tol_eff > 0)
+                            .spde_log_hyperprior(range_vec, sigma_vec, sp,
+                                                 hyperprior)
     )
     res
   }
 
+  # Analytic (log range, log sigma) gradient of the log-marginal, for the CCD
+  # outer mode-find's L-BFGS-B (fit_spde_nested_ccd() -> .nl_lbfgsb_mode_find()).
+  # cpp_spde_laplace_gradient() implements exactly the alpha = 2 (nu = 1)
+  # operator with no offset and no random-effect term (gcol33/tulpa#809);
+  # outside that scope the mode-find keeps its central-difference gradient.
+  spde_log_marginal_grad <- if (!is_frac && isTRUE(all.equal(sp$nu, 1)) &&
+                                is.null(offset) && !has_re) {
+    function(log_range, log_sigma) {
+      g <- cpp_spde_laplace_gradient(
+        y = y, n_trials = n_trials, X = X,
+        A_x = sp$A_x, A_i = sp$A_i, A_p = sp$A_p,
+        n_obs = n_obs, n_mesh = sp$n_mesh,
+        C0_diag = sp$C0_diag,
+        G1_x = sp$G1_x, G1_i = sp$G1_i, G1_p = sp$G1_p,
+        log_range = log_range, log_sigma = log_sigma,
+        nu = sp$nu, family = family, phi = .phi_to_kernel(family, phi),
+        max_iter = max_iter, tol = tol, n_threads = n_threads
+      )
+      c(g$grad_log_range, g$grad_log_sigma)
+    }
+  } else NULL
+
   fit <- if (nested_laplace && (is.null(range) || is.null(sigma))) {
     if (method == "grid") {
       fit_spde_nested_grid(spde_log_marginal, sp, n_grid, spatial,
-                           diagnose_k = diagnose_k, k_samples = k_samples)
+                           diagnose_k = diagnose_k, k_samples = k_samples,
+                           k_tail_points = k_tail_pts,
+                           hyperprior = hyperprior)
     } else {
       fit_spde_nested_ccd(spde_log_marginal,
                                  fit_spde_single = function(r, s) {
@@ -281,7 +354,10 @@ fit_spde <- function(y, X, spatial,
                                  },
                                  sp = sp, spatial = spatial,
                           diagnose_k = diagnose_k, k_samples = k_samples,
-                          mode_find = mode_find)
+                          k_tail_points = k_tail_pts,
+                          mode_find = mode_find,
+                          hyperprior = hyperprior,
+                          spde_log_marginal_grad = spde_log_marginal_grad)
     }
   } else {
     # --- Single-point Laplace at fixed hyperparameters ---
@@ -312,10 +388,10 @@ fit_spde <- function(y, X, spatial,
   }
 
   # Prediction support (predict.tulpa_fit se.fit): the family and the
-  # kernel-convention dispersion (gaussian/lognormal: residual SD -- the
-  # front-door tulpa() fit additionally carries $phi as the variance).
-  fit$family     <- fit$family %||% family
-  fit$phi_kernel <- phi
+  # dispersion, in the one engine convention (gaussian / lognormal: the
+  # residual variance), the same `$phi` a front-door tulpa() fit carries.
+  fit$family <- fit$family %||% family
+  fit$phi    <- phi
 
   # Fixed-effect mode + marginal curvature so the generic accessors (coef /
   # summary / confint / vcov / predict) work on a direct or auto-mode SPDE
@@ -341,23 +417,23 @@ fit_spde <- function(y, X, spatial,
     fit$sigma           <- fit$sigma %||% sigma_hy
   }
   if (!is.null(fit$mode)) {
-    # glmm_weights follows the R-registry dispersion convention (variance
-    # for gaussian / lognormal); this door's `phi` is the kernel SD.
-    phi_w <- .phi_to_registry(family, phi)
     range_hy <- fit$range %||% fit$nested$range_mean %||% fit$nested$range_best
     sigma_hy <- fit$sigma %||% fit$nested$sigma_mean %||% fit$nested$sigma_best
     fit$H_beta <- fit$H_beta %||% tryCatch(
       .marginal_H_beta_spde(
         mode = fit$mode, X = X, spatial = sp,
-        family = family, phi = phi_w,
+        family = family, phi = phi,
         n_trials = n_trials, offset = offset,
         range_val = range_hy, sigma_val = sigma_hy,
-        re_idx = no_re_idx, n_re_groups = no_re_n_groups, sigma_re = no_re_sigma
+        re_idx = no_re_idx, n_re_groups = no_re_n_groups, sigma_re = no_re_sigma,
+        y = y
       ),
       error = function(e) NULL
     )
   }
 
   .finalize_fit(fit, backend = "spde",
-                n_fixed = ncol(X), fixed_names = colnames(X))
+                n_fixed = ncol(X), fixed_names = colnames(X),
+                data = list(y = y, n_trials = n_trials, model_matrix = X,
+                           family = family, offset = offset, phi = phi))
 }

@@ -459,10 +459,12 @@ plot_pairs <- function(fit, pars = NULL, highlight_divergent = TRUE,
     stop("fit must be a tulpa_fit object", call. = FALSE)
   }
 
-  # Get draws
-  draws <- fit$draws
+  # Get draws (pooled 2-D with colnames; handles a 3-D [iter, chain, param] fit
+  # and fills any NULL/blank parameter name positionally, gcol33/tulpa#780)
+  draws <- .tulpa_pooled_draws(fit)
   if (is.null(draws)) {
-    stop("No draws available in fit object", call. = FALSE)
+    message(.tulpa_no_draws_note(fit, "plot_pairs"))
+    return(invisible(NULL))
   }
 
   # Select parameters
@@ -470,11 +472,19 @@ plot_pairs <- function(fit, pars = NULL, highlight_divergent = TRUE,
     # Select variance parameters and key fixed effects
     all_pars <- colnames(draws)
     var_pars <- grep("^(sigma|phi|tau|rho)", all_pars, value = TRUE)
-    # Fixed effects: the fit's canonical fixed-effect names (every tulpa_fit sets
-    # $fixed_names), so this works for any model package. Fall back to a generic
-    # beta / intercept pattern -- covering ratio's beta_num / beta_denom -- when
-    # the names are unavailable or do not line up with the draws columns.
-    beta_pars <- intersect(fit$fixed_names %||% character(0), all_pars)
+    # Fixed effects are always the leading columns of `draws` by convention
+    # (`.pg_as_chain`, the tgmrf joint samplers, tulpa()'s own layout), so
+    # position is tried first: a NULL or blank fixed name that
+    # `.tulpa_pooled_draws()` has since filled in positionally (e.g. "param1")
+    # no longer name-matches `fit$fixed_names` itself (gcol33/tulpa#780). Fall
+    # back to the name match, then a generic beta / intercept pattern --
+    # covering ratio's beta_num / beta_denom -- when `n_fixed` is absent.
+    beta_pars <- if (!is.null(fit$n_fixed) && fit$n_fixed >= 1L &&
+                     fit$n_fixed <= length(all_pars)) {
+      all_pars[seq_len(fit$n_fixed)]
+    } else {
+      intersect(fit$fixed_names %||% character(0), all_pars)
+    }
     if (!length(beta_pars)) {
       beta_pars <- grep("^(beta[_[]|\\(Intercept\\))", all_pars, value = TRUE)
     }
@@ -496,7 +506,7 @@ plot_pairs <- function(fit, pars = NULL, highlight_divergent = TRUE,
   # Add divergence indicator if available
   has_divergent <- FALSE
   if (highlight_divergent && (fit$backend %||% "") == "hmc") {
-    div_idx <- fit$diagnostics$divergent_idx
+    div_idx <- .tulpa_divergent_idx(fit)
     if (!is.null(div_idx) && length(div_idx) > 0) {
       draws_subset$divergent <- FALSE
       draws_subset$divergent[div_idx] <- TRUE
@@ -534,10 +544,78 @@ plot_pairs <- function(fit, pars = NULL, highlight_divergent = TRUE,
 }
 
 
+# The one read of a fit's divergence record, so the count and the row indices
+# cannot disagree on the same object: `plot_divergences()` calls both in
+# sequence and used to be able to believe divergences exist while reporting
+# their indices unavailable (gcol33/tulpa#840).
+#
+# Returns `n` (0 when nothing is recorded) and `idx`, the row indices where the
+# record is a per-draw flag vector or an index vector, NULL where it is only a
+# count. Every sampler in this package writes the top-level `$divergent`
+# vector, row-aligned with `$log_prob` / `$chain_id` (gcol33/tulpa#783); the
+# `$diagnostics$*` shapes are the ones a consumer package may assemble instead.
+# A vector-shaped record is preferred over a count because it answers both
+# questions; among vectors the engine's own field is read first.
+.tulpa_divergence_record <- function(fit) {
+  d <- fit$diagnostics
+  flags <- function(v) {
+    i <- which(as.logical(v))
+    list(n = length(i), idx = i)
+  }
+  if (!is.null(fit$divergent))   return(flags(fit$divergent))
+  if (!is.null(d$divergent))     return(flags(d$divergent))
+  if (!is.null(d$divergent_idx)) {
+    i <- as.integer(d$divergent_idx)
+    return(list(n = length(i), idx = i))
+  }
+  if (!is.null(d$n_divergent))   return(list(n = as.integer(d$n_divergent), idx = NULL))
+  if (!is.null(fit$n_divergent)) return(list(n = as.integer(fit$n_divergent), idx = NULL))
+  list(n = 0L, idx = NULL)
+}
+
+
+# Divergent-transition row indices, or NULL when the fit records only a count.
+.tulpa_divergent_idx <- function(fit) {
+  .tulpa_divergence_record(fit)$idx
+}
+
+
+# Per-chain E-BFMI (Betancourt): the variance of the within-chain energy
+# TRANSITION over the variance of the marginal energy, read off the
+# top-level `$energy` vector every HMC/NUTS sampler writes (gcol33/tulpa#783).
+# Diffing across a chain boundary would compare unrelated trajectories, so
+# each chain's energy is diffed separately (`$chain_id`, defaulting to one
+# chain when absent) and the WORST chain is reported -- one badly-exploring
+# chain is enough to distrust the fit. Returns a list(value=, energy_diff=)
+# with `value = NA_real_` when there is nothing to compute (fewer than two
+# samples in every chain), `energy_diff` the pooled within-chain transitions
+# (for plotting).
+.tulpa_energy_bfmi <- function(fit) {
+  energy <- fit$energy
+  if (is.null(energy) || length(energy) < 10) {
+    return(list(value = NA_real_, energy_diff = numeric(0)))
+  }
+  cid <- fit$chain_id
+  if (is.null(cid) || length(cid) != length(energy)) cid <- rep(1L, length(energy))
+  by_chain <- split(energy, cid)
+  diffs <- lapply(by_chain, function(e) if (length(e) > 1L) diff(e) else numeric(0))
+  bfmi_per_chain <- vapply(seq_along(by_chain), function(i) {
+    e <- by_chain[[i]]; ed <- diffs[[i]]
+    if (length(ed) < 1L || !is.finite(stats::var(e)) || stats::var(e) == 0) {
+      return(NA_real_)
+    }
+    stats::var(ed) / stats::var(e)
+  }, numeric(1))
+  bfmi_val <- if (all(is.na(bfmi_per_chain))) NA_real_ else min(bfmi_per_chain, na.rm = TRUE)
+  list(value = bfmi_val, energy_diff = unlist(diffs, use.names = FALSE))
+}
+
+
 # Build a bayesplot `np`-style data frame flagging divergent transitions, keyed
 # by (Iteration, Chain) to align with an [iter, chain, param] draws array.
-# Divergence row indices in `fit$diagnostics$divergent_idx` are mapped from the
-# pooled chain-major draws onto the per-chain (iteration, chain) grid.
+# Divergence row indices come from the top-level `fit$divergent` vector every
+# sampler writes, mapped from the pooled chain-major draws onto the per-chain
+# (iteration, chain) grid.
 .tulpa_divergent_np <- function(fit, n_iter, n_chain) {
   np <- data.frame(
     Iteration = rep(seq_len(n_iter), times = n_chain),
@@ -545,7 +623,7 @@ plot_pairs <- function(fit, pars = NULL, highlight_divergent = TRUE,
     Parameter = factor("divergent__"),
     Value     = 0
   )
-  div_idx <- fit$diagnostics$divergent_idx
+  div_idx <- .tulpa_divergent_idx(fit)
   if (is.null(div_idx) || length(div_idx) == 0L) return(np)
 
   cid <- fit$chain_id
@@ -653,14 +731,18 @@ plot_divergences <- function(fit, pars = NULL, type = c("parcoord", "scatter")) 
     return(invisible(NULL))
   }
 
-  div_idx <- fit$diagnostics$divergent_idx
+  div_idx <- .tulpa_divergent_idx(fit)
   if (is.null(div_idx) || length(div_idx) == 0) {
     message("Divergent indices not available")
     return(invisible(NULL))
   }
 
   # Get draws
-  draws <- fit$draws
+  draws <- .fit_draws(fit)
+  if (is.null(draws)) {
+    message(.tulpa_no_draws_note(fit, "plot_divergences"))
+    return(invisible(NULL))
+  }
 
   # Select parameters
   if (is.null(pars)) {
@@ -851,27 +933,29 @@ plot_energy <- function(fit) {
     return(invisible(NULL))
   }
 
-  # Try to get energy from diagnostics
-  diag <- fit$diagnostics
-  energy <- diag$energy
+  energy <- fit$energy
   if (is.null(energy) || length(energy) < 10) {
     message("Energy values not available in fit object")
     return(invisible(NULL))
   }
 
-  # Compute E-BFMI
-  energy_diff <- diff(energy)
-  e_bfmi <- var(energy_diff) / var(energy)
+  # E-BFMI, per chain (a cross-chain diff would compare unrelated
+  # trajectories); .tulpa_energy_bfmi() reports the worst chain.
+  bfmi <- .tulpa_energy_bfmi(fit)
+  e_bfmi <- bfmi$value
+  energy_diff <- bfmi$energy_diff
 
   # Create data for plotting
   n <- length(energy)
+  nd <- length(energy_diff)
   plot_data <- data.frame(
     value = c(energy, energy_diff),
-    type = rep(c("Marginal E", "E transition"), c(n, n - 1))
+    type = rep(c("Marginal E", "E transition"), c(n, nd))
   )
 
   # Status message
-  status <- if (e_bfmi < 0.3) "WARNING: Low E-BFMI" else "OK"
+  status <- if (is.na(e_bfmi)) "E-BFMI unavailable" else
+    if (e_bfmi < 0.3) "WARNING: Low E-BFMI" else "OK"
 
   if (requireNamespace("ggplot2", quietly = TRUE)) {
     p <- ggplot2::ggplot(plot_data, ggplot2::aes(x = .data$value, fill = .data$type)) +
@@ -1072,10 +1156,9 @@ diagnostic_summary <- function(fit, quiet = FALSE) {
     }
 
     # E-BFMI
-    energy <- fit$diagnostics$energy
-    if (!is.null(energy) && length(energy) > 10) {
-      energy_diff <- diff(energy)
-      result$e_bfmi <- var(energy_diff) / var(energy)
+    bfmi <- .tulpa_energy_bfmi(fit)
+    if (!is.na(bfmi$value)) {
+      result$e_bfmi <- bfmi$value
 
       if (result$e_bfmi < 0.3) {
         status <- if (status == "FAIL") "FAIL" else "WARN"
@@ -1165,7 +1248,7 @@ diagnostic_summary <- function(fit, quiet = FALSE) {
       }
       w <- jf$weights
       if (!is.null(w) && length(w) > 1L && is.finite(sum(w))) {
-        result$quad_ess <- sum(w)^2 / sum(w^2)
+        result$quad_ess <- .nl_grid_ess(w)
         recommendations <- c(recommendations, sprintf(
           paste("Quadrature ESS = %.1f of %d grid nodes (no sampled Pareto",
                 "k-hat for this backend); validate with debias / coverage checks."),
@@ -1385,6 +1468,11 @@ plot_diagnostics <- function(fit, pars = NULL) {
     stop("fit must be a tulpa_fit object", call. = FALSE)
   }
 
+  if (!.tulpa_is_chain(fit)) {
+    message(.tulpa_non_chain_msg(fit))
+    return(invisible(NULL))
+  }
+
   # Check for required packages
   if (!requireNamespace("ggplot2", quietly = TRUE)) {
     message("plot_diagnostics() requires ggplot2. Using individual plot functions instead.")
@@ -1423,7 +1511,7 @@ plot_diagnostics <- function(fit, pars = NULL) {
 
   # Create trace plot
   draws_array <- get_draws_array(fit)$draws
-  if (worst_par %in% dimnames(draws_array)[[3]]) {
+  if (length(worst_par) && worst_par %in% dimnames(draws_array)[[3]]) {
     trace_data <- data.frame(
       iteration = seq_len(dim(draws_array)[1]),
       value = draws_array[, 1, worst_par]
@@ -1441,7 +1529,7 @@ plot_diagnostics <- function(fit, pars = NULL) {
   }
 
   # Bottom right: Energy or ACF
-  if (fit$backend == "hmc" && !is.null(fit$diagnostics$energy)) {
+  if (fit$backend == "hmc" && !is.null(fit$energy)) {
     p_br <- plot_energy(fit)
   } else {
     p_br <- plot_acf(fit, n_pars = 1)
@@ -1624,22 +1712,18 @@ grep_params <- function(pattern, names) {
 #' Number of divergent transitions
 #'
 #' Counts divergent transitions recorded by an HMC/NUTS fit, reading whichever
-#' field the backend populated (`$diagnostics$n_divergent`,
-#' `$diagnostics$divergent_idx`, `$diagnostics$divergent`, or the top-level
-#' `$n_divergent` / `$divergent`).
+#' field the backend populated (the top-level `$divergent` flag vector every
+#' sampler in this package writes, or `$diagnostics$divergent`,
+#' `$diagnostics$divergent_idx`, `$diagnostics$n_divergent`, `$n_divergent`).
+#' It reads the same record [plot_divergences()] locates the divergent rows
+#' from, so the two always agree on one fit.
 #'
 #' @param fit A `tulpa_fit` object.
 #' @return Integer count of divergent transitions (0 if none are recorded).
 #' @seealso [plot_divergences()], [check_diagnostics()]
 #' @export
 n_divergent <- function(fit) {
-  d <- fit$diagnostics
-  if (!is.null(d$n_divergent))   return(as.integer(d$n_divergent))
-  if (!is.null(d$divergent_idx)) return(length(d$divergent_idx))
-  if (!is.null(d$divergent))     return(sum(as.logical(d$divergent), na.rm = TRUE))
-  if (!is.null(fit$n_divergent)) return(as.integer(fit$n_divergent))
-  if (!is.null(fit$divergent))   return(sum(as.logical(fit$divergent), na.rm = TRUE))
-  0L
+  .tulpa_divergence_record(fit)$n
 }
 
 

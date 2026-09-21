@@ -126,7 +126,7 @@
             if (!is.null(detail)) paste0(" (", detail, ")") else "",
             "; k-hat is permanently unavailable for this family -- read the",
             " quadrature ESS instead"),
-        draws_too_few = "too few importance draws to fit the GPD tail; raise diagnose_draws",
+        draws_too_few = "too few importance draws to fit the GPD tail; raise control$k_samples",
         grid_too_small = with_detail("the outer grid / weights cannot support a proposal"),
         no_varying_axis = "every outer axis is pinned to a single value; there is nothing to sample along",
         degenerate_proposal = with_detail(
@@ -221,7 +221,14 @@
 # body ratios into the tail: lower variance but a BIASED k-hat and a falsely
 # reassuring CI). This cap is SILENT; the user-facing warning (with the requested
 # vs used counts) is raised once by the diagnostic driver, not per bootstrap
-# replicate. `tail_points` is not a precision knob; the draw count `S` is.
+# replicate. `tail_points` is not a precision knob; the draw count `S` supplies
+# the tail information. Note that `S` is not a pure precision knob either: this
+# rule's tail FRACTION is `3 / sqrt(S)` once `S` passes 225, so growing `S` moves
+# the fit to a deeper quantile as well as giving it more points, and on a ratio
+# whose log grows super-linearly in the whitened radius the reported shape moves
+# with it (gcol33/tulpa#631). A caller that needs a budget-stable number passes
+# `tail_points` proportional to `S`. The default here stays the published rule,
+# so `tulpa_psis()` continues to reproduce `loo::psis()` exactly.
 .psis_tail_len <- function(S, tail_points = NULL) {
   if (is.null(tail_points)) {
     return(as.integer(ceiling(min(0.2 * S, 3 * sqrt(S)))))
@@ -232,6 +239,83 @@
          call. = FALSE)
   }
   min(req, as.integer(floor(0.2 * S)))
+}
+
+# The OUTER diagnostic's GPD tail size, resolved from its draw budget
+# (gcol33/tulpa#631). `.psis_tail_len()` above stays the published rule and is
+# what `tulpa_psis()` defaults to, because there `S` is a posterior sample size:
+# fixed for a given fit, and growing it legitimately buys a deeper, purer view
+# of the tail. Here `S` is `control$k_samples`, a COST knob the user and the
+# `k_quality` escalation both turn, and the k-hat it produces is read against
+# the FIXED `k_usable` band. Under the published rule the fitted tail fraction
+# is `3 / sqrt(S)` past `S = 225`, so raising the budget moves the fit to a
+# deeper quantile of the weight distribution: measured on a synthetic
+# heavy-tailed outer target the reported shape runs 0.57 / 1.41 / 3.53 / 7.94
+# over 500 to 50000 draws, crossing every band the engine reads. A knob
+# documented as buying precision was choosing the estimand.
+#
+# So the outer paths hold the FRACTION the shipped budget implies, and only the
+# precision moves with the budget. The fraction is not tuned -- it is inherited
+# from `.nl_diag("k_samples")`, so the DEFAULT fit is the published rule
+# evaluated at the default budget, unchanged to the bit (`NULL` is returned
+# there, so the explicit-request path is not even entered). Which fraction is
+# statistically best is a bias-variance question this does not answer and does
+# not need to: the point is that one fit's number does not depend on another
+# fit's budget.
+#
+# The held fraction is taken as a FLOOR under the published rule, never as a
+# replacement for it, so no budget is fitted on fewer tail points than it is
+# today. That matters below the reference budget, where the published rule is in
+# its `S / 5` regime and is the MORE generous of the two: at 200 draws it fits
+# 40 points against the held fraction's 27, and taking the fraction there would
+# have bought a stable estimand by making every cheap diagnostic noisier -- a
+# real cost, measured as a per-arm k-hat crossing the band on
+# `test-joint-pareto-k-proposal.R`'s 200-draw fixture. Under `max()` the fitted
+# fraction is confined to `[13.6%, 20%]` at every budget instead of shrinking
+# without bound (1.3% at 50000, 0.7% at 200000), which is the whole of the
+# defect, and the 20% ceiling is the published rule's own.
+#
+# This is the same rule the `k_quality` precision rung applies to its own
+# doubling (gcol33/tulpa#627), lifted to the budget itself, so that naming a
+# target band -- or paying for a cheaper diagnostic -- does not silently ask a
+# different question.
+# The user-facing half of the 20% PSIS tail ceiling.
+#
+# `.tulpa_psis_k_uncertainty()` applies the cap SILENTLY, by design, so the
+# per-replicate bootstrap re-fits do not each warn. Something has to say it once
+# per fit, and until gcol33/tulpa#692 only the joint driver did -- so on the
+# single-block, SPDE and RE-covariance paths a `control$k_tail_points` past the
+# ceiling was reduced with no signal at all. Called once per fit by each
+# backend's own attach point, never inside `.k_dispatch()`, which runs once per
+# scored subspace.
+#' @keywords internal
+.k_tail_cap_warn <- function(tail_points, n_samples) {
+  if (is.null(tail_points)) return(invisible(NULL))
+  tp <- suppressWarnings(as.integer(tail_points))
+  n  <- suppressWarnings(as.integer(n_samples))
+  if (length(tp) != 1L || is.na(tp) || length(n) != 1L || is.na(n)) {
+    return(invisible(NULL))
+  }
+  cap <- as.integer(floor(0.2 * n))
+  if (tp > cap) {
+    warning(sprintf(paste0(
+      "k_tail_points = %d exceeds the 20%% PSIS tail cap; using %d instead. ",
+      "Increase control$k_samples, not control$k_bootstrap, to obtain more ",
+      "tail information."), tp, cap), call. = FALSE)
+  }
+  invisible(NULL)
+}
+
+.k_outer_tail_points <- function(n_samples, tail_points = NULL) {
+  if (!is.null(tail_points)) return(tail_points)     # idempotent: honour a request
+  ref <- suppressWarnings(as.integer(.nl_diag("k_samples")))
+  n   <- suppressWarnings(as.integer(n_samples))
+  if (length(n) != 1L || is.na(n) || n < 1L ||
+      length(ref) != 1L || is.na(ref) || ref < 1L) return(NULL)
+  held <- as.integer(floor(n * (.psis_tail_len(ref) / ref)))
+  auto <- .psis_tail_len(n)
+  if (held <= auto) return(NULL)                     # the published rule, exactly
+  max(.PSIS_MIN_EVAL, held)
 }
 
 # Reliability band index of a k-hat under configurable boundaries `bands` (sorted
@@ -393,7 +477,8 @@ tulpa_psis <- function(log_ratios, tail_points = NULL) {
 # whose cap now folds the far tail back in whenever it would matter
 
 .nested_outer_pareto_k <- function(log_target, theta_hat, L_scale,
-                                   n_samples = 200L) {
+                                   n_samples = .nl_diag("k_samples"),
+                                   tail_points = NULL) {
   # The per-sample closure is the length-1 case of the batched target the shared
   # core (.nested_is_pareto_k) drives; wrap it (non-finite -> -Inf, matching the
   # old drop) and evaluate every draw (radius_cap = Inf). The sampling transform
@@ -403,17 +488,26 @@ tulpa_psis <- function(log_ratios, tail_points = NULL) {
     lt <- log_target(Umat[i, ])
     if (is.finite(lt)) lt else -Inf
   }, numeric(1))
-  kd <- .nested_is_pareto_k(theta_hat, L_scale, batched,
-                            n_samples = n_samples, radius_cap = Inf)
-  .kdiag_capture(kd$lr, scope = "re_cov nested (hyperparameter Gaussian)")
-  kd
+  # The proposal is the mode-find's own Gaussian, not a set of integration
+  # nodes, so the spec carries no grid: the mixture candidate declines (its bump
+  # width is a grid RESOLUTION, which a CCD design does not have) and the radius
+  # cap stays Inf, which is what this path always used. Moment matching and the
+  # skew-normal rescue apply unchanged.
+  .k_tail_cap_warn(tail_points, n_samples)
+  .k_dispatch_report(
+    .k_cand_spec(lt = batched, u_hat = theta_hat,
+                 Su = L_scale %*% t(L_scale),
+                 proposal_source = "mode_hessian"),
+    n_samples, tail_points = tail_points, scope = "re_cov nested")
 }
 
 # Outer Pareto-k-hat for a grid-integrated nested fit (the generic
 # `tulpa_nested_laplace` path), where the inner marginal is evaluated by a
 # BATCHED re-fit rather than a per-sample closure. Fits a Gaussian proposal to
-# the hyperparameter posterior in the proposal's coordinate, draws `n_samples`,
-# re-evaluates the target in ONE call, and PSIS-smooths log p_target - log q.
+# the hyperparameter posterior in the proposal's coordinate and hands it to the
+# shared candidate dispatch (R/outer_pareto_candidates.R) with the integration
+# nodes attached, so the grid mixture is available here exactly as on the joint
+# path -- the proposal IS the grid's weighted moments.
 # The caller supplies the target so it matches whatever density the integrator
 # actually weights (any change-of-variables Jacobian is the caller's job); the
 # proposal's normalizing constant is common to every draw and drops under PSIS.
@@ -434,8 +528,48 @@ tulpa_psis <- function(log_ratios, tail_points = NULL) {
 # rest of the core -- the GPD-fit floor, the decline vocabulary, the radius
 # envelope, the capture aperture, the PSIS call -- is identical either way, so
 # there is one importance-sampling k-hat in the engine rather than two.
+#' Outer Pareto-k-hat for a batched-target grid-integrated fit
+#'
+#' Outer Pareto-k-hat reliability diagnostic for a grid-integrated nested fit
+#' whose inner marginal comes from a BATCHED re-fit rather than a per-sample
+#' closure: fits a Gaussian proposal at `(theta_hat, L_scale)`, draws from it,
+#' evaluates the caller's batched log-target, applies a radius cap with
+#' heavy-tail escalation, then reports `pareto_k` / `is_ess` via the shared
+#' PSIS/GPD core. This is more than plain PSIS smoothing over an
+#' already-computed log-ratio vector -- see [tulpa_psis()] for that -- because
+#' it also builds the proposal, draws, and evaluates the target.
+#'
+#' @param theta_hat,L_scale Mean and Cholesky scale of the Gaussian proposal
+#'   `N(theta_hat, L_scale L_scale')`, in the integrator's own coordinate
+#'   space (e.g. `(log range, log sigma)` for an SPDE field).
+#' @param log_target_batched Function taking an `S x d` matrix of proposal
+#'   draws and returning the integrator's unnormalized log posterior at each
+#'   row, in that same coordinate space. Any change-of-variables Jacobian is
+#'   the caller's responsibility.
+#' @param n_samples Number of draws from the proposal.
+#' @param radius_cap Whitened-radius cap on evaluated draws (`Inf` keeps
+#'   every draw); draws past the cap are folded back in under heavy-tail
+#'   escalation rather than dropped.
+#' @param return_draws If `TRUE`, include the draws in the returned list.
+#' @param tail_points Optional override for the PSIS tail size; `NULL` uses
+#'   the automatic rule.
+#' @param Z Optional pre-drawn `S x d` whitened sample; `NULL` draws it here.
+#' @return A list with `pareto_k`, `is_ess`, `n_eval`, and `declined` (a
+#'   reason string, or `NULL` when the diagnostic ran to completion).
+#' @seealso [tulpa_psis()]
+#' @export
+tulpa_batched_pareto_k <- function(theta_hat, L_scale, log_target_batched,
+                                    n_samples = .nl_diag("k_samples"),
+                                    radius_cap = Inf, return_draws = FALSE,
+                                    tail_points = NULL, Z = NULL) {
+  .nested_is_pareto_k(theta_hat, L_scale, log_target_batched,
+                      n_samples = n_samples, radius_cap = radius_cap,
+                      return_draws = return_draws, tail_points = tail_points,
+                      Z = Z)
+}
+
 .nested_is_pareto_k <- function(theta_hat, L_scale, log_target_batched,
-                                n_samples = 200L, radius_cap = Inf,
+                                n_samples = .nl_diag("k_samples"), radius_cap = Inf,
                                 return_draws = FALSE, tail_points = NULL,
                                 Z = NULL) {
   d <- length(theta_hat)
@@ -598,27 +732,27 @@ tulpa_psis <- function(log_ratios, tail_points = NULL) {
 # `refit_log_marginal(theta_mat)` maps an S x d CONSTRAINED grid to its S inner
 # log-marginals. Restricted by the caller to a single all-positive-scale axis.
 .nested_grid_pareto_k <- function(u_grid, weights, refit_log_marginal,
-                                  n_samples = 200L) {
+                                  n_samples = .nl_diag("k_samples"),
+                                  tail_points = NULL) {
   u_hat <- as.numeric(crossprod(weights, u_grid))            # weighted mean
   cen   <- sweep(u_grid, 2L, u_hat)
   Su    <- crossprod(cen * weights, cen)                     # weighted covariance
   Su    <- (Su + t(Su)) / 2
-  L <- tryCatch(t(chol(Su)), error = function(e) NULL)
-  if (is.null(L)) {
-    # The grid-weighted covariance is not positive definite -- a collapsed or
-    # single-cell grid leaves nothing to place a proposal with.
-    return(list(pareto_k = NA_real_, is_ess = NA_real_, n_eval = 0L,
-                declined = "degenerate_proposal"))
-  }
-
   lt <- function(U) {
     lm <- refit_log_marginal(exp(U))
     if (length(lm) != nrow(U)) return(rep(NA_real_, nrow(U)))
     lm                                                       # already the u-space target
   }
-  radius_cap <- .nested_grid_radius_cap(u_grid, u_hat, L)
-  kd <- .nested_is_pareto_k(u_hat, L, lt, n_samples, radius_cap = radius_cap)
-  .kdiag_capture(kd$lr,
-                 scope = "nested_laplace grid (single positive-scale axis)")
-  kd
+  # A grid-weighted covariance that is not positive definite -- a collapsed or
+  # single-cell grid -- leaves nothing to place a proposal with; the Cholesky
+  # is attempted inside the scorer, so that case arrives as a
+  # `degenerate_proposal` decline rather than being caught twice.
+  .k_tail_cap_warn(tail_points, n_samples)
+  .k_dispatch_report(
+    .k_cand_spec(lt = lt, u_hat = u_hat, Su = Su, u_grid = u_grid,
+                 w = weights, proposal_source = "grid_moment"),
+    # `tail_points` was accepted here and dropped, so an explicit request never
+    # reached the scorer on this path at all (gcol33/tulpa#692).
+    n_samples, tail_points = tail_points,
+    scope = "nested_laplace grid (single positive-scale axis)")
 }

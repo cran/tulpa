@@ -61,6 +61,16 @@
           }
       }
 
+      // TVC: same reason as SVC. Each (group, term) block's level is removed
+      // by tvc_center_eta() on its way into the linear predictor, so an
+      // uncentred draw would report a different field than the likelihood saw
+      // (gcol33/tulpa#844).
+      if (data.has_tvc && layout.has_tvc && data.tvc_data.n_tvc > 0) {
+          const auto& tv = data.tvc_data;
+          tulpa::s2z_centre_blocks(row + layout.tvc_w_start,
+                                   tv.n_groups * tv.n_tvc, tv.n_times);
+      }
+
       // NC multiscale GP: same transform, once per scale.
       if (data.msgp_parameterization == 1 && data.has_multiscale_gp &&
           layout.is_multiscale_gp && !data.msgp_is_hsgp) {
@@ -95,6 +105,7 @@
       result.n_leapfrog[sample_idx] = iter_n_leapfrog;
       result.divergent[sample_idx] = divergent ? 1 : 0;
       result.treedepth[sample_idx] = iter_treedepth;
+      result.energy[sample_idx] = iter_H0;
 
 
       sample_idx++;

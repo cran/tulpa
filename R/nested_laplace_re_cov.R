@@ -195,7 +195,9 @@
 # prior (.re_cov_joint_prior) -- one source of truth for the PC + LKJ + Jacobian
 # algebra. `full` selects the log-Cholesky (correlated) coordinates with the LKJ
 # term; otherwise log-SD (diagonal) coordinates with no correlation.
-.re_cov_block_logprior <- function(nc, full, prior_sigma, eta) {
+.re_cov_block_logprior <- function(nc, full, prior_sigma = NULL, eta = NULL) {
+  prior_sigma <- prior_sigma %||% .nl_scale_anchor()
+  eta <- eta %||% .nl_hyperprior("lkj_eta")
   U <- prior_sigma[1L]; alpha <- prior_sigma[2L]
   if (U <= 0 || alpha <= 0 || alpha >= 1) {
     stop("`prior_sigma = c(U, alpha)` needs U > 0 and 0 < alpha < 1.",
@@ -206,6 +208,7 @@
 
   if (full) {
     jac_coef <- nc + 2L - seq_len(nc)        # (c + 2 - i) on each log L_ii
+    lkj_norm <- if (nc > 1L) .lkj_log_normaliser(nc, eta) else 0
     function(th) {
       L      <- .re_logchol_to_L(th, nc)
       logLii <- log(diag(L))                 # = th diagonal entries
@@ -213,8 +216,8 @@
       logsig <- log(sig)
       lp <- sum(log_lambda - lambda * sig)   # PC on each marginal SD
       # LKJ: (eta - 1) log det(R), log det(R) = 2 sum log L_ii - 2 sum log sigma_i.
-      if (nc > 1L && eta != 1) {
-        lp <- lp + (eta - 1) * (2 * sum(logLii) - 2 * sum(logsig))
+      if (nc > 1L) {
+        lp <- lp + (eta - 1) * (2 * sum(logLii) - 2 * sum(logsig)) - lkj_norm
       }
       # Change of variables (sigma, R) -> theta.
       lp + sum(jac_coef * logLii) - nc * sum(logsig)
@@ -251,10 +254,10 @@
 #' `prior_sigma = c(U, alpha)` convention also used by the SPDE prior in tulpa.
 #'
 #' LKJ prior (Lewandowski et al. 2009) on the correlation matrix:
-#' `p(R)` proportional to `det(R)^(eta - 1)`. `eta = 1` is uniform over
-#' correlation matrices; `eta > 1` concentrates toward the identity. The
-#' normalizing constant is dropped (constant across the grid, so it cancels when
-#' the integration weights are renormalized).
+#' `p(R) = det(R)^(eta - 1) / c_d(eta)`. `eta = 1` is uniform over correlation
+#' matrices; `eta > 1` concentrates toward the identity. The normalizing
+#' constant is kept, so the prior is a density and a grid's evidence can be read
+#' under it.
 #'
 #' Jacobian (correlated block): with `theta` packing `log L_ii` on the diagonal
 #' and the raw strict-lower entries of `L`, the change of variables from
@@ -265,11 +268,12 @@
 #' differentiation in `test-re-cov-prior.R`.)
 #'
 #' @param n_coefs Number of coefficients `c` in the RE block.
-#' @param prior_sigma `c(U, alpha)` giving `P(sigma_i > U) = alpha` (default
-#'   `c(3, 0.05)`), applied independently to every marginal SD.
-#' @param eta LKJ shape (default 2). `eta = 1` is uniform on correlation
-#'   matrices; larger values favour weaker correlations. Ignored for a diagonal
-#'   block.
+#' @param prior_sigma `c(U, alpha)` giving `P(sigma_i > U) = alpha`, applied
+#'   independently to every marginal SD. `NULL` (the default) is `c(3, 0.01)`,
+#'   the engine's prior on every field scale.
+#' @param eta LKJ shape. `NULL` (the default) is 2. `eta = 1` is uniform on
+#'   correlation matrices; larger values favour weaker correlations. Ignored for
+#'   a diagonal block.
 #' @param correlated `TRUE` (default) for a full covariance block (log-Cholesky
 #'   coordinates, LKJ prior); `FALSE` for a diagonal / uncorrelated block
 #'   (log-SD coordinates, no correlation). For `n_coefs = 1` the two coincide.
@@ -279,11 +283,27 @@
 #'   `log_prior_theta` argument of [tulpa_re_cov_nested()].
 #' @seealso [tulpa_re_cov_nested()]
 #' @export
-re_cov_pc_lkj_prior <- function(n_coefs, prior_sigma = c(3, 0.05), eta = 2,
+re_cov_pc_lkj_prior <- function(n_coefs, prior_sigma = NULL, eta = NULL,
                                 correlated = TRUE) {
   c_re <- as.integer(n_coefs)
   if (c_re < 1L) stop("`n_coefs` must be >= 1.", call. = FALSE)
   .re_cov_block_logprior(c_re, isTRUE(correlated) && c_re > 1L, prior_sigma, eta)
+}
+
+# Log normalizing constant of the LKJ(eta) density on d x d correlation
+# matrices (Lewandowski, Kurowicka & Joe 2009, section 3.2), the c_d in
+# p(R) = det(R)^(eta - 1) / c_d:
+#
+#   c_d = 2^(sum_{k=1}^{d-1} (2 eta - 2 + d - k) (d - k))
+#         * prod_{k=1}^{d-1} B(eta + (d - k - 1) / 2, eta + (d - k - 1) / 2)^(d - k)
+#
+# At d = 2 it is 2^(2 eta - 1) B(eta, eta), the integral of (1 - r^2)^(eta - 1)
+# over (-1, 1). test-re-cov-prior.R integrates the density to one at d = 2, 3.
+.lkj_log_normaliser <- function(d, eta) {
+  k <- seq_len(d - 1L)
+  a <- eta + (d - k - 1) / 2
+  sum((2 * eta - 2 + d - k) * (d - k)) * log(2) +
+    sum((d - k) * lbeta(a, a))
 }
 
 # Joint default prior over all blocks: blocks are a priori independent, so the
@@ -305,25 +325,21 @@ re_cov_pc_lkj_prior <- function(n_coefs, prior_sigma = c(3, 0.05), eta = 2,
 
 # Hyperprior convention on the scale of a Gaussian latent block.
 #
-# icar / rw1 / rw2 / ar1(tau) / iid, the nested-Laplace path's own scale axes
-# (build_blocks_from_spec in src/nested_laplace_multi.cpp; the single-block
-# driver in R/nested_laplace.R), carry NO hyperprior on tau / sigma: the C++
-# kernels there compute only log p(x | tau), the grid is uniform in log(theta),
-# and the outer weights are plain softmax(log_marginal) with no added term --
-# flat in log(theta). The one existing exception, ar1's rho, follows the same
-# rule: `.nl_apply_ar1_rho_prior()` defaults to Beta(1, 1), a no-op, and only
-# a caller-supplied `rho_prior` moves it off flat.
+# Every nested-Laplace outer axis carries a proper default prior
+# (`R/hyperprior_default.R`), the PC prior on a scale with the anchor
+# `.NL_HYPERPRIOR` holds, and a random-effect covariance takes the same anchor
+# through the PC + LKJ prior below (gcol33/tulpa#730).
 #
 # .re_cov_theta_fit() is shared by tulpa_re_cov_nested() and tulpa_eb(), whose
 # test suites assert the two compute the SAME theta_hat from the SAME objective
 # (test-eb.R, "tulpa_eb() and tulpa_re_cov_nested() find the same theta_hat") --
 # so the two must always resolve to the same hyperprior, never one per function.
-# `hyperprior = "flat"` (the default for both) makes that objective match the
-# nested-Laplace convention above: the zero function, unless the caller already
-# supplied a `log_prior_theta` of their own. `hyperprior = "pc_lkj"` opts into
-# the weakly-informative PC + LKJ prior built from `prior_sigma` / `eta`
-# (re_cov_pc_lkj_prior()) -- the regularizer tulpa_eb() documents as what keeps
-# a block off the `sigma = 0` boundary at small G, still available on request.
+# `hyperprior = "proper"` (the default for both) builds the PC + LKJ prior from
+# `prior_sigma` / `eta` (re_cov_pc_lkj_prior()). `hyperprior = "flat"` is the
+# zero function, unless the caller already supplied a `log_prior_theta` of their
+# own: an improper prior, under which the nested integrator reads no evidence
+# and the empirical-Bayes estimate is the unpenalized maximum marginal
+# likelihood.
 .re_cov_resolve_hyperprior <- function(hyperprior, log_prior_theta) {
   if (is.null(log_prior_theta) && identical(hyperprior, "flat")) {
     return(function(theta) 0)
@@ -1462,15 +1478,13 @@ re_cov_pc_lkj_prior <- function(n_coefs, prior_sigma = c(3, 0.05), eta = 2,
 #' `(-1, 1)`. The `mean` and `sd` columns are the weighted moments under either
 #' layout.
 #'
-#' By default (`hyperprior = "flat"`) `log_prior_theta` is the zero function:
-#' flat in log(theta), the same convention the nested-Laplace spatial /
-#' temporal / RE-scale axes use (icar / rw1 / rw2 / ar1's tau / iid, none of
-#' which carry a hyperprior on their scale either -- see `vignette("priors")`).
-#' Set `hyperprior = "pc_lkj"` to use the weakly-informative PC + LKJ hyperprior
-#' instead, built per block by [re_cov_pc_lkj_prior()] and summed over blocks
-#' (PC prior on each marginal SD via `prior_sigma`, LKJ prior on each correlated
-#' block's correlation matrix via `eta`), expressed in the same parameterization
-#' with the exact change-of-variables Jacobian. Supply a custom `log_prior_theta`
+#' By default (`hyperprior = "proper"`) `log_prior_theta` is the
+#' weakly-informative PC + LKJ hyperprior, built per block by
+#' [re_cov_pc_lkj_prior()] and summed over blocks (PC prior on each marginal SD
+#' via `prior_sigma`, LKJ prior on each correlated block's correlation matrix via
+#' `eta`), expressed in the same parameterization with the exact
+#' change-of-variables Jacobian. `hyperprior = "flat"` makes it the zero
+#' function, flat in log(theta). Supply a custom `log_prior_theta`
 #' function to override either default (then `prior_sigma` / `eta` /
 #' `hyperprior` are ignored); it must act on the full stacked parameter vector.
 #' [tulpa_eb()] shares this same objective and the same default, so
@@ -1495,16 +1509,16 @@ re_cov_pc_lkj_prior <- function(n_coefs, prior_sigma = c(3, 0.05), eta = 2,
 #'   the output. Any `L` / `cov` / `sigma` field is ignored -- `Sigma` is what
 #'   this function integrates over.
 #' @param prior_sigma,eta Hyperparameters of the PC + LKJ prior used when
-#'   `hyperprior = "pc_lkj"` (see [re_cov_pc_lkj_prior()]):
-#'   `prior_sigma = c(U, alpha)` with `P(sigma_i > U) = alpha` (default
-#'   `c(3, 0.05)`) and LKJ shape `eta` (default 2). Ignored when
+#'   `hyperprior = "proper"` (see [re_cov_pc_lkj_prior()]):
+#'   `prior_sigma = c(U, alpha)` with `P(sigma_i > U) = alpha` (`NULL`, the
+#'   default, is `c(3, 0.01)`) and LKJ shape `eta` (`NULL` is 2). Ignored when
 #'   `hyperprior = "flat"` or `log_prior_theta` is supplied.
-#' @param hyperprior `"flat"` (default) or `"pc_lkj"`. `"flat"` integrates with
-#'   `log_prior_theta` the zero function (flat in log(theta)), matching the
-#'   nested-Laplace convention on every other scale axis in the engine.
-#'   `"pc_lkj"` builds the PC + LKJ prior from `prior_sigma` / `eta` (the
-#'   regularizer that keeps a variance component off the `sigma = 0` boundary
-#'   at small G). Ignored when `log_prior_theta` is supplied.
+#' @param hyperprior `"proper"` (default) or `"flat"`. `"proper"` builds the
+#'   PC + LKJ prior from `prior_sigma` / `eta`, the proper prior every other
+#'   scale axis of the engine carries by default. `"flat"` integrates with
+#'   `log_prior_theta` the zero function (flat in log(theta)); that prior is
+#'   improper, so the fit then reports no evidence. Ignored when
+#'   `log_prior_theta` is supplied.
 #' @param log_prior_theta Optional `function(theta)` returning a scalar log
 #'   prior density on the full stacked parameter vector, overriding
 #'   `hyperprior` entirely. Default `NULL`, which defers to `hyperprior`.
@@ -1553,9 +1567,21 @@ re_cov_pc_lkj_prior <- function(n_coefs, prior_sigma = c(3, 0.05), eta = 2,
 #'     \item `seed`: optional integer seed for the fixed-effect draw synthesis.
 #'     \item `diagnose_k`: if `TRUE` (default), compute the outer Pareto k-hat
 #'       accuracy diagnostic for the Gaussian proposal over the hyperparameters,
-#'       returned as `pareto_k`.
+#'       returned as `pareto_k`. Several proposal candidates are scored and the
+#'       best is kept: `pareto_k_proposal_source` names which one produced the
+#'       reported number and `pareto_k_first_pass` is the k-hat of the proposal
+#'       exactly as the mode-find placed it, before refinement. A large gap
+#'       between the two says the placement is poor even where the verdict is
+#'       fine -- on a small-group binary fit the first pass runs 15 to 49 where
+#'       the reported k-hat is 0.3 to 0.8.
 #'     \item `k_samples`: importance draws for the `diagnose_k` estimate
-#'       (default 200).
+#'       (default 500). It is a precision knob: the GPD tail size is held at
+#'       the fraction that default budget implies, so raising it supplies more
+#'       tail ratios for the SAME estimand rather than moving the fit to a
+#'       deeper quantile of the weight distribution (gcol33/tulpa#631).
+#'     \item `k_tail_points`: expert override for that tail size, in upper-tail
+#'       order statistics. Silently capped at 20% of the draws, beyond which
+#'       body ratios enter the tail and bias the shape.
 #'     \item `max_iter`, `tol`, `n_threads`: inner-solve controls (see
 #'       [tulpa_laplace()]).
 #'     \item `outer_maxit`: iteration budget for the mode-finding step that
@@ -1644,8 +1670,8 @@ re_cov_pc_lkj_prior <- function(n_coefs, prior_sigma = c(3, 0.05), eta = 2,
 #' @export
 tulpa_re_cov_nested <- function(y, n_trials = NULL, X, re_terms,
                                 family = "binomial", phi = 1.0, phi2 = NULL,
-                                prior_sigma = c(3, 0.05), eta = 2,
-                                hyperprior = c("flat", "pc_lkj"),
+                                prior_sigma = NULL, eta = NULL,
+                                hyperprior = c("proper", "flat"),
                                 log_prior_theta = NULL,
                                 beta_prior = NULL, offset = NULL, n_quad = 1L,
                                 X_zi = NULL, zi_prior_sd = 2.5,
@@ -1653,7 +1679,10 @@ tulpa_re_cov_nested <- function(y, n_trials = NULL, X, re_terms,
   # Perf/numerical knobs live in `control = list()` (matching tulpa() /
   # tulpa_nested_laplace()); the signature carries only statistical arguments.
   tulpa_check_control(control, .CONTROL_KEYS$re_cov_nested, "tulpa_re_cov_nested")
-  hyperprior <- match.arg(hyperprior)
+  family <- .canonical_family(family)
+  .family_or_stop(family)
+  hyperprior <- .hp_choice(match.arg(hyperprior))
+  prior_proper <- !is.null(log_prior_theta) || identical(hyperprior, "proper")
   log_prior_theta <- .re_cov_resolve_hyperprior(hyperprior, log_prior_theta)
   integration <- match.arg(control$integration %||% "ccd", c("ccd", "grid"))
   n_per_axis  <- as.integer(control$n_per_axis %||% 5L)
@@ -1662,6 +1691,7 @@ tulpa_re_cov_nested <- function(y, n_trials = NULL, X, re_terms,
   seed        <- control$seed
   diagnose_k  <- isTRUE(control$diagnose_k %||% TRUE)
   k_samples   <- as.integer(control$k_samples %||% .nl_diag("k_samples"))
+  k_tail_points <- control$k_tail_points
   max_iter    <- as.integer(control$max_iter %||% 100L)
   tol         <- control$tol %||% 1e-8
   n_threads   <- as.integer(control$n_threads %||% 1L)
@@ -1741,6 +1771,12 @@ tulpa_re_cov_nested <- function(y, n_trials = NULL, X, re_terms,
   }
   theta_grid <- ccd_to_theta(z, theta_hat, L_scale)   # n_grid x k
   ng <- nrow(theta_grid)
+  # The tensor's absolute cell volume in theta: its whitened spacing to the k-th
+  # power, scaled by the whitening map's determinant.
+  re_cov_log_measure <- if (identical(integration, "grid")) {
+    log(dnode) + k * log(2 * span / (as.integer(n_per_axis) - 1)) +
+      sum(log(abs(diag(as.matrix(L_scale)))))
+  } else NULL
 
   # --- node checkpoint/resume -----------------------------
   # Each CCD / grid node is one full inner Laplace solve. `checkpoint =
@@ -1905,7 +1941,8 @@ tulpa_re_cov_nested <- function(y, n_trials = NULL, X, re_terms,
   # draw synthesis and with the RNG state restored, so existing draws are
   # bit-for-bit unchanged whether or not the diagnostic is requested.
   # A decline says which one it was rather than a bare NA.
-  pareto_k <- NA_real_; k_is_ess <- NA_real_
+  pareto_k <- NA_real_; k_is_ess <- NA_real_; k_source <- NA_character_
+  k_first  <- NA_real_; k_tp <- NA_integer_
   k_declined <- if (!isTRUE(diagnose_k)) .k_decline_label(.k_decline("not_requested"))
                 else .k_decline_label(.k_decline("no_varying_axis",
                                                  "no free covariance coordinate"))
@@ -1914,13 +1951,17 @@ tulpa_re_cov_nested <- function(y, n_trials = NULL, X, re_terms,
       .nested_outer_pareto_k(
         log_target = function(th) inner_logmarg(.re_cov_theta_to_L_list(th, layout)) +
           log_prior_theta(th),
-        theta_hat = theta_hat, L_scale = L_scale, n_samples = k_samples),
+        theta_hat = theta_hat, L_scale = L_scale, n_samples = k_samples,
+        tail_points = k_tail_points),
       error = function(e) NULL))
     if (is.null(kd)) {
       k_declined <- .k_decline_label(.k_decline("degenerate_proposal",
                                                 "the scorer errored"))
     } else {
       pareto_k <- kd$pareto_k; k_is_ess <- kd$is_ess
+      k_source   <- kd$proposal_source %||% NA_character_
+      k_first    <- kd$first_pass_k %||% NA_real_
+      k_tp       <- kd$tail_points %||% NA_integer_
       k_declined <- .k_reason_of(kd)
     }
   }
@@ -1935,6 +1976,11 @@ tulpa_re_cov_nested <- function(y, n_trials = NULL, X, re_terms,
     pareto_k    = pareto_k,
     pareto_k_is_ess = k_is_ess,
     pareto_k_declined = k_declined,
+    pareto_k_proposal_source = k_source,
+    pareto_k_first_pass = k_first,
+    # The GPD tail the shape was fitted on. A raised or capped tail was
+    # invisible on this path (gcol33/tulpa#692).
+    pareto_k_tail_points = k_tp,
     pareto_k_scope  = "outer (hyperparameter) Gaussian proposal",
     # Per-node random-effect posterior: mode and marginal variance of every
     # (term, group, coefficient), one row per integration node. ranef() mixes
@@ -1968,6 +2014,16 @@ tulpa_re_cov_nested <- function(y, n_trials = NULL, X, re_terms,
     theta_grid  = theta_grid,
     weights     = w,
     log_marginal = logm,
+    # The node log-marginals already carry the hyperparameter log-prior, so the
+    # evidence normalises that prior over the same nodes. A CCD's design weights
+    # reproduce moments and carry no volume, so no evidence is read off them.
+    log_hyperprior = lp_theta_nodes,
+    log_evidence = if (identical(integration, "ccd") || !prior_proper) NA_real_
+                   else .nl_outer_log_evidence(logm, re_cov_log_measure),
+    log_evidence_declined = if (identical(integration, "ccd"))
+                              "moment_rule_design"
+                            else if (!prior_proper) "improper_hyperprior"
+                            else NA_character_,
     n_grid      = ng,
     layout      = layout,
     n_blocks    = length(layout),
@@ -1981,5 +2037,7 @@ tulpa_re_cov_nested <- function(y, n_trials = NULL, X, re_terms,
       closure = sd_cfg$closure,
       n_iter = sd_cfg$n_iter, warmup = sd_cfg$warmup, thin = sd_cfg$thin,
       accept = debias_accept)
-  ), backend = "re_cov_nested", n_fixed = p_fix, fixed_names = beta_names)
+  ), backend = "re_cov_nested", n_fixed = p_fix, fixed_names = beta_names,
+     data = list(y = y, n_trials = n_trials, model_matrix = X,
+                family = family, offset = offset, phi = phi, phi2 = phi2))
 }

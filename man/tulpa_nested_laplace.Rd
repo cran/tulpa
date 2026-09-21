@@ -16,7 +16,9 @@ tulpa_nested_laplace(
   sigma_re = 1,
   family = "binomial",
   phi = 1,
+  offset = NULL,
   likelihood = NULL,
+  hyperprior = c("proper", "flat"),
   control = list()
 )
 }
@@ -75,7 +77,21 @@ time/group/site indices. Required when \code{spec} is supplied.}
 
 \item{family}{\code{"binomial"}, \code{"poisson"}, \code{"neg_binomial_2"}, etc.}
 
-\item{phi}{Dispersion (negbin/gamma).}
+\item{phi}{Dispersion passed to the family, held fixed. One convention at
+every door: for \code{gaussian} / \code{lognormal} this is the residual VARIANCE
+(the SD is \code{sqrt(phi)}), for \code{neg_binomial_2} the size, \code{gamma} the
+shape, \code{beta} the precision, \code{t} the scale; \code{binomial} and \code{poisson}
+ignore it. The compiled kernels parameterize the two variance families by
+the residual SD and are handed \code{sqrt(phi)} at the boundary.
+
+Defaulted, it conditions at 1 and says so with a warning, since for a
+family that reads a dispersion that is a modelling choice rather than a
+neutral value. \code{fit$phi_estimated} records whether the value on the fit
+was estimated or conditioned on.}
+
+\item{offset}{Optional per-observation offset added to the linear predictor
+(length \code{length(y)}), as an \code{offset()} term in a model formula. Every
+single- and multi-block kernel carries it, and \code{fitted_eta} includes it.}
 
 \item{likelihood}{Optional model-supplied likelihood, replacing the built-in
 \code{family}. Pass an external pointer to a \code{tulpa::NestedLikelihood} (built in
@@ -87,6 +103,24 @@ example tulpaObs threads its marginalized single-season occupancy
 likelihood (a scaled Bernoulli, with the latent occupancy state integrated
 out) through this. Multi-block \code{prior} only. Default \code{NULL} (use \code{family}).}
 
+\item{hyperprior}{The prior an outer hyperparameter axis carries when the
+call states no density for it, \code{"proper"} (default) or \code{"flat"}.
+\code{"proper"} folds a normalised density on the axis's integration coordinate
+into \code{log_marginal}: the PC prior \code{P(sigma > 3) = 0.01} on a standard
+deviation, variance or precision axis, the PC range prior at 0.2 times the
+coordinates' bounding-box diagonal on a range or lengthscale axis, a uniform
+on a bounded axis, and the PC + LKJ prior over a free-covariance block. An
+axis with no sourced density is named in \code{log_hyperprior_declined}.
+\code{"flat"} folds no density of the engine's own, so such an axis is
+integrated under its cell measure alone, is named in
+\code{log_hyperprior_declined} as \code{"flat_hyperprior"}, and the fit's
+\code{log_evidence} declines with \code{"improper_hyperprior"}. A density the call
+states -- a \verb{prior_*} argument, a block's \code{rho_prior}, \code{prior_range} or
+\code{prior_sigma}, the copy coefficient's slab, a \code{\link[=tgmrf]{tgmrf()}} block's own prior --
+applies under either choice. The same two choices, under the same names,
+are offered by \code{\link[=tulpa]{tulpa()}}, \code{\link[=tulpa_eb]{tulpa_eb()}}, \code{\link[=tulpa_re_cov_nested]{tulpa_re_cov_nested()}} and
+\code{\link[=fit_spde]{fit_spde()}}.}
+
 \item{control}{Optional list of perf/numerical tuning knobs (statistical
 arguments stay top-level), following the \code{control} convention of
 \code{\link[=tulpa]{tulpa()}}. Recognised elements (defaults in parentheses):
@@ -95,16 +129,21 @@ arguments stay top-level), following the \code{control} convention of
 tolerance.
 \item \code{n_threads} (\code{1L}) -- inner-loop OpenMP threads.
 \item \code{x_init} (\code{NULL}) -- warm-start for the first grid point's inner solve.
-\item \code{keep_grid_hessians} (\code{FALSE}) -- when \code{TRUE}, retain per-grid-point
+\item \code{keep_grid_hessians} (\code{TRUE}) -- when \code{TRUE}, retain per-grid-point
 fixed-effects marginal Hessian \eqn{H_\beta} and mode \eqn{\hat{\beta}}
 on the return list as \verb{$grid_hessians} (list of dense \eqn{p\times p}
 matrices) and \verb{$grid_modes} (list of length-\eqn{p} vectors). Used
 downstream by simplified-Laplace (SLA) callers to assemble skew-aware
 marginals -- see the cumulant pooling in \code{\link[=rubins_pool]{rubins_pool()}}.
-\item \code{diagnose_k} (\code{TRUE}), \code{k_samples} (\code{200L}) -- compute the outer
+\item \code{diagnose_k} (\code{TRUE}), \code{k_samples} (\code{500L}) -- compute the outer
 Pareto-\eqn{\hat{k}} accuracy diagnostic (\verb{$pareto_k}) by importance
 sampling the hyperparameter posterior against the Gaussian proposal
 fitted to the grid, drawing \code{k_samples} extra inner-marginal evaluations.
+\code{k_samples} is a precision knob: the GPD tail size is held at the
+fraction the default budget implies, so a larger budget sharpens the
+same k-hat instead of moving it to a deeper quantile of the weight
+distribution (gcol33/tulpa#631). \code{k_tail_points} overrides that tail
+size directly (capped at 20\% of the draws).
 Computed for a single-block, single positive-scale-axis grid; left \code{NA}
 (with the grid's quadrature ESS as the fallback diagnostic) for
 multi-block, multi-axis, or bounded-parameter grids. See \code{\link[=tulpa_psis]{tulpa_psis()}}.
@@ -271,6 +310,67 @@ grid, refused with an error above it. Each cell is one inner Newton
 solve, so the default catches a per-block grid that multiplied out to a
 run nobody asked for; a deliberate converged tensor reference grid (4
 axes at 7 levels is 2401 cells) raises it here.
+\item \code{checkpoint} (\code{list(path =, resume =)}) -- grid-cell checkpoint /
+resume. Each solved outer cell is appended to \code{path}, keyed by its
+hyperparameter coordinate; \code{resume = TRUE} loads the finished cells and
+solves only the rest, and a fingerprint mismatch (different data,
+settings or grid) errors rather than resuming onto a stale result. See
+\code{?tulpa_nested_laplace} "Checkpoint / resume".
+\item \code{progress}, \code{progress.every}, \code{progress.file}, \code{progress.throttle} --
+the outer-grid progress reporter: whether to print, how often (in
+cells), where to, and the minimum seconds between lines.
+\item \code{prune} (\code{FALSE}), \code{prune_tol} (\code{1e-3}), \code{screen_iters}
+(\code{.NL_SCREEN$iters}, 2 -- the doc said 5 while the engine read 2, which
+is what gcol33/tulpa#640 measured the depth down to) --
+opt-in cheap-pass screening of the outer grid. When \code{prune = TRUE}, the
+driver first sweeps the lattice running a \code{screen_iters}-step inner
+Newton per cell, each warm-started from the previous screened cell's
+quasi-mode, computes a screening Laplace log-marginal, softmax-normalises
+it, and skips the full inner Newton on every cell whose screened weight
+is below \code{prune_tol}. The neighbour warm-start keeps each cheap mode near
+its cell's own mode, so the cheap ranking tracks the full-solve ranking
+even where the latent mode moves across the grid. Pruned cells get
+\code{log_marginal = -Inf}, \code{n_iter = 0} and inherit the pilot mode; the pilot
+cell is never pruned, and at least \code{prune_min_keep} cells (5) are solved
+in full whatever the tolerance says -- the highest-ranked dropped cells
+are restored up to that floor, because the outer grid placement pass
+reads a finite-difference curvature off the cells that were SOLVED and a
+kept set of one carries none. A safety gate falls back to the full grid
+(with a warning) whenever the cheap-screen argmax disagrees with the
+full-solve argmax, or the kept posterior collapses onto a cell the screen
+mis-estimated by more than the margin it discarded cells by. The gate
+bounds a MIS-RANKING, not the whole error: it compares the screen against
+the cells that were solved, so a cell it discarded and never solved is
+outside what it can see. The default \code{prune = FALSE} is the setting under
+which no such question arises.
+\code{prune_tol} must be a finite numeric in \verb{[0, 1)} and \code{screen_iters} a
+single integer \verb{>= 1}; both are validated whatever \code{prune} says. Pruning
+is OPT-IN: the default \code{FALSE} solves every cell, which is correct
+whatever the grid looks like. \code{prune} / \code{prune_tol} reach both the
+single-block and the multi-block dispatch; the screening DEPTH is
+declared by the single-block kernels only, so a multi-block prior refuses
+a pinned \code{screen_iters} rather than accepting it and ignoring it.
+\item \code{prune_log_gap} (unset) -- the screening cut stated in nats instead of as
+a normalised weight: keep every cell within this many nats of the best
+screened cell. \code{prune_tol} is a weight, so what it cuts at is the gap
+\code{-(log(prune_tol) + log(Z))}, and the whole range a caller would type
+(\code{1e-3} to \code{1e-12}) is 7 to 28 nats of it -- on an outer surface whose
+log-marginal spans thousands of nats every setting returns the same kept
+set. Stating the gap directly keeps the knob's resolution wherever the
+surface is steep. It reaches the kernel as \code{prune_tol = exp(-gap)}, so
+the realised cut is the requested gap less \code{log(Z)}, at most \code{log(n_grid)}
+nats narrower; the fit reports the realised value. Setting both this and
+\code{prune_tol} is an error -- they state one cut in two units.
+\item \code{fitted_var} (\code{TRUE}) -- fill the per-row predictive variance
+\code{fitted_eta_var}, the companion of \code{fitted_eta} a caller marginalises the
+per-row linear predictor with. It costs one back-solve per distinct
+loading vector per cell, which on a design with few repeated rows is the
+dominant cost of a cell, so a caller reading only \code{fitted_eta} or the
+coefficient summaries sets \code{FALSE} and the fit then carries no
+\code{fitted_eta_var}. Every single-block field reports it, the NNGP, HSGP,
+SPDE and spatiotemporal fields included, each read off its cell's own
+precision at the mode; a multi-block prior refuses \code{FALSE} rather than
+accepting it and ignoring it.
 }}
 }
 \value{
@@ -285,6 +385,13 @@ A list with:
 \item \code{pareto_k}, \code{pareto_k_is_ess}: outer Pareto-\eqn{\hat{k}} and its
 importance-sampling ESS (\code{NA} when not computed for the grid; see
 \code{control$diagnose_k}).
+\item \code{pareto_k_proposal_source}, \code{pareto_k_first_pass}: which proposal family
+the reported k-hat came from (the outer k-hat is scored against several
+candidates and the best is kept), and the k-hat of the FIRST pass -- the
+proposal exactly as this backend placed it, before any candidate refined
+or replaced it. A large gap between the two says the nodes are badly
+scaled around the hyperparameter posterior even though the verdict is
+fine; no gap says the placement was already right.
 \item \code{inner_skew}, \code{inner_skew_idx}, \code{inner_skew_dropped}: the inner-Laplace
 skewness diagnostic (gamma_3) at each scored latent index and its
 1-based index, plus a count of (index, observation) contributions
@@ -292,6 +399,19 @@ dropped for a non-finite third derivative (see \code{control$diagnose_skew}).
 \item \code{timing}: named numeric of wall-clock seconds (\code{total}, \code{setup},
 \code{grid}, \code{postproc}, \code{diagnostics}); the \code{grid} phase is the inner
 Laplace pass that scales with grid size. Surfaced one-line in \code{print}.
+\item \code{prune_cheap_log_marginal}, \code{prune_mask}, \code{prune_n_pruned}, \code{prune_tol}:
+present only when \code{control$prune = TRUE} and the safety gate did not
+trip -- the cheap-screen log-marginal per cell, the logical mask of
+pruned cells, the pruned-cell count, and the threshold actually applied.
+\item \code{prune_log_gap_cut}, \code{prune_cheap_lm_spread}, \code{prune_min_keep},
+\code{prune_n_floor_restored}: the same screen read on the scale it operates
+on -- how many nats below the best screened cell the tolerance cut at,
+how many nats the screened surface spans, the kept-cell floor applied,
+and how many cells that floor put back. A cut that is a sliver of the
+spread is a tolerance with no resolution on this grid.
+\item \code{prune_fallback_triggered}, \code{prune_fallback_reason}: present only when
+the gate did trip; the rest of the fit is then the full-grid result and
+the reason string records which check fired.
 \item \code{prior}: echoed input.
 }
 }

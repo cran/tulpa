@@ -85,14 +85,15 @@ simulate_one <- function(seed) {
        theta  = c(beta1 = BETA[1], beta2 = BETA[2], sigma = sigma))
 }
 
-fit_one <- function(d) {
+fit_one <- function(d, diagnose = FALSE) {
   tulpa_nested_laplace(
     y = d$y, n_trials = rep(1L, length(d$y)), X = d$X,
     prior = list(list(type = "iid", obs_idx = d$region,
                       n_units = max(d$region), sigma_grid = GRID)),
     family = "gaussian", phi = PHI,
     control = list(n_threads = 1L, keep_grid_hessians = TRUE,
-                   auto_recenter = FALSE, progress = FALSE))
+                   auto_recenter = FALSE, progress = FALSE,
+                   diagnose_k = diagnose, diagnose_skew = diagnose))
 }
 ```
 
@@ -101,6 +102,10 @@ the named vector of true values the PIT is taken against. `auto_recenter =
 FALSE` is not a speed knob: the argument that the `sigma` PIT is uniform needs
 the fitted grid to be the same seven points the truth was drawn from, and a
 recentred grid breaks it.
+
+The single-fit reliability diagnostics are off inside the loop. Each one costs
+its own batch of inner solves per fit, and the last section is where they get
+read, on one fit rather than two hundred.
 
 ## Reporting a fit in a shape `sbc()` can read
 
@@ -359,7 +364,7 @@ a nominal 0.05, and power reaches 80% at roughly a 10% dispersion error or a
 `diagnostics()` reads both at once when you hand it the calibration result.
 
 ```{r combined}
-fit <- fit_one(d_obs)
+fit <- fit_one(d_obs, diagnose = TRUE)
 diagnostics(fit, sbc = res)
 ```
 

@@ -22,7 +22,17 @@ tulpa_ep(
 
 \item{family}{Character family name (see \code{\link[=family_names]{family_names()}}).}
 
-\item{phi}{Dispersion / precision passed to the family (held fixed).}
+\item{phi}{Dispersion passed to the family, held fixed. One convention at
+every door: for \code{gaussian} / \code{lognormal} this is the residual VARIANCE
+(the SD is \code{sqrt(phi)}), for \code{neg_binomial_2} the size, \code{gamma} the
+shape, \code{beta} the precision, \code{t} the scale; \code{binomial} and \code{poisson}
+ignore it. The compiled kernels parameterize the two variance families by
+the residual SD and are handed \code{sqrt(phi)} at the boundary.
+
+Defaulted, it conditions at 1 and says so with a warning, since for a
+family that reads a dispersion that is a modelling choice rather than a
+neutral value. \code{fit$phi_estimated} records whether the value on the fit
+was estimated or conditioned on.}
 
 \item{phi2}{Optional second dispersion (Student-t degrees of freedom for
 \code{family = "t"}; default 4 when \code{NULL}).}
@@ -37,11 +47,22 @@ coefficient prior, so a non-zero \code{mean} errors -- use a sampler
 
 \item{control}{List: \code{max_sweeps} (default 50), \code{tol} (default 1e-6),
 \code{damping} (default 0.8), \code{n_quad} (Gauss-Hermite nodes, default 20),
-\code{n_draws} (default 2000), \code{seed}.}
+\code{n_draws} (default 2000), \code{seed}.
+
+An \code{offset(...)} term in \code{formula} is honoured: it shifts each
+observation's linear predictor before the likelihood is evaluated, and is
+not itself part of the fitted posterior.}
 }
 \value{
-A \code{tulpa_fit} (subclass \code{tulpa_ep}) with \code{coefficients} (posterior
-mean), \code{vcov}, \code{draws}, \code{log_marginal} (the EP approximation), \code{converged}.
+A \code{tulpa_fit} (subclass \code{tulpa_ep}) with \code{means} (posterior mean) and
+\code{cov} (posterior covariance) of the EP Gaussian, which is the posterior
+\code{\link[=coef]{coef()}}, \code{\link[=vcov]{vcov()}}, \code{\link[=summary]{summary()}} and \code{\link[=confint]{confint()}} report; \code{draws} sampled
+from that Gaussian; \code{log_marginal} (the EP approximation); \code{converged}
+(the sweep tolerance was met AND every site's adaptive quadrature mode
+search converged AND no site's tilted variance floored -- a site that is
+not well resolved by the quadrature turns this \code{FALSE} even when the
+outer sweep loop itself settled); \code{n_site_not_converged},
+\code{n_site_floored}.
 }
 \description{
 Fits a generalized linear model with a Gaussian coefficient prior by

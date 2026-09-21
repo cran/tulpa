@@ -39,7 +39,7 @@
 #' @param sigma_re Numeric vector of random-effect SDs, one per RE term. Length
 #'   must equal `length(bundle$re_terms)`. Ignored when there are no RE terms.
 #' @param n_trials Binomial denominators (or `NULL`).
-#' @param phi Dispersion/precision passed to the family.
+#' @template phi
 #' @param beta_prior `list(mean, sd)` Gaussian prior on the fixed effects
 #'   (scalars, recycled). Defaults to the engine default, `prior_normal(0, 2.5)`.
 #' @param weights Optional per-observation likelihood weights (length `n_obs`):

@@ -1,0 +1,227 @@
+# The in-sample linear predictor behind WAIC / LOO / posterior_predict()
+# (gcol33/tulpa#721), and the log evidence logLik() reports for an outer grid
+# (gcol33/tulpa#722).
+
+make_trend_data <- function(seed, n_times = 24L, n = 720L) {
+  set.seed(seed)
+  time  <- sample.int(n_times, n, replace = TRUE)
+  trend <- cumsum(rnorm(n_times, 0, 0.35))
+  trend <- trend - mean(trend)
+  x     <- rnorm(n)
+  list(df = data.frame(y = rbinom(n, 1, plogis(0.3 + 0.7 * x + trend[time])),
+                       x = x, time = time),
+       trend = trend, time = time)
+}
+
+test_that("a nested fit's eta draws carry its temporal field", {
+  skip_on_cran()
+  d   <- make_trend_data(20260529)
+  fit <- tulpa(y ~ x, data = d$df, family = "binomial",
+               temporal = temporal_rw1("time"))
+  expect_identical(tulpa:::.tulpa_linpred_source(fit), "grid_mixture")
+
+  eta  <- tulpa:::.tulpa_eta_draws(fit, synth_seed = 285603L)
+  expect_identical(dim(eta), c(400L, nrow(d$df)))
+  expect_identical(eta, tulpa:::.tulpa_eta_draws(fit, synth_seed = 285603L))
+
+  # The draws' moments are the grid mixture's, to Monte Carlo error, and what
+  # the mean adds to X beta is the trend: it varies over time and tracks the
+  # simulated walk.
+  em <- as.numeric(crossprod(fit$weights, fit$fitted_eta))
+  ev <- as.numeric(crossprod(fit$weights, fit$fitted_eta_var + fit$fitted_eta^2)) -
+    em^2
+  expect_lt(max(abs(colMeans(eta) - em) / sqrt(ev / nrow(eta))), 5)
+  by_t <- tapply(em - as.numeric(fit$model_matrix %*% coef(fit)), d$time, mean)
+  expect_gt(stats::sd(by_t), 0.2)
+  expect_gt(stats::cor(as.numeric(by_t), d$trend), 0.8)
+
+  # WAIC then ranks the model that carries the trend first.
+  m_nt <- tulpa(y ~ x, data = d$df, family = "binomial", mode = "laplace")
+  cmp  <- compare_models(no_temporal = m_nt, temporal = fit, criterion = "waic")
+  expect_identical(cmp$model[1L], "temporal")
+  expect_gt(-cmp$delta[2L], 5)
+})
+
+test_that("a sampler fit's eta draws are the engine's linear predictor, field included", {
+  skip_on_cran()
+  d <- make_trend_data(7, n_times = 12L, n = 240L)
+  h <- tulpa(y ~ x, data = d$df, family = "binomial",
+             temporal = temporal_rw1("time"), mode = "hmc",
+             control = list(n_iter = 60L, warmup = 40L, n_chains = 1L, seed = 3L))
+  expect_identical(tulpa:::.tulpa_linpred_source(h), "sampler_model")
+  eta <- tulpa:::.tulpa_eta_draws(h)
+
+  # Independent assembly from the draw columns: the walk enters eta centred,
+  # because its global level is aliased with the intercept.
+  D  <- h$draws
+  ph <- D[, grep("^phi_temporal\\[", colnames(D)), drop = FALSE]
+  hand <- D[, c("(Intercept)", "x")] %*% t(h$model_matrix) +
+    (ph - rowMeans(ph))[, d$time]
+  expect_equal(unname(eta), unname(hand), tolerance = 1e-12)
+})
+
+test_that("an areal nested fit's eta draws carry its field", {
+  skip_on_cran()
+  set.seed(11)
+  S <- 16L
+  W <- matrix(0, S, S)
+  for (i in 1:4) for (j in 1:4) {
+    k <- (i - 1L) * 4L + j
+    if (j < 4L) { W[k, k + 1L] <- 1; W[k + 1L, k] <- 1 }
+    if (i < 4L) { W[k, k + 4L] <- 1; W[k + 4L, k] <- 1 }
+  }
+  u <- as.numeric(scale(rep(c(-1, 1), each = 8L)))
+  site <- sample.int(S, 480L, replace = TRUE)
+  x <- rnorm(480L)
+  dd <- data.frame(y = rpois(480L, exp(0.2 + 0.4 * x + 0.8 * u[site])),
+                   x = x, site = site)
+  fit <- tulpa(y ~ x + spatial(site), data = dd, family = "poisson",
+               spatial = list(type = "icar", adjacency = W),
+               mode = "nested_laplace")
+  em <- colMeans(tulpa:::.tulpa_eta_draws(fit, synth_seed = 1L))
+  by_s <- tapply(em - as.numeric(fit$model_matrix %*% coef(fit)), site, mean)
+  expect_gt(stats::cor(as.numeric(by_s), u[as.integer(names(by_s))]), 0.8)
+})
+
+test_that("the outer evidence sums the marginal against the absolute cell measure", {
+  lm <- c(-10, -11, -12, -13)
+  lq <- log(c(0.1, 0.2, 0.3, 0.4))
+  expect_equal(tulpa:::.nl_outer_log_evidence(lm, lq),
+               log(sum(exp(lm + lq))), tolerance = 1e-14)
+  # The measure is absolute: scaling it scales the evidence.
+  expect_equal(tulpa:::.nl_outer_log_evidence(lm, lq + 3),
+               tulpa:::.nl_outer_log_evidence(lm, lq) + 3, tolerance = 1e-13)
+})
+
+test_that("a failed cell contributes nothing, and neither does a pruned one", {
+  lm <- c(-10, -11, -12, -13)
+  lq <- log(rep(0.25, 4))
+  ref <- log(sum(exp(lm[1:3] + lq[1:3])))
+  expect_equal(tulpa:::.nl_outer_log_evidence(c(lm[1:3], NaN), lq), ref,
+               tolerance = 1e-14)
+  expect_equal(tulpa:::.nl_outer_log_evidence(c(lm[1:3], Inf), lq), ref,
+               tolerance = 1e-14)
+  expect_equal(tulpa:::.nl_outer_log_evidence(c(lm[1:3], -Inf), lq), ref,
+               tolerance = 1e-14)
+  expect_true(is.na(tulpa:::.nl_outer_log_evidence(c(NaN, NaN), c(0, 0))))
+})
+
+test_that("a grid with every axis pinned has its one cell's marginal as evidence", {
+  tg <- matrix(1, 1L, 1L, dimnames = list(NULL, "b1.sigma"))
+  specs <- tulpa:::.joint_axis_specs_from_grid(tg)
+  expect_null(specs)
+  ev <- tulpa:::.nl_attach_evidence(list(log_marginal = -42.5), tg, specs)
+  expect_identical(ev$log_evidence, -42.5)
+  expect_null(ev$log_evidence_declined)
+
+  tg2 <- matrix(c(1, 1, 0.3, 0.3), 2L, 2L,
+                dimnames = list(NULL, c("b1.sigma", "b1.rho")))
+  ev2 <- tulpa:::.nl_attach_evidence(list(log_marginal = c(-7, -7)), tg2,
+                                     tulpa:::.joint_axis_specs_from_grid(tg2))
+  expect_equal(ev2$log_evidence, -7, tolerance = 1e-14)
+
+  set.seed(3)
+  n <- 120L
+  x <- rnorm(n)
+  y <- rbinom(n, 1L, stats::plogis(-3.2 + 0.9 * x))
+  fit <- tulpa_nested_laplace(
+    y, rep(1L, n), cbind(`(Intercept)` = 1, x = x),
+    prior = list(list(type = "iid", n_units = 1L, sigma_grid = 1.0,
+                      obs_idx = rep(0L, n))),
+    family = "binomial",
+    control = list(diagnose_k = FALSE, progress = FALSE))
+  expect_equal(fit$log_evidence, as.numeric(fit$log_marginal), tolerance = 1e-14)
+})
+
+.lev_rw1_fit <- function(d, tg) {
+  tulpa_nested_laplace(
+    y = d$df$y, n_trials = rep(1L, nrow(d$df)), X = cbind(1, d$df$x),
+    prior = list(type = "rw1", temporal_idx = as.integer(d$time),
+                 n_times = 24L, tau_grid = tg),
+    family = "binomial",
+    control = list(diagnose_k = FALSE, diagnose_skew = FALSE,
+                   auto_recenter = FALSE))
+}
+
+test_that("logLik() on a single-axis grid does not move with its nodes or its support", {
+  # The PC prior on tau is proper, so the evidence is one integral whatever
+  # node set reads it: the same support at three resolutions, and two supports
+  # that both cover the posterior.
+  skip_on_cran()
+  d <- make_trend_data(20260529)
+  grid_on <- function(lo, hi, K) exp(lo + (hi - lo) / K * (seq_len(K) - 0.5))
+  ev <- c(
+    vapply(c(9L, 33L, 129L), function(K) {
+      as.numeric(logLik(.lev_rw1_fit(d, grid_on(log(0.5), log(200), K))))
+    }, numeric(1)),
+    wide = as.numeric(logLik(.lev_rw1_fit(d, grid_on(log(0.05), log(2000), 129L)))))
+  expect_true(all(is.finite(ev)))
+  expect_lt(diff(range(ev)), 2e-3)
+
+  # Arbiter: a trapezoid in log tau of the kernel's own marginal against the PC
+  # density on the precision written out by hand, P(sigma > 1) = 0.01 with
+  # sigma = tau^(-1/2), on a support wide enough to hold the whole posterior.
+  tg <- exp(seq(log(0.01), log(1e4), length.out = 801L))
+  f <- .lev_rw1_fit(d, tg)
+  lam <- -log(0.01)
+  u <- log(tg)
+  lp <- log(lam / 2) - 1.5 * u - lam * exp(-u / 2) + u
+  v <- (f$log_marginal - f$log_hyperprior) + lp
+  m <- max(v)
+  trap <- m + log(sum(diff(u) * (exp(v[-1L] - m) + exp(v[-801L] - m)) / 2))
+  expect_equal(ev[["wide"]], trap, tolerance = 1e-3)
+})
+
+test_that("a two-axis grid's evidence converges in its node count", {
+  # This fixture's rho posterior piles against 1 (a third or more of the weight
+  # above 0.9), and the outermost rho cell closes half way to that open
+  # boundary, so part of the posterior sits outside every resolution. What the
+  # evidence has to do is converge as the node count closes that sliver.
+  skip_on_cran()
+  set.seed(5)
+  S <- 20L
+  adj <- .pgp_chain_adj(S)
+  u <- sin(seq_len(S) / 3)
+  site <- rep(seq_len(S), each = 15L)
+  x <- rnorm(length(site))
+  y <- rpois(length(site), exp(0.2 + 0.4 * x + u[site]))
+  ev <- vapply(c(12L, 24L, 36L), function(K) {
+    sg <- exp(log(0.05) + (log(5) - log(0.05)) / K * (seq_len(K) - 0.5))
+    rg <- (seq_len(K) - 0.5) / K
+    gr <- expand.grid(sigma = sg, rho = rg)
+    f <- tulpa_nested_laplace(
+      y = y, n_trials = rep(1L, length(y)), X = cbind(1, x),
+      prior = list(type = "bym2", spatial_idx = as.integer(site),
+                   n_spatial_units = S, adj_row_ptr = adj$adj_row_ptr,
+                   adj_col_idx = adj$adj_col_idx, n_neighbors = adj$n_neighbors,
+                   scale_factor = 1, sigma_grid = gr$sigma, rho_grid = gr$rho),
+      family = "poisson",
+      control = list(diagnose_k = FALSE, diagnose_skew = FALSE,
+                     auto_recenter = FALSE))
+    expect_setequal(f$log_hyperprior_axes, c("sigma", "rho"))
+    as.numeric(logLik(f))
+  }, numeric(1))
+  expect_lt(abs(ev[3L] - ev[2L]), abs(ev[2L] - ev[1L]))
+  expect_lt(abs(ev[3L] - ev[2L]), 0.03)
+})
+
+test_that("an axis with no proper prior declines the evidence and names itself", {
+  fit <- structure(list(
+    log_marginal = c(-10, -11), log_evidence = NA_real_,
+    log_evidence_declined = "improper_hyperprior",
+    log_evidence_declined_axes = c(phi_count = "dispersion_prior_unsourced"),
+    N = 10L, n_fixed = 1L), class = "tulpa_fit")
+  ll <- logLik(fit)
+  expect_true(is.na(as.numeric(ll)))
+  expect_identical(attr(ll, "declined"), "improper_hyperprior")
+  expect_identical(attr(ll, "declined_axes"),
+                   c(phi_count = "dispersion_prior_unsourced"))
+})
+
+test_that("a fit with a per-cell vector and no recorded measure declines", {
+  fit <- structure(list(log_marginal = c(-10, -11, -12), n_fixed = 2L, N = 100L),
+                   class = "tulpa_fit")
+  ll <- logLik(fit)
+  expect_true(is.na(as.numeric(ll)))
+  expect_identical(attr(ll, "declined"), "outer_measure_not_recorded")
+})

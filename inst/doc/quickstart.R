@@ -28,7 +28,7 @@ has_ggplot <- requireNamespace("ggplot2", quietly = TRUE)
 
 ## ----fit-gaussian-------------------------------------------------------------
 # fit <- tulpa(y ~ x, data = df, family = "gaussian",
-#              mode = "laplace", phi = 0.8)
+#              mode = "laplace", phi = 0.8^2)
 # coef(fit)
 
 ## ----summary-gaussian---------------------------------------------------------
@@ -44,17 +44,17 @@ has_ggplot <- requireNamespace("ggplot2", quietly = TRUE)
 # df$g <- g
 # 
 # fit_re <- tulpa(y ~ x + (1 | g), data = df, family = "gaussian",
-#                 mode = "laplace", sigma_re = 0.6, phi = 0.8)
+#                 mode = "laplace", sigma_re = 0.6, phi = 0.8^2)
 # coef(fit_re)
 
 ## ----ranef--------------------------------------------------------------------
 # head(ranef(fit_re), 4)
 
 ## ----compare------------------------------------------------------------------
-# m0 <- tulpa(y ~ 1,     data = df, family = "gaussian", mode = "laplace", phi = 0.8)
-# m1 <- tulpa(y ~ x,     data = df, family = "gaussian", mode = "laplace", phi = 0.8)
+# m0 <- tulpa(y ~ 1,     data = df, family = "gaussian", mode = "laplace", phi = 0.8^2)
+# m1 <- tulpa(y ~ x,     data = df, family = "gaussian", mode = "laplace", phi = 0.8^2)
 # m2 <- tulpa(y ~ x + (1 | g), data = df, family = "gaussian",
-#             mode = "laplace", sigma_re = 0.6, phi = 0.8)
+#             mode = "laplace", sigma_re = 0.6, phi = 0.8^2)
 # compare_models(intercept = m0, slope = m1, slope_re = m2, criterion = "loglik")
 
 ## ----predict------------------------------------------------------------------

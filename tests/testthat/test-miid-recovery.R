@@ -97,7 +97,7 @@ test_that("iid svc_weight all-ones is identical to the unweighted iid block", {
   y <- rnorm(N, 0.1 + 0.4 * x + iota[grp], 0.3)
   arm <- list(y = y, n_trials = rep(1L, N), X = cbind(1, x),
               re_idx = rep(0, N), n_re_groups = 0L, sigma_re = 1.0,
-              family = "gaussian", phi = 0.3)
+              family = "gaussian", phi = 0.09)
 
   base <- list(type = "iid", n_units = G, obs_idx = list(grp),
                sigma_grid = c(0.3, 0.5, 0.8))
@@ -152,6 +152,13 @@ test_that("miid block recovers a correlated random-slope Sigma", {
   # The cross-correlation recovers as clearly positive near the truth (0.5).
   expect_gt(rho_med, 0.2)
   expect_lt(rho_med, 0.9)
+
+  # The grid is a tensor in (log sigma_1, log sigma_2, rho), so the block
+  # carries the PC + LKJ prior and a cell measure there, and the fit reads an
+  # evidence (gcol33/tulpa#735).
+  expect_setequal(fit$log_hyperprior_axes, c("b1.L11", "b1.L21", "b1.L22"))
+  expect_true(is.finite(fit$log_evidence))
+  expect_null(fit$log_evidence_declined)
 })
 
 # --------------------------------------------------------------------------- #
@@ -168,7 +175,7 @@ test_that("miid p=1 matches the scalar iid block on the inner log-marginal", {
   y <- rnorm(N, -0.2 + 0.5 * x + iota[grp], 0.3)
   arm <- list(y = y, n_trials = rep(1L, N), X = cbind(1, x),
               re_idx = rep(0, N), n_re_groups = 0L, sigma_re = 1.0,
-              family = "gaussian", phi = 0.3)
+              family = "gaussian", phi = 0.09)
 
   s_vals <- c(0.3, 0.45, 0.6, 0.8, 1.1)
 

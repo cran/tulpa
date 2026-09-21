@@ -50,7 +50,10 @@
 #' @param n_re_groups RE group count (default 0).
 #' @param sigma_re RE standard deviation (default 1).
 #' @param family `"binomial"`, `"poisson"`, `"neg_binomial_2"`, etc.
-#' @param phi Dispersion (negbin/gamma).
+#' @template phi
+#' @param offset Optional per-observation offset added to the linear predictor
+#'   (length `length(y)`), as an `offset()` term in a model formula. Every
+#'   single- and multi-block kernel carries it, and `fitted_eta` includes it.
 #' @param control Optional list of perf/numerical tuning knobs (statistical
 #'   arguments stay top-level), following the `control` convention of
 #'   [tulpa()]. Recognised elements (defaults in parentheses):
@@ -58,16 +61,21 @@
 #'     tolerance.
 #'   * `n_threads` (`1L`) -- inner-loop OpenMP threads.
 #'   * `x_init` (`NULL`) -- warm-start for the first grid point's inner solve.
-#'   * `keep_grid_hessians` (`FALSE`) -- when `TRUE`, retain per-grid-point
+#'   * `keep_grid_hessians` (`TRUE`) -- when `TRUE`, retain per-grid-point
 #'     fixed-effects marginal Hessian \eqn{H_\beta} and mode \eqn{\hat{\beta}}
 #'     on the return list as `$grid_hessians` (list of dense \eqn{p\times p}
 #'     matrices) and `$grid_modes` (list of length-\eqn{p} vectors). Used
 #'     downstream by simplified-Laplace (SLA) callers to assemble skew-aware
 #'     marginals -- see the cumulant pooling in [rubins_pool()].
-#'   * `diagnose_k` (`TRUE`), `k_samples` (`200L`) -- compute the outer
+#'   * `diagnose_k` (`TRUE`), `k_samples` (`500L`) -- compute the outer
 #'     Pareto-\eqn{\hat{k}} accuracy diagnostic (`$pareto_k`) by importance
 #'     sampling the hyperparameter posterior against the Gaussian proposal
 #'     fitted to the grid, drawing `k_samples` extra inner-marginal evaluations.
+#'     `k_samples` is a precision knob: the GPD tail size is held at the
+#'     fraction the default budget implies, so a larger budget sharpens the
+#'     same k-hat instead of moving it to a deeper quantile of the weight
+#'     distribution (gcol33/tulpa#631). `k_tail_points` overrides that tail
+#'     size directly (capped at 20% of the draws).
 #'     Computed for a single-block, single positive-scale-axis grid; left `NA`
 #'     (with the grid's quadrature ESS as the fallback diagnostic) for
 #'     multi-block, multi-axis, or bounded-parameter grids. See [tulpa_psis()].
@@ -234,6 +242,67 @@
 #'     solve, so the default catches a per-block grid that multiplied out to a
 #'     run nobody asked for; a deliberate converged tensor reference grid (4
 #'     axes at 7 levels is 2401 cells) raises it here.
+#'   * `checkpoint` (`list(path =, resume =)`) -- grid-cell checkpoint /
+#'     resume. Each solved outer cell is appended to `path`, keyed by its
+#'     hyperparameter coordinate; `resume = TRUE` loads the finished cells and
+#'     solves only the rest, and a fingerprint mismatch (different data,
+#'     settings or grid) errors rather than resuming onto a stale result. See
+#'     `?tulpa_nested_laplace` "Checkpoint / resume".
+#'   * `progress`, `progress.every`, `progress.file`, `progress.throttle` --
+#'     the outer-grid progress reporter: whether to print, how often (in
+#'     cells), where to, and the minimum seconds between lines.
+#'   * `prune` (`FALSE`), `prune_tol` (`1e-3`), `screen_iters`
+#'     (`.NL_SCREEN$iters`, 2 -- the doc said 5 while the engine read 2, which
+#'     is what gcol33/tulpa#640 measured the depth down to) --
+#'     opt-in cheap-pass screening of the outer grid. When `prune = TRUE`, the
+#'     driver first sweeps the lattice running a `screen_iters`-step inner
+#'     Newton per cell, each warm-started from the previous screened cell's
+#'     quasi-mode, computes a screening Laplace log-marginal, softmax-normalises
+#'     it, and skips the full inner Newton on every cell whose screened weight
+#'     is below `prune_tol`. The neighbour warm-start keeps each cheap mode near
+#'     its cell's own mode, so the cheap ranking tracks the full-solve ranking
+#'     even where the latent mode moves across the grid. Pruned cells get
+#'     `log_marginal = -Inf`, `n_iter = 0` and inherit the pilot mode; the pilot
+#'     cell is never pruned, and at least `prune_min_keep` cells (5) are solved
+#'     in full whatever the tolerance says -- the highest-ranked dropped cells
+#'     are restored up to that floor, because the outer grid placement pass
+#'     reads a finite-difference curvature off the cells that were SOLVED and a
+#'     kept set of one carries none. A safety gate falls back to the full grid
+#'     (with a warning) whenever the cheap-screen argmax disagrees with the
+#'     full-solve argmax, or the kept posterior collapses onto a cell the screen
+#'     mis-estimated by more than the margin it discarded cells by. The gate
+#'     bounds a MIS-RANKING, not the whole error: it compares the screen against
+#'     the cells that were solved, so a cell it discarded and never solved is
+#'     outside what it can see. The default `prune = FALSE` is the setting under
+#'     which no such question arises.
+#'     `prune_tol` must be a finite numeric in `[0, 1)` and `screen_iters` a
+#'     single integer `>= 1`; both are validated whatever `prune` says. Pruning
+#'     is OPT-IN: the default `FALSE` solves every cell, which is correct
+#'     whatever the grid looks like. `prune` / `prune_tol` reach both the
+#'     single-block and the multi-block dispatch; the screening DEPTH is
+#'     declared by the single-block kernels only, so a multi-block prior refuses
+#'     a pinned `screen_iters` rather than accepting it and ignoring it.
+#'   * `prune_log_gap` (unset) -- the screening cut stated in nats instead of as
+#'     a normalised weight: keep every cell within this many nats of the best
+#'     screened cell. `prune_tol` is a weight, so what it cuts at is the gap
+#'     `-(log(prune_tol) + log(Z))`, and the whole range a caller would type
+#'     (`1e-3` to `1e-12`) is 7 to 28 nats of it -- on an outer surface whose
+#'     log-marginal spans thousands of nats every setting returns the same kept
+#'     set. Stating the gap directly keeps the knob's resolution wherever the
+#'     surface is steep. It reaches the kernel as `prune_tol = exp(-gap)`, so
+#'     the realised cut is the requested gap less `log(Z)`, at most `log(n_grid)`
+#'     nats narrower; the fit reports the realised value. Setting both this and
+#'     `prune_tol` is an error -- they state one cut in two units.
+#'   * `fitted_var` (`TRUE`) -- fill the per-row predictive variance
+#'     `fitted_eta_var`, the companion of `fitted_eta` a caller marginalises the
+#'     per-row linear predictor with. It costs one back-solve per distinct
+#'     loading vector per cell, which on a design with few repeated rows is the
+#'     dominant cost of a cell, so a caller reading only `fitted_eta` or the
+#'     coefficient summaries sets `FALSE` and the fit then carries no
+#'     `fitted_eta_var`. Every single-block field reports it, the NNGP, HSGP,
+#'     SPDE and spatiotemporal fields included, each read off its cell's own
+#'     precision at the mode; a multi-block prior refuses `FALSE` rather than
+#'     accepting it and ignoring it.
 #'
 #' @return A list with:
 #'   * `theta_grid`: matrix or vector of grid hyperparameter values.
@@ -245,6 +314,13 @@
 #'   * `pareto_k`, `pareto_k_is_ess`: outer Pareto-\eqn{\hat{k}} and its
 #'     importance-sampling ESS (`NA` when not computed for the grid; see
 #'     `control$diagnose_k`).
+#'   * `pareto_k_proposal_source`, `pareto_k_first_pass`: which proposal family
+#'     the reported k-hat came from (the outer k-hat is scored against several
+#'     candidates and the best is kept), and the k-hat of the FIRST pass -- the
+#'     proposal exactly as this backend placed it, before any candidate refined
+#'     or replaced it. A large gap between the two says the nodes are badly
+#'     scaled around the hyperparameter posterior even though the verdict is
+#'     fine; no gap says the placement was already right.
 #'   * `inner_skew`, `inner_skew_idx`, `inner_skew_dropped`: the inner-Laplace
 #'     skewness diagnostic (gamma_3) at each scored latent index and its
 #'     1-based index, plus a count of (index, observation) contributions
@@ -252,6 +328,19 @@
 #'   * `timing`: named numeric of wall-clock seconds (`total`, `setup`,
 #'     `grid`, `postproc`, `diagnostics`); the `grid` phase is the inner
 #'     Laplace pass that scales with grid size. Surfaced one-line in `print`.
+#'   * `prune_cheap_log_marginal`, `prune_mask`, `prune_n_pruned`, `prune_tol`:
+#'     present only when `control$prune = TRUE` and the safety gate did not
+#'     trip -- the cheap-screen log-marginal per cell, the logical mask of
+#'     pruned cells, the pruned-cell count, and the threshold actually applied.
+#'   * `prune_log_gap_cut`, `prune_cheap_lm_spread`, `prune_min_keep`,
+#'     `prune_n_floor_restored`: the same screen read on the scale it operates
+#'     on -- how many nats below the best screened cell the tolerance cut at,
+#'     how many nats the screened surface spans, the kept-cell floor applied,
+#'     and how many cells that floor put back. A cut that is a sliver of the
+#'     spread is a tolerance with no resolution on this grid.
+#'   * `prune_fallback_triggered`, `prune_fallback_reason`: present only when
+#'     the gate did trip; the rest of the fit is then the full-grid result and
+#'     the reason string records which check fired.
 #'   * `prior`: echoed input.
 #'
 #' @param spec Optional `tulpa_temporal` or `tulpa_spatial` spec object
@@ -270,6 +359,7 @@
 #'   example tulpaObs threads its marginalized single-season occupancy
 #'   likelihood (a scaled Bernoulli, with the latent occupancy state integrated
 #'   out) through this. Multi-block `prior` only. Default `NULL` (use `family`).
+#' @template hyperprior
 #'
 #' @references
 #' Rue, Martino & Chopin (2009). Approximate Bayesian inference for latent
@@ -295,11 +385,13 @@
 tulpa_nested_laplace <- function(y, n_trials, X, prior = NULL,
                             spec = NULL, data = NULL,
                             re_idx = NULL, n_re_groups = 0L, sigma_re = 1.0,
-                            family = "binomial", phi = 1.0,
+                            family = "binomial", phi = 1.0, offset = NULL,
                             likelihood = NULL,
+                            hyperprior = c("proper", "flat"),
                             control = list()) {
 
   tulpa_check_control(control, .CONTROL_KEYS$nested_laplace, "tulpa_nested_laplace")
+  hyperprior <- .hp_choice(match.arg(hyperprior))
   tm <- .tulpa_timer()
 
   # Perf/numerical knobs live in `control = list()` (matching tulpa()); the
@@ -308,6 +400,22 @@ tulpa_nested_laplace <- function(y, n_trials, X, prior = NULL,
   tol                <- control$tol %||% 1e-6
   n_threads          <- control$n_threads %||% 1L
   x_init             <- control$x_init
+  # Cheap-pass outer-grid screening. The kernels read a positive tolerance as
+  # "screen the lattice and prune", so the user-facing `prune` toggle gates it:
+  # FALSE always solves every cell, TRUE screens at `prune_tol`. Both the
+  # tolerance and the screening depth are validated whatever `prune` says, so a
+  # misspecified value is reported where the user set it rather than at the next
+  # fit that happens to switch pruning on.
+  prune              <- isTRUE(control$prune %||% FALSE)
+  # `prune_log_gap` states the same cut in nats -- the units the screened
+  # surface is measured in -- and replaces the tolerance when set.
+  prune_tol          <- .nl_prune_tol_from_control(
+    control,
+    .nl_check_prune_tol(control$prune_tol %||% .nl_screen("prune_tol")))
+  prune_tol_eff      <- if (prune) prune_tol else 0
+  screen_iters       <- .nl_check_screen_iters(
+    control$screen_iters %||% .nl_screen("iters"))
+  fitted_var         <- isTRUE(control$fitted_var %||% TRUE)
   # Subspace debias. The correction reports per-cell DRAWS
   # instead of the Gaussian-mixture moments, and those are built from the same
   # per-cell fixed-effect mode + precision `.nested_fixed_moments()` reads, so
@@ -318,9 +426,10 @@ tulpa_nested_laplace <- function(y, n_trials, X, prior = NULL,
   # Same shape as the subspace one: a second pass over the settled grid whose
   # per-cell particles are pooled into the reported draws.
   cila_cfg           <- .cila_config(control$cila)
-  keep_grid_hessians <- isTRUE(control$keep_grid_hessians) || !is.null(sd_cfg)
+  keep_grid_hessians <- isTRUE(control$keep_grid_hessians %||% TRUE) || !is.null(sd_cfg)
   diagnose_k         <- isTRUE(control$diagnose_k %||% TRUE)
   k_samples          <- as.integer(control$k_samples %||% .nl_diag("k_samples"))
+  k_tail_points      <- control$k_tail_points
   diagnose_skew      <- isTRUE(control$diagnose_skew %||% TRUE)
   skew_idx           <- control$skew_idx
   skew_correct       <- isTRUE(control$skew_correct %||% .nl_diag("skew_correct"))
@@ -398,40 +507,83 @@ tulpa_nested_laplace <- function(y, n_trials, X, prior = NULL,
   if (is.null(re_idx)) re_idx <- rep(0L, N)
   re_idx <- .validate_re_idx(re_idx, n_re_groups, N, "tulpa_nested_laplace")
 
+  if (!is.null(offset)) {
+    offset <- as.numeric(offset)
+    if (length(offset) != length(y) || any(!is.finite(offset))) {
+      stop("`offset` must be a finite numeric vector of length length(y) (",
+           length(y), ").", call. = FALSE)
+    }
+  }
+
   cargs <- list(
     y = as.numeric(y),
     n = as.integer(n_trials),
+    offset_nullable = offset,
     X = X,
     re_idx = as.numeric(re_idx),
     n_re_groups = as.integer(n_re_groups),
     sigma_re = as.numeric(sigma_re),
     family = family,
-    phi = as.numeric(phi),
+    phi = .phi_to_kernel(family, as.numeric(phi)),
     max_iter = as.integer(max_iter),
     tol = as.numeric(tol),
     n_threads = as.integer(n_threads),
     x_init_nullable = x_init,
     store_Q = isTRUE(keep_grid_hessians),
-    checkpoint_path = .ckpt$path
+    checkpoint_path = .ckpt$path,
+    prune_tol = prune_tol_eff,
+    screen_iters = screen_iters,
+    compute_fitted_var = fitted_var,
+    # Read by the dispatchers, which fold the outer hyperprior in R; never
+    # handed to a kernel.
+    hyperprior = hyperprior
   )
 
-  # cargs without the checkpoint, for the k-hat diagnostic re-evaluations.
-  cargs_no_ckpt <- utils::modifyList(cargs, list(checkpoint_path = ""))
+  # cargs without the checkpoint, for the k-hat diagnostic re-evaluations, and
+  # without the prune: a screened cell carries `log_marginal = -Inf`, which is
+  # not the inner marginal the importance ratio and the placement stencil read.
+  # They evaluate the grid they are handed, so every cell of it has to be solved.
+  cargs_no_ckpt <- utils::modifyList(
+    cargs, list(checkpoint_path = "", prune_tol = 0))
 
   p_fixed <- ncol(X)
 
   if (.is_multi_block_prior(prior)) {
+    # The multi-block entry takes the prune tolerance but declares neither the
+    # screening depth nor the per-row variance switch, so a pinned one is
+    # refused here rather than accepted and ignored.
+    if (!is.null(control$screen_iters)) {
+      stop("`control$screen_iters` applies to a single-block `prior`; ",
+           "this fit takes the multi-block dispatch.", call. = FALSE)
+    }
+    if (!is.null(control$fitted_var) && !isTRUE(control$fitted_var)) {
+      stop("`control$fitted_var` applies to a single-block `prior`; ",
+           "this fit takes the multi-block dispatch.", call. = FALSE)
+    }
     tm$mark("setup")
-    res <- .nl_dispatch_multi(cargs, prior, likelihood = likelihood,
-                              progress = .nl_progress_args(control),
-                              within_cell = within_cell)
+    # Every full-grid solve of this fit -- the first one and the placement
+    # pass's refit -- is screened at the same tolerance and gated the same way,
+    # so no reported grid is a pruned one whose screen ranking was unreliable.
+    solve_grid_multi <- function(prior_i) {
+      .nl_prune_gate(
+        .nl_dispatch_multi(cargs, prior_i, likelihood = likelihood,
+                           progress = .nl_progress_args(control),
+                           within_cell = within_cell),
+        prune_tol_eff,
+        function() .nl_dispatch_multi(
+          utils::modifyList(cargs, list(prune_tol = 0)), prior_i,
+          likelihood = likelihood, progress = .nl_progress_args(control),
+          within_cell = within_cell))
+    }
+    res <- solve_grid_multi(prior)
     tm$mark("grid")
     if (isTRUE(keep_grid_hessians)) {
       res <- .nl_attach_grid_hessians(res, p_fixed)
     }
     tm$mark("postproc")
     res <- .nl_attach_pareto_k(res, prior, cargs_no_ckpt, "multi", NULL,
-                               likelihood, k_samples, compute = diagnose_k)
+                               likelihood, k_samples, compute = diagnose_k,
+                               tail_points = k_tail_points)
 
     # The same placement pass the single-block path runs, over the block list.
     # Every axis is block-prefixed here, so a moved block is re-crossed on its
@@ -441,18 +593,15 @@ tulpa_nested_laplace <- function(y, n_trials, X, prior = NULL,
     multi_rescue <- .nl_registry_grid_rescue(
       res, NULL, prior,
       refit = function(prior_i) {
-        r <- .nl_dispatch_multi(cargs, prior_i, likelihood = likelihood,
-                                progress = .nl_progress_args(control),
-                                within_cell = within_cell)
+        r <- solve_grid_multi(prior_i)
         if (isTRUE(keep_grid_hessians)) r <- .nl_attach_grid_hessians(r, p_fixed)
         .nl_attach_pareto_k(r, prior_i, cargs_no_ckpt, "multi", NULL,
-                            likelihood, k_samples, compute = diagnose_k)
+                            likelihood, k_samples, compute = diagnose_k,
+                            tail_points = k_tail_points)
       },
       refit_log_marginal = function(prior_i, theta_mat) {
-        o <- .nl_dispatch_multi(cargs_no_ckpt, prior_i, likelihood = likelihood,
-                                theta_grid_override = theta_mat)
-        o$log_marginal +
-          .nl_multi_spde_log_prior(o$blocks, o$axis_offsets, theta_mat)
+        .nl_dispatch_multi(cargs_no_ckpt, prior_i, likelihood = likelihood,
+                           theta_grid_override = theta_mat)$log_marginal
       },
       auto = .prov$auto, multi = TRUE,
       policy = .nl_recenter_mode(control$auto_recenter))
@@ -481,7 +630,10 @@ tulpa_nested_laplace <- function(y, n_trials, X, prior = NULL,
     res$timing <- tm$timing()
     return(.finalize_fit(res, backend = "nested_laplace",
                          n_fixed = p_fixed, fixed_names = colnames(X),
-                         extra_class = c("tulpa_nested_laplace", "list")))
+                         extra_class = c("tulpa_nested_laplace", "list"),
+                         data = list(y = y, n_trials = n_trials,
+                                    model_matrix = X, family = family,
+                                    offset = offset, phi = phi)))
   }
 
   if (!is.null(likelihood)) {
@@ -495,23 +647,35 @@ tulpa_nested_laplace <- function(y, n_trials, X, prior = NULL,
   }
   type <- tolower(prior$type)
   tm$mark("setup")
-  res <- .nl_dispatch(type, cargs, prior)
-  res <- .nl_apply_ar1_rho_prior(res, type, prior)
+  # Every full-grid solve of this fit -- the first one and the placement pass's
+  # refit -- is screened at the same tolerance and gated the same way, so no
+  # reported grid is a pruned one whose screen ranking was unreliable.
+  solve_grid <- function(prior_i) {
+    .nl_prune_gate(
+      .nl_dispatch(type, cargs, prior_i, prior_i),
+      prune_tol_eff,
+      function() .nl_dispatch(type, utils::modifyList(cargs, list(prune_tol = 0)),
+                              prior_i, prior_i))
+  }
+  res <- solve_grid(prior)
   tm$mark("grid")
 
   # Integrate exp(log_marginal) over the outer grid. `log_marginal` is the
   # inner marginal in the internal (log-scale) hyperparameter parameterization
-  # the grid is laid out on, so the grid nodes are equally-weighted quadrature
-  # points and no user-scale volume element is applied -- adding one biases the
-  # scale-hyperparameter posterior (confirmed by CAR_proper (tau, rho) recovery).
-  res$weights <- .nl_normalise_weights_safe(res$log_marginal, "outer grid")
+  # the grid is laid out on, and each cell carries the prior mass of the node it
+  # sits at: its cell width on that coordinate times the axis's declared density
+  # (R/hyper_quadrature.R). On an evenly spaced grid the widths are equal and
+  # this reduces to the plain marginal softmax, so where the nodes fall changes
+  # the quadrature error and not the measure being integrated.
+  res <- .nl_attach_outer_integration(res, "outer grid")
   res <- .nl_posterior_moments(res, type, within = within_cell)
   if (isTRUE(keep_grid_hessians)) {
     res <- .nl_attach_grid_hessians(res, p_fixed)
   }
   tm$mark("postproc")
   res <- .nl_attach_pareto_k(res, prior, cargs_no_ckpt, "single", type, NULL,
-                             k_samples, compute = diagnose_k)
+                             k_samples, compute = diagnose_k,
+                             tail_points = k_tail_points)
 
   # Auto-recenter a railed default outer axis (the registry
   # generalization of the joint-path fix, extended over the family table):
@@ -524,18 +688,18 @@ tulpa_nested_laplace <- function(y, n_trials, X, prior = NULL,
   registry_rescue <- .nl_registry_grid_rescue(
     res, type, prior,
     refit = function(prior_i) {
-      r <- .nl_dispatch(type, cargs, prior_i)
-      r <- .nl_apply_ar1_rho_prior(r, type, prior_i)
-      r$weights <- .nl_normalise_weights_safe(r$log_marginal, "outer grid")
+      r <- solve_grid(prior_i)
+      r <- .nl_attach_outer_integration(r, "outer grid")
       r <- .nl_posterior_moments(r, type, within = within_cell)
       if (isTRUE(keep_grid_hessians)) r <- .nl_attach_grid_hessians(r, p_fixed)
       .nl_attach_pareto_k(r, prior_i, cargs_no_ckpt, "single", type, NULL,
-                          k_samples, compute = diagnose_k)
+                          k_samples, compute = diagnose_k,
+                          tail_points = k_tail_points)
     },
     refit_log_marginal = function(prior_i, theta_mat) {
       blk2 <- .nl_registry_write_theta(
         list(prior_i), theta_mat, colnames(theta_mat))[[1L]]
-      .nl_dispatch(type, cargs_no_ckpt, blk2)$log_marginal
+      .nl_dispatch(type, cargs_no_ckpt, blk2, prior_i)$log_marginal
     },
     auto = .prov$auto,
     policy = .nl_recenter_mode(control$auto_recenter))
@@ -550,12 +714,12 @@ tulpa_nested_laplace <- function(y, n_trials, X, prior = NULL,
   res <- .nl_subspace_debias_attach(
     res, sd_cfg,
     redispatch = function(req) .nl_dispatch(
-      type, utils::modifyList(cargs_no_ckpt, list(debias = req)), prior),
+      type, utils::modifyList(cargs_no_ckpt, list(debias = req)), prior, prior),
     p_fixed = p_fixed, beta_names = colnames(X))
   res <- .nl_cila_attach(
     res, cila_cfg,
     redispatch = function(req) .nl_dispatch(
-      type, utils::modifyList(cargs_no_ckpt, list(cila = req)), prior),
+      type, utils::modifyList(cargs_no_ckpt, list(cila = req)), prior, prior),
     p_fixed = p_fixed, beta_names = colnames(X),
     remoments = function(r) .nl_posterior_moments(r, type, within = within_cell))
   tm$mark("diagnostics")
@@ -563,7 +727,41 @@ tulpa_nested_laplace <- function(y, n_trials, X, prior = NULL,
   res$timing <- tm$timing()
   .finalize_fit(res, backend = "nested_laplace",
                 n_fixed = p_fixed, fixed_names = colnames(X),
-                extra_class = c("tulpa_nested_laplace", "list"))
+                extra_class = c("tulpa_nested_laplace", "list"),
+                data = list(y = y, n_trials = n_trials, model_matrix = X,
+                           family = family, offset = offset, phi = phi))
+}
+
+# --- cheap-pass screening knobs ---------------------------------------------
+#
+# The kernels read a tolerance in [0, 1) and a screening depth of at least one
+# Newton step. A value outside either range is a caller error rather than
+# something to clamp: a clamped tolerance reads back off the fit as a setting
+# that was applied.
+.nl_check_prune_tol <- function(x) {
+  if (length(x) != 1L || !is.numeric(x) || !is.finite(x) || x < 0 || x >= 1) {
+    stop("`prune_tol` must be a finite numeric in [0, 1).", call. = FALSE)
+  }
+  as.numeric(x)
+}
+
+.nl_check_screen_iters <- function(x) {
+  if (length(x) != 1L || !is.numeric(x) || !is.finite(x) || x < 1 ||
+      x > .Machine$integer.max || x != round(x)) {
+    stop("`screen_iters` must be a single integer >= 1.", call. = FALSE)
+  }
+  as.integer(x)
+}
+
+# Gate one screened grid solve. At a zero tolerance nothing was screened and
+# the kernel result is returned untouched, so a fit with pruning off takes the
+# same path it always did. Otherwise the shared cheap-pass gate decides whether
+# the kept set can be trusted, re-running `resolve_full` (the same solve at
+# `prune_tol = 0`) when it cannot.
+.nl_prune_gate <- function(res, prune_tol, resolve_full) {
+  if (prune_tol <= 0) return(res)
+  .joint_prune_safety_gate(res, resolve_full = resolve_full,
+                           fn = "tulpa_nested_laplace()")
 }
 
 # Positive-scale hyperparameter grid fields: one log-transform unconstrains
@@ -581,7 +779,8 @@ tulpa_nested_laplace <- function(y, n_trials, X, prior = NULL,
 # `refit` re-evaluates the inner marginal at a substituted grid through the SAME
 # driver `res` came from; run with the RNG restored so the fit is unperturbed.
 .nl_attach_pareto_k <- function(res, prior, cargs, dispatch_kind, type,
-                                likelihood, n_samples, compute = TRUE) {
+                                likelihood, n_samples, compute = TRUE,
+                                tail_points = NULL) {
   res$pareto_k        <- NA_real_
   res$pareto_k_is_ess <- NA_real_
   res$pareto_k_scope  <- "outer (hyperparameter) Gaussian proposal"
@@ -635,23 +834,37 @@ tulpa_nested_laplace <- function(y, n_trials, X, prior = NULL,
                    paste0("non-positive node on the log axis ", gfs)))
   }
 
+  # The batch is the diagnostic's own importance sample, not a grid the caller
+  # chose, so it runs with the internal-batch flag set: the cell-count advice
+  # would name a number `control$k_samples` sets and offer a remedy that does
+  # not reach it (gcol33/tulpa#614).
+  # Both dispatches read the integrated axes off the fit's own block, the
+  # multi-block one with the draws as its grid, so the draws are scored against
+  # the hyperprior the grid carries.
   refit <- function(theta_mat) {
     blk2 <- blk; blk2[[gfs]] <- as.numeric(theta_mat[, 1L])
-    prior2 <- if (is.list(prior) && is.null(prior$type)) list(blk2) else blk2
     lm <- tryCatch(
-      if (dispatch_kind == "multi")
-        .nl_dispatch_multi(cargs, prior2, likelihood = likelihood)$log_marginal
-      else .nl_dispatch(type, cargs, prior2)$log_marginal,
+      .nl_with_internal_batch(
+        if (dispatch_kind == "multi")
+          .nl_dispatch_multi(cargs, list(blk), likelihood = likelihood,
+                             theta_grid_override = theta_mat)$log_marginal
+        else .nl_dispatch(type, cargs, blk2, blk)$log_marginal),
       error = function(e) rep(-Inf, nrow(theta_mat)))
     if (length(lm) != nrow(theta_mat)) rep(-Inf, nrow(theta_mat)) else lm
   }
 
   kd <- .with_preserved_seed(tryCatch(
-    .nested_grid_pareto_k(matrix(log(tg), ncol = 1L), res$weights, refit, n_samples),
+    .nested_grid_pareto_k(matrix(log(tg), ncol = 1L), res$weights, refit,
+                          n_samples, tail_points = tail_points),
     error = function(e) NULL))
   if (is.null(kd)) return(decline("degenerate_proposal", "the scorer errored"))
   res$pareto_k <- kd$pareto_k
   res$pareto_k_is_ess <- kd$is_ess
+  res$pareto_k_proposal_source <- kd$proposal_source %||% NA_character_
+  res$pareto_k_first_pass <- kd$first_pass_k %||% NA_real_
+  # The GPD tail the shape was fitted on. A raised or capped tail was
+  # invisible on this path (gcol33/tulpa#692).
+  res$pareto_k_tail_points <- kd$tail_points %||% NA_integer_
   .k_attach_declined(res, kd)
 }
 
@@ -935,10 +1148,9 @@ tulpa_nested_laplace <- function(y, n_trials, X, prior = NULL,
         # hyperparameter uncertainty.
         n_g <- as.integer(p$n_grid %||% .nl_grid_par("spde_registry", "n"))
         span <- as.numeric(p$grid_span %||% .nl_grid_par("spde_registry", "span"))
-        rng_mode <- (p$prior_range %||%
-                       .nl_grid_par("spde_registry", "prior_range"))[1]
-        sig_mode <- (p$prior_sigma %||%
-                       .nl_grid_par("spde_registry", "prior_sigma"))[1]
+        rng_mode <- (.hp_range_anchor(p)$anchor %||%
+                       .nl_grid_par("spde_registry", "centre_range"))[1]
+        sig_mode <- (p$prior_sigma %||% .nl_scale_anchor())[1]
         rg <- exp(seq(log(rng_mode / span), log(rng_mode * span), length.out = n_g))
         sg <- exp(seq(log(sig_mode / span), log(sig_mode * span), length.out = n_g))
         gr <- expand.grid(range = rg, sigma = sg)
@@ -1157,7 +1369,7 @@ tulpa_nested_laplace <- function(y, n_trials, X, prior = NULL,
   )
 )
 
-.nl_dispatch <- function(type, a, p) {
+.nl_dispatch <- function(type, a, p, declared) {
   spec <- .NL_REGISTRY[[type]]
   if (is.null(spec)) {
     stop("Unknown prior type: ", type,
@@ -1168,30 +1380,68 @@ tulpa_nested_laplace <- function(y, n_trials, X, prior = NULL,
   # the "only supported inside a multi-block prior" message rather than a
   # field-name list for fields the single path would never read.
   if (!is.null(spec$cpp_fn)) .nl_check_block_fields(p, c("axis", "single"))
+  hyperprior <- .hp_choice(a$hyperprior)
+  a$hyperprior <- NULL
   p   <- spec$defaults(p, a)
-  out <- do.call(spec$cpp_fn, c(spec$pack(p), a))
   th  <- spec$theta(p)
+  tg  <- .nl_theta_matrix(list(theta_grid = th$grid, theta_names = th$names))
+  # `declared` is the block whose grid the fit integrates: `p` itself for a grid
+  # solve, the fit's block when `p` carries a stencil or a probe row written onto
+  # its grid fields. The integrated columns are read off that grid, since the
+  # rows written onto `p` vary a column the fit holds fixed or hold one it
+  # integrates at a single value (gcol33/tulpa#760).
+  dth <- spec$theta(spec$defaults(declared, a))
+  hp_declared <- .hp_declare(
+    .nl_theta_matrix(list(theta_grid = dth$grid, theta_names = dth$names)))
+  # The block's hyperprior, folded where every caller of the kernel reads it:
+  # the grid solve, the placement refit and its stencil, the k-hat refit. A
+  # screened solve ranks its cells with it too.
+  hp  <- list(.nl_block_log_hyperprior(p, tg, hyperprior, declared = hp_declared))
+  if ((a$prune_tol %||% 0) > 0) a$screen_log_offset <- .nl_screen_log_offset(tg, hp)
+  out <- do.call(spec$cpp_fn, c(spec$pack(p), a))
   out$theta_grid  <- th$grid
   out$theta_names <- th$names
-  out
+  .nl_fold_hyperprior(out, hp)
 }
 
-# Reweight the AR1 nested-Laplace outer grid by a Beta(a, b) prior on
-# u = (rho + 1)/2. The inner marginal (log_prior_ar1) carries no rho prior, so an
-# equal-weight grid implies a uniform rho; adding the Beta log-density at each
-# natural-scale grid rho makes the outer integration honor `rho_prior`. There is
-# no logit Jacobian here -- that belongs to the sampler's unconstrained
-# parameterization, not the grid. Default Beta(1, 1) is uniform and a no-op.
-.nl_apply_ar1_rho_prior <- function(res, type, prior) {
-  if (type != "ar1" || is.null(prior$rho_prior)) return(res)
-  ab <- .ar1_rho_beta_ab(prior$rho_prior)
-  if (ab[1L] == 1 && ab[2L] == 1) return(res)
-  tg <- res$theta_grid
-  if (is.null(tg) || !is.matrix(tg) || !("rho" %in% colnames(tg))) return(res)
-  u  <- pmin(pmax(0.5 * (tg[, "rho"] + 1), 1e-12), 1 - 1e-12)
-  res$log_marginal <- res$log_marginal +
-    (ab[1L] - 1) * log(u) + (ab[2L] - 1) * log1p(-u)
-  res
+# Per-cell log weight the cheap screen ranks with: the hyperprior R folds into
+# `log_marginal` after the kernel returns, plus the cell measure the grid's
+# weights are built with (`.nl_attach_outer_integration()`), in the grid's cell
+# order. Both are fixed by the grid before any cell is solved, and together with
+# the kernel's log-marginal they are the posterior weight a cell ends up with,
+# so the screen and the full pass rank the same quantity.
+.nl_screen_log_offset <- function(tg, hp_parts, specs = NULL) {
+  tg <- as.matrix(tg)
+  n  <- nrow(tg)
+  lp <- numeric(n)
+  axes <- character(0)
+  for (hp in hp_parts) {
+    lp <- lp + hp$lp
+    axes <- union(axes, hp$axes)
+  }
+  if (is.null(specs) && !is.null(colnames(tg))) {
+    specs <- .joint_axis_specs_from_grid(tg, folded_axes = axes)
+  }
+  lq <- .hyper_log_quad_weights(tg, specs)
+  off <- lp + (if (length(lq) == n) lq else 0)
+  off[is.na(off)] <- -Inf
+  off
+}
+
+# The outer grid's cell measure, its weights and its log evidence, set together
+# from the grid and the log-marginals the fit carries. `log_marginal` already
+# holds the hyperprior density the dispatch folded in (`R/hyperprior_default.R`),
+# so a folded axis is measured by its cell widths alone and its support is not
+# clipped to the span the nodes were declared over.
+.nl_attach_outer_integration <- function(res, what = "outer grid") {
+  tg    <- .nl_theta_matrix(res)
+  specs <- .joint_axis_specs_from_grid(
+    tg, folded_axes = res$log_hyperprior_axes)
+  res$log_quad     <- .hyper_log_quad_weights(tg, specs)
+  res$axis_support <- .hyper_grid_supports(tg, specs)
+  res$weights      <- .nl_normalise_weights_safe(res$log_marginal, what,
+                                                 log_quad = res$log_quad)
+  .nl_attach_evidence(res, tg, specs)
 }
 
 # Normalise log-marginals to integration weights summing to 1. The single
@@ -1202,7 +1452,46 @@ tulpa_nested_laplace <- function(y, n_trials, X, prior = NULL,
 # unguarded variant -- a single `max(lm)` over a grid with one +Inf / NaN cell
 # would collapse every weight to NaN and break the grid sampler. `what` names
 # the grid in the degenerate-case warning.
-.nl_normalise_weights_safe <- function(lm, what = "grids / data") {
+# `log_quad` adds the per-cell log quadrature weight of the outer grid (see
+# R/hyper_quadrature.R), so posterior weight is likelihood times prior mass
+# rather than likelihood alone. Callers integrating over a hyperparameter grid
+# pass it; callers weighting something that is not a quadrature rule leave it
+# NULL.
+#' Normalise outer-grid log-marginals to posterior cell weights
+#'
+#' The single weight normaliser for every outer hyperparameter grid: softmax
+#' of `lm` (optionally plus a per-cell log quadrature weight) into weights
+#' summing to 1. Non-finite nodes (an inner Newton diverging in a grid
+#' corner) are dropped from the max-shift and zeroed before renormalising
+#' over the finite cells; an all-non-finite grid returns all-`NA` with a
+#' warning rather than `NaN`. Intended for reconstructing a fit's outer-grid
+#' posterior weights (with [tulpa_theta_matrix()] and
+#' [tulpa_grid_log_quad()]) when the fit doesn't already carry `fit$weights`.
+#'
+#' @param lm Numeric vector of per-cell log-marginal-likelihood values.
+#' @param what Label for the grid, used only in the degenerate-case warning.
+#' @param log_quad Optional per-cell log quadrature weight (prior mass) of
+#'   the outer grid, e.g. from [tulpa_grid_log_quad()]; `NULL` normalises the
+#'   likelihood alone.
+#' @return Numeric vector of posterior cell weights summing to 1, the same
+#'   length as `lm`, or all-`NA` if no cell carries finite mass.
+#' @seealso [tulpa_theta_matrix()], [tulpa_grid_log_quad()]
+#' @export
+tulpa_normalise_weights_safe <- function(lm, what = "grids / data",
+                                          log_quad = NULL) {
+  .nl_normalise_weights_safe(lm, what = what, log_quad = log_quad)
+}
+
+.nl_normalise_weights_safe <- function(lm, what = "grids / data",
+                                       log_quad = NULL) {
+  if (!is.null(log_quad)) {
+    if (length(log_quad) != length(lm)) {
+      stop(sprintf("`log_quad` has length %d but `lm` has length %d (%s).",
+                   length(log_quad), length(lm), what), call. = FALSE)
+    }
+    lm <- lm + log_quad
+    lm[is.na(lm)] <- -Inf
+  }
   finite_lm <- lm[is.finite(lm)]
   if (length(finite_lm) == 0L) {
     warning(sprintf("All grid points returned non-finite log_marginal -- check %s.", what),
@@ -1213,6 +1502,62 @@ tulpa_nested_laplace <- function(y, n_trials, X, prior = NULL,
   w[!is.finite(w)] <- 0
   if (sum(w) == 0) return(rep(NA_real_, length(lm)))
   w / sum(w)
+}
+
+# Log evidence of an outer hyperparameter grid.
+#
+# `log_marginal` carries a normalised hyperprior density on each axis's
+# integration coordinate and `log_measure` is each cell's ABSOLUTE log volume on
+# that coordinate (its widths, and a declared atom's probability), so
+#
+#   log p(y) = log sum_k exp(log_marginal_k + log_measure_k)
+#
+# is the evidence under the prior itself, not under a copy of it restricted to
+# the grid and renormalised there. Where the grid covers the posterior the
+# value does not move with where the nodes were laid or how many there are.
+#
+# A cell whose inner solve failed (`log_marginal` NaN, or `+Inf` from a non-PD
+# Hessian) contributes nothing: its likelihood is unknown and is not guessed.
+# A cell screened out by the pruning pass carries `-Inf` and contributes
+# nothing either, which is what screening it asserted.
+.nl_outer_log_evidence <- function(log_marginal, log_measure) {
+  lq <- as.numeric(log_measure)
+  if (length(lq) != length(log_marginal)) {
+    stop(sprintf(paste0("Outer evidence: `log_marginal` has length %d but the ",
+                        "measure has %d."),
+                 length(log_marginal), length(lq)), call. = FALSE)
+  }
+  known <- !is.na(log_marginal) & log_marginal < Inf & !is.na(lq)
+  if (!any(known)) return(NA_real_)
+  ev <- .tulpa_logsumexp(log_marginal[known] + lq[known])
+  if (is.finite(ev)) ev else NA_real_
+}
+
+# Record a grid's evidence on `res`, or why it has none. The evidence exists
+# only when every integrated axis carries a normalised density; otherwise it is
+# `NA` with `log_evidence_declined = "improper_hyperprior"` and
+# `log_evidence_declined_axes` naming each such axis and its reason.
+.nl_attach_evidence <- function(res, tg, specs,
+                                log_measure = .hyper_log_quad_weights(
+                                  tg, specs, absolute = TRUE,
+                                  refining = res$refining_axis)) {
+  uncovered <- .nl_evidence_uncovered(tg, specs, res)
+  res$log_evidence_declined_axes <- if (length(uncovered)) uncovered else NULL
+  if (length(uncovered)) {
+    res$log_evidence <- NA_real_
+    res$log_evidence_declined <- "improper_hyperprior"
+    return(res)
+  }
+  n <- length(res$log_marginal)
+  if (!is.null(tg) && nrow(as.matrix(tg)) == n &&
+      !length(.hp_integrated_axes(as.matrix(tg)))) {
+    # Every axis is pinned, so each is part of the model and the grid integrates
+    # nothing: its cells are copies of one point, which together carry measure 1.
+    log_measure <- rep(-log(n), n)
+  }
+  res$log_evidence <- .nl_outer_log_evidence(res$log_marginal, log_measure)
+  res$log_evidence_declined <- NULL
+  res
 }
 
 
@@ -1259,6 +1604,15 @@ tulpa_nested_laplace <- function(y, n_trials, X, prior = NULL,
   modes_mat <- res$modes  # n_grid x n_x
 
   for (k in seq_len(n_grid)) {
+    # A cell the cheap screen pruned is never solved, so it holds no precision
+    # to retain and its CSC slot is empty. Skip the write and the slot stays
+    # blank, which is what `.nested_fixed_moments()` already reads: it drops any
+    # cell whose block is absent, and a pruned cell carries log_marginal = -Inf
+    # and hence zero weight, so nothing the report reads was in it. Skipping
+    # rather than assigning NULL is what keeps `grid_modes` / `grid_hessians`
+    # parallel to `weights` -- assigning NULL removes the element and shortens
+    # the list, which NAs the whole coefficient table (gcol33/tulpa#345).
+    if (length(Q_p[[k]]) != n_x + 1L) next
     L <- Matrix::sparseMatrix(
       i = Q_i[[k]], p = Q_p[[k]], x = Q_x[[k]],
       dims = c(n_x, n_x), index1 = FALSE
@@ -1506,13 +1860,62 @@ tulpa_nested_laplace <- function(y, n_trials, X, prior = NULL,
   list(grid = grid, names = colnames(grid), prepared = p)
 }
 
-# Soft cap on joint-grid cell count. CCD integration around a pilot mode is
-# the standard fix for k >= 3 blocks (see R/ccd_grid.R); the multi-block driver
-# uses the Cartesian outer integration, which is correct but scales
-# multiplicatively in the block count, so warn past the soft cap and proceed.
-.NL_MULTI_GRID_WARN <- 50L
-# Hard cap on the same count, and the default value of `control$max_grid_cells`.
+# Hard cap on the joint-grid cell count, and the default value of
+# `control$max_grid_cells`.
 .NL_MULTI_GRID_HARD_CAP <- 2048L
+
+# Wall-clock threshold, in seconds, above which a multi-block outer-grid
+# solve gets a "this was slow" warning. Cell count alone does not predict
+# solve time -- a family/likelihood pair, N, or a block's own per-cell cost
+# (gcol33/tulpa#638) can make the same cell count cheap or expensive, and the
+# engine's own default per-block grids already exceed any static cell-count
+# threshold that fires on genuinely slow custom grids (gcol33/tulpa#820) --
+# so the trigger is measured cost, read off the "grid" bucket both multi-block
+# dispatchers already mark with `.tulpa_timer()`.
+.NL_MULTI_GRID_WARN_SECONDS <- 2
+
+# Shared by the single-response multi-block dispatch (`tulpa_nested_laplace()`
+# in this file) and the joint multi-block dispatch
+# (`R/nested_laplace_joint_multi.R`): both solve their outer grid in one call
+# and mark its elapsed time as the "grid" timing bucket, so both warn off that
+# measurement through this one function rather than keeping two copies of the
+# same message.
+.nl_multi_grid_warn <- function(elapsed, n_cells, remedy) {
+  if (isTRUE(elapsed > .NL_MULTI_GRID_WARN_SECONDS) && !.nl_internal_batch()) {
+    warning(sprintf(
+      "Multi-block outer grid (%d cells) took %s to solve. %s",
+      n_cells, .format_duration(elapsed), remedy
+    ), call. = FALSE)
+  }
+  invisible(NULL)
+}
+
+# Whether the dispatch currently running is an INTERNAL batch rather than the
+# grid the caller asked for. The soft-cap warning above is advice addressed to
+# whoever chose the cell count, and on an internal batch that is not the caller:
+# the outer Pareto-k diagnostic re-evaluates `log_marginal` at `k_samples`
+# importance draws by substituting them for the block's grid axis, so a 7-node
+# fit warned about a cell count the diagnostic's own budget set and advised
+# reducing per-block grid sizes, which does not reach the number in the message
+# (gcol33/tulpa#614). The HARD cap is deliberately not gated: it is a resource
+# ceiling the front door publishes so every re-dispatch enforces the caller's
+# value, and an internal batch is exactly as expensive as a user one.
+#
+# Transported on an option rather than an argument because the two warning sites
+# sit behind different dispatchers -- `.nl_dispatch_multi()` takes `cargs`, the
+# joint multi-block driver does not -- which is the same reason
+# `tulpa.nl_progress` and `tulpa.nl_checkpoint` are options.
+.nl_internal_batch <- function() {
+  isTRUE(getOption("tulpa.nl_internal_batch", FALSE))
+}
+
+# Run `expr` with that flag set. Nests and restores, so an internal batch that
+# itself re-dispatches stays internal.
+.nl_with_internal_batch <- function(expr) {
+  op <- options(tulpa.nl_internal_batch = TRUE)
+  on.exit(options(op), add = TRUE)
+  force(expr)
+}
 
 # Resolve the hard cap for one fit. `control$max_grid_cells = <n>` moves the
 # ceiling in either direction: the default refuses the accidental blow-up, and a
@@ -1599,6 +2002,12 @@ tulpa_nested_laplace <- function(y, n_trials, X, prior = NULL,
     paste0("b", b, ".", colnames(block_grids[[b]]))
   }))
 
+  # Set only on the Cartesian-product branch below, so the post-solve timing
+  # check (which reads these) is a no-op on a single-cell override re-dispatch
+  # (skew / k-hat / recenter probes -- already never the caller's own grid).
+  n_cells <- NA_integer_
+  grid_warn_remedy <- NULL
+
   if (!is.null(theta_grid_override)) {
     joint_grid <- as.matrix(theta_grid_override)
     total_axes <- axis_offsets[length(axis_offsets)]
@@ -1609,19 +2018,14 @@ tulpa_nested_laplace <- function(y, n_trials, X, prior = NULL,
     }
     colnames(joint_grid) <- axis_names
   } else {
-    # Cartesian product of per-block row indices.
+    # Cartesian product of per-block row indices. This path has no CCD
+    # alternative (unlike the joint multi-block dispatch), so the only
+    # remedy for a slow or oversized grid is a smaller one.
     row_counts <- vapply(block_grids, nrow, integer(1))
     idx <- do.call(expand.grid, lapply(row_counts, seq_len))
     n_cells <- nrow(idx)
-    .nl_check_grid_cap(
-      n_cells, .nl_max_grid_cells(),
-      "Reduce per-block grid sizes or wait for CCD integration support.")
-    if (n_cells > .NL_MULTI_GRID_WARN) {
-      warning(sprintf(
-        "Joint multi-block grid has %d cells (>%d). Each cell costs one inner Newton solve; reduce per-block grid sizes if this is slow. CCD integration is a follow-up.",
-        n_cells, .NL_MULTI_GRID_WARN
-      ), call. = FALSE)
-    }
+    grid_warn_remedy <- "Reduce per-block grid sizes."
+    .nl_check_grid_cap(n_cells, .nl_max_grid_cells(), grid_warn_remedy)
 
     # Concatenate per-block axis grids into the joint theta_grid.
     joint_grid <- do.call(cbind, lapply(seq_along(block_grids), function(b) {
@@ -1636,6 +2040,25 @@ tulpa_nested_laplace <- function(y, n_trials, X, prior = NULL,
     .nl_block_spec_for_cpp(prepared[[b]], block_joint)
   })
 
+  # Every block's hyperprior over its own columns, folded on the override path
+  # too: a placement stencil re-evaluates the marginal through it and has to
+  # difference the target the grid integrates. A screened solve ranks with it.
+  # The integrated columns are read off the block's declared grid, never off the
+  # override, whose rows hold a fixed axis at other values or an integrated one
+  # at a single value (gcol33/tulpa#760).
+  hp_parts <- lapply(seq_along(prepared), function(b) {
+    cols <- (axis_offsets[b] + 1L):axis_offsets[b + 1L]
+    tg_b <- joint_grid[, cols, drop = FALSE]
+    colnames(tg_b) <- colnames(block_grids[[b]])
+    blk <- prepared[[b]]
+    blk$log_prior_theta_per_grid <- blocks_spec[[b]]$log_prior_theta_per_grid
+    .hp_prefix(.nl_block_log_hyperprior(blk, tg_b, .hp_choice(cargs$hyperprior),
+                                        declared = .hp_declare(block_grids[[b]])),
+               paste0("b", b, "."))
+  })
+  prune_tol <- as.numeric(cargs$prune_tol %||% 0)
+
+  grid_solve_start <- proc.time()[["elapsed"]]
   out <- cpp_nested_laplace_multi(
     y           = cargs$y,
     n           = cargs$n,
@@ -1653,6 +2076,10 @@ tulpa_nested_laplace <- function(y, n_trials, X, prior = NULL,
     n_threads   = cargs$n_threads,
     x_init_nullable = cargs$x_init_nullable,
     store_Q     = isTRUE(cargs$store_Q),
+    # Cheap-pass screening tolerance; 0 (the default) solves every cell. A
+    # single-cell re-dispatch inherits it harmlessly -- the driver screens only
+    # a grid with more than one cell.
+    prune_tol   = prune_tol,
     likelihood  = likelihood,
     progress          = isTRUE(progress$progress),
     progress_every    = as.integer(progress$progress_every),
@@ -1662,54 +2089,31 @@ tulpa_nested_laplace <- function(y, n_trials, X, prior = NULL,
     compute_skew      = isTRUE(compute_skew),
     skew_idx          = skew_idx,
     debias            = debias,
-    cila              = cila
+    cila              = cila,
+    offset_nullable   = cargs$offset_nullable,
+    screen_log_offset = if (prune_tol > 0)
+                          .nl_screen_log_offset(joint_grid, hp_parts)
   )
+  if (!is.null(grid_warn_remedy)) {
+    .nl_multi_grid_warn(proc.time()[["elapsed"]] - grid_solve_start,
+                        n_cells, grid_warn_remedy)
+  }
 
   out$theta_grid   <- joint_grid
   out$theta_names  <- axis_names
   out$axis_offsets <- axis_offsets
   out$blocks       <- prepared
 
+  out <- .nl_fold_hyperprior(out, hp_parts)
+
   if (!is.null(theta_grid_override)) return(out)  # skew re-dispatch / the
-                                                  # auto-recenter FD stencil:
-                                                  # the caller adds whatever
-                                                  # tail it needs
+                                                  # auto-recenter FD stencil
 
-  out$log_marginal <- out$log_marginal +
-    .nl_multi_spde_log_prior(prepared, axis_offsets, joint_grid)
-
-  out$weights      <- .nl_normalise_weights_safe(out$log_marginal, "multi-block outer grid")
+  out <- .nl_attach_outer_integration(out, "multi-block outer grid")
   out <- .nl_posterior_moments_multi(out, prepared, axis_offsets, joint_grid,
                                      within = match.arg(within_cell))
   out
 }
-
-# Each SPDE block's PC prior on (range, sigma), per outer grid cell. The areal
-# / temporal / iid blocks carry their hyperprior inside the C++ block log_prior
-# (it folds into log|Q|); the SPDE factory drops the log|Q|/2 normalizer (it is
-# recovered from the Laplace Hessian log-determinant) and carries no
-# hyperprior, so the proper Matern PC prior is added on the R side -- the same
-# prior + closed form the single-Laplace SPDE path uses
-# (`pc_prior_log_density`), so both paths integrate the same posterior.
-#
-# Its own function because the auto-recenter's FD stencil re-evaluates the
-# inner marginal through `theta_grid_override`, which returns before the tail
-# above: a stencil differencing the marginal WITHOUT this term would be
-# differencing a different target than the one the grid integrates.
-.nl_multi_spde_log_prior <- function(prepared, axis_offsets, joint_grid) {
-  lp <- numeric(nrow(joint_grid))
-  for (b in seq_along(prepared)) {
-    pb <- prepared[[b]]
-    if (!identical(tolower(pb$type %||% ""), "spde")) next
-    cols <- (axis_offsets[b] + 1L):axis_offsets[b + 1L]
-    lp <- lp + pc_prior_log_density(as.numeric(joint_grid[, cols[1L]]),
-                                    as.numeric(joint_grid[, cols[2L]]),
-                                    pb$prior_range %||% c(1, 0.5),
-                                    pb$prior_sigma %||% c(1, 0.5))
-  }
-  lp
-}
-
 
 #' Build a `prior` list for [tulpa_nested_laplace()] from a tulpa spec object
 #'
@@ -1837,31 +2241,41 @@ prior_from_spec <- function(spec, data) {
   # option a caller (e.g. tulpaObs) may have set for a whole fit, so progress
   # reaches grids run through fixed-control internal paths (the EM per-block
   # nested solve) without threading the knobs through every layer.
-  has_ctrl <- !is.null(control$progress) || !is.null(control$progress.every) ||
+  # `[[` (exact) not `$` on `progress`: it is a strict prefix of the other three
+  # keys, so a `$` read returns whichever ONE of them is set (and NULL when two
+  # are, the match being ambiguous). `isTRUE()` of a file path or a cadence is
+  # FALSE, which turned asking for the heartbeat file into switching the console
+  # bar off.
+  has_ctrl <- !is.null(control[["progress"]]) || !is.null(control$progress.every) ||
               !is.null(control$progress.throttle) || !is.null(control$progress.file)
   if (!has_ctrl) {
     opt <- getOption("tulpa.nl_progress", NULL)
     if (is.list(opt)) return(opt)
   }
   list(
-    progress          = isTRUE(control$progress %||% TRUE),
+    progress          = isTRUE(control[["progress"]] %||% TRUE),
     progress_every    = as.integer(control$progress.every    %||% 0L),
     progress_throttle = as.numeric(control$progress.throttle %||% 2),
     progress_file     = as.character(control$progress.file    %||% "")
   )
 }
 
-# Resolve the grid-cell checkpoint spec to a normalized
-# `list(path, resume)`. `control$checkpoint = list(path = , resume = TRUE)`
-# enables it; `resume = FALSE` starts over (the front door removes any prior
-# file before the first kernel call). Like `.nl_progress_args`, an absent
-# control key falls back to the scoped `tulpa.nl_checkpoint` option so the
-# checkpoint reaches grids run through fixed-control internal paths.
-.nl_checkpoint_args <- function(control) {
+# Resolve a checkpoint spec to a normalized `list(path, resume)`.
+# `control$checkpoint = list(path = , resume = TRUE)` enables it; `resume =
+# FALSE` starts over (the caller removes any prior file before the first
+# kernel call). Like `.nl_progress_args`, an absent control key falls back to
+# the scoped `tulpa.nl_checkpoint` option (when `use_option`, the default) so
+# the checkpoint reaches grids run through fixed-control internal paths;
+# `tulpa_sample_glmm()`'s per-chain checkpoint is a distinct namespace from
+# the nested-Laplace grid-cell one this option serves, so it reads
+# `use_option = FALSE` and ignores it.
+.nl_checkpoint_args <- function(control, use_option = TRUE) {
   cp <- control$checkpoint
   if (is.null(cp)) {
-    opt <- getOption("tulpa.nl_checkpoint", NULL)
-    if (is.list(opt)) return(opt)
+    if (use_option) {
+      opt <- getOption("tulpa.nl_checkpoint", NULL)
+      if (is.list(opt)) return(opt)
+    }
     return(list(path = "", resume = TRUE))
   }
   if (!is.list(cp) || is.null(cp$path) || !is.character(cp$path) ||

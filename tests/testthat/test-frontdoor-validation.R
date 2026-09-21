@@ -3,6 +3,7 @@
 # on every profile.
 
 test_that("flagship drivers reject a mismatched design (#156f)", {
+  skip_on_cran()
   y <- rbinom(20, 1, 0.5)
   region <- rep(1:5, length.out = 20)
   prior <- list(list(type = "iid", obs_idx = region, n_units = 5L,
@@ -41,6 +42,7 @@ test_that("tulpa_em_laplace hard-errors on the ignored spatial/re_list (#156g)",
 })
 
 test_that("statistical hyperpriors ride re_prior, not control (#156b)", {
+  skip_on_cran()
   set.seed(1)
   d <- data.frame(y = rbinom(120, 1, 0.5), x = rnorm(120),
                   g = factor(rep(1:12, 10)))
@@ -117,4 +119,125 @@ test_that("plot.tulpa_st_summary hard-errors on an unknown type (#156g)", {
     n_spatial = 3L, n_times = 2L,
     class = c("tulpa_st_summary", "data.frame"))
   expect_error(plot(st, type = "not_a_type"), "Unknown plot")
+})
+
+# gcol33/tulpa#613. `.assert_finite_model_inputs()` was wired into three doors by
+# hand and not into `tulpa_nested_laplace()`, so an NA response was absorbed
+# rather than refused: every grid cell came back `converged = FALSE` with
+# `log_marginal = 0`, the softmax over those weights was uniform, a fit was
+# returned, and the grid-Hessian retention then reported the user's own missing
+# data to them as "This is a tulpa bug; please report." The guard now sits in
+# `.validate_glm_design()`, which is what every `(y, X, n_trials)` door goes
+# through, so these are one fix rather than four.
+test_that("tulpa_nested_laplace() refuses a non-finite response (#613)", {
+  set.seed(1)
+  N <- 24L
+  region <- rep(seq_len(6L), each = 4L)
+  X <- cbind(1, rnorm(N))
+  prior <- list(list(type = "iid", obs_idx = region, n_units = 6L,
+                     sigma_grid = exp(seq(log(0.2), log(1.5), length.out = 7))))
+  call_nl <- function(y, X) {
+    tulpa_nested_laplace(
+      y = y, n_trials = rep(1L, N), X = X, prior = prior,
+      family = "gaussian", phi = 0.49,
+      control = list(keep_grid_hessians = TRUE, progress = FALSE))
+  }
+
+  # The issue's own repro: an all-NA response.
+  expect_error(call_nl(rep(NA_real_, N), X),
+               "Non-finite value\\(s\\) in the response")
+  # It errors rather than warning about a missing Q, which is what sent the
+  # reporter looking for a package defect.
+  expect_error(call_nl(rep(NA_real_, N), X), "tulpa_nested_laplace")
+
+  # One bad row, and the message names it.
+  y1 <- rnorm(N); y1[7L] <- NA_real_
+  expect_error(call_nl(y1, X), "first at row 7")
+  y2 <- rnorm(N); y2[3L] <- Inf
+  expect_error(call_nl(y2, X), "first at row 3")
+
+  # The model-matrix arm too.
+  Xb <- X; Xb[11L, 2L] <- NaN
+  expect_error(call_nl(rnorm(N), Xb),
+               "Non-finite value\\(s\\) in the model matrix")
+  expect_error(call_nl(rnorm(N), Xb), "first at row 11")
+
+  # A clean design still passes the guard (fit cost is tier 2; the guard is
+  # what this asserts, so stop at the validator).
+  expect_silent(.validate_glm_design(rnorm(N), X, rep(1L, N), "where"))
+})
+
+test_that("the guard reaches every door sharing .validate_glm_design (#613)", {
+  set.seed(2)
+  N <- 20L
+  X <- cbind(1, rnorm(N))
+  y <- rbinom(N, 1L, 0.5); y[5L] <- NA_integer_
+  expect_error(
+    tulpa_gibbs(y = y, n_trials = rep(1L, N), X = X,
+                group = rep(1L, N), n_groups = 1L, family = "binomial"),
+    "Non-finite value\\(s\\) in the response")
+  # The message is prefixed with the door that raised it, not with tulpa().
+  expect_error(
+    tulpa_gibbs(y = y, n_trials = rep(1L, N), X = X,
+                group = rep(1L, N), n_groups = 1L, family = "binomial"),
+    "tulpa_gibbs")
+  # And the shared validator is where it lives, so a door added later inherits
+  # it by construction.
+  expect_error(.validate_glm_design(y, X, rep(1L, N), "a_new_door"),
+               "a_new_door: Non-finite")
+})
+
+# ============================================================================
+# One spatial gate, whichever way the spec arrives (gcol33/tulpa#670, #671)
+# ============================================================================
+
+.sp_frontdoor_data <- function(n_units = 10L, n_obs = 100L) {
+  set.seed(4L)
+  data.frame(s = factor(rep(seq_len(n_units), length.out = n_obs)),
+             x = rnorm(n_obs), yb = rbinom(n_obs, 1L, 0.5))
+}
+
+.sp_chain_W <- function(n) {
+  W <- matrix(0, n, n)
+  for (i in seq_len(n - 1L)) { W[i, i + 1L] <- 1; W[i + 1L, i] <- 1 }
+  W
+}
+
+test_that("a bare-list adjacency passes the same graph check as a constructor", {
+  d <- .sp_frontdoor_data()
+  W <- .sp_chain_W(10L)
+  asym <- W
+  asym[lower.tri(asym)] <- 0
+  expect_error(
+    tulpa(yb ~ x + spatial(s), data = d, family = "binomial",
+          spatial = list(type = "icar", adjacency = asym), mode = "laplace"),
+    "symmetric")
+  expect_no_error(
+    tulpa(yb ~ x + spatial(s), data = d, family = "binomial",
+          spatial = list(type = "icar", adjacency = W), mode = "laplace"))
+})
+
+test_that("the graph is reported once, not once per gate", {
+  skip_on_cran()
+  d <- .sp_frontdoor_data()
+  seen <- character(0)
+  withCallingHandlers(
+    tulpa(yb ~ x + spatial(s), data = d, family = "binomial",
+          spatial = spatial_car(adjacency = .sp_chain_W(10L) * 2, level = "obs"),
+          mode = "laplace"),
+    warning = function(w) {
+      seen <<- c(seen, conditionMessage(w))
+      invokeRestart("muffleWarning")
+    })
+  expect_equal(sum(grepl("weighted graph", seen)), 1L)
+})
+
+test_that("spatial$type is normalised once, before the selector reads it", {
+  d <- .sp_frontdoor_data()
+  W <- .sp_chain_W(10L)
+  up <- tulpa(yb ~ x + spatial(s), data = d, family = "binomial",
+              spatial = list(type = "ICAR", adjacency = W), mode = "laplace")
+  lo <- tulpa(yb ~ x + spatial(s), data = d, family = "binomial",
+              spatial = list(type = "icar", adjacency = W), mode = "laplace")
+  expect_equal(coef(up), coef(lo))
 })

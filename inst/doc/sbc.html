@@ -396,21 +396,25 @@ from the Gaussian matching its first two moments.</p>
 <span id="cb2-14"><a href="#cb2-14" tabindex="-1"></a>       <span class="at">theta  =</span> <span class="fu">c</span>(<span class="at">beta1 =</span> BETA[<span class="dv">1</span>], <span class="at">beta2 =</span> BETA[<span class="dv">2</span>], <span class="at">sigma =</span> sigma))</span>
 <span id="cb2-15"><a href="#cb2-15" tabindex="-1"></a>}</span>
 <span id="cb2-16"><a href="#cb2-16" tabindex="-1"></a></span>
-<span id="cb2-17"><a href="#cb2-17" tabindex="-1"></a>fit_one <span class="ot">&lt;-</span> <span class="cf">function</span>(d) {</span>
+<span id="cb2-17"><a href="#cb2-17" tabindex="-1"></a>fit_one <span class="ot">&lt;-</span> <span class="cf">function</span>(d, <span class="at">diagnose =</span> <span class="cn">FALSE</span>) {</span>
 <span id="cb2-18"><a href="#cb2-18" tabindex="-1"></a>  <span class="fu">tulpa_nested_laplace</span>(</span>
 <span id="cb2-19"><a href="#cb2-19" tabindex="-1"></a>    <span class="at">y =</span> d<span class="sc">$</span>y, <span class="at">n_trials =</span> <span class="fu">rep</span>(<span class="dv">1</span><span class="dt">L</span>, <span class="fu">length</span>(d<span class="sc">$</span>y)), <span class="at">X =</span> d<span class="sc">$</span>X,</span>
 <span id="cb2-20"><a href="#cb2-20" tabindex="-1"></a>    <span class="at">prior =</span> <span class="fu">list</span>(<span class="fu">list</span>(<span class="at">type =</span> <span class="st">&quot;iid&quot;</span>, <span class="at">obs_idx =</span> d<span class="sc">$</span>region,</span>
 <span id="cb2-21"><a href="#cb2-21" tabindex="-1"></a>                      <span class="at">n_units =</span> <span class="fu">max</span>(d<span class="sc">$</span>region), <span class="at">sigma_grid =</span> GRID)),</span>
 <span id="cb2-22"><a href="#cb2-22" tabindex="-1"></a>    <span class="at">family =</span> <span class="st">&quot;gaussian&quot;</span>, <span class="at">phi =</span> PHI,</span>
 <span id="cb2-23"><a href="#cb2-23" tabindex="-1"></a>    <span class="at">control =</span> <span class="fu">list</span>(<span class="at">n_threads =</span> <span class="dv">1</span><span class="dt">L</span>, <span class="at">keep_grid_hessians =</span> <span class="cn">TRUE</span>,</span>
-<span id="cb2-24"><a href="#cb2-24" tabindex="-1"></a>                   <span class="at">auto_recenter =</span> <span class="cn">FALSE</span>, <span class="at">progress =</span> <span class="cn">FALSE</span>))</span>
-<span id="cb2-25"><a href="#cb2-25" tabindex="-1"></a>}</span></code></pre></div>
+<span id="cb2-24"><a href="#cb2-24" tabindex="-1"></a>                   <span class="at">auto_recenter =</span> <span class="cn">FALSE</span>, <span class="at">progress =</span> <span class="cn">FALSE</span>,</span>
+<span id="cb2-25"><a href="#cb2-25" tabindex="-1"></a>                   <span class="at">diagnose_k =</span> diagnose, <span class="at">diagnose_skew =</span> diagnose))</span>
+<span id="cb2-26"><a href="#cb2-26" tabindex="-1"></a>}</span></code></pre></div>
 <p><code>simulate_one()</code> has to be a pure function of its seed,
 and it returns <code>theta</code>, the named vector of true values the
 PIT is taken against. <code>auto_recenter = FALSE</code> is not a speed
 knob: the argument that the <code>sigma</code> PIT is uniform needs the
 fitted grid to be the same seven points the truth was drawn from, and a
 recentred grid breaks it.</p>
+<p>The single-fit reliability diagnostics are off inside the loop. Each
+one costs its own batch of inner solves per fit, and the last section is
+where they get read, on one fit rather than two hundred.</p>
 </div>
 <div id="reporting-a-fit-in-a-shape-sbc-can-read" class="section level2">
 <h2>Reporting a fit in a shape <code>sbc()</code> can read</h2>
@@ -655,7 +659,7 @@ false-positive rate is 0.0117 against a nominal 0.05, and power reaches
 makes a pass the weaker one.</p>
 <p><code>diagnostics()</code> reads both at once when you hand it the
 calibration result.</p>
-<div class="sourceCode" id="cb11"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb11-1"><a href="#cb11-1" tabindex="-1"></a>fit <span class="ot">&lt;-</span> <span class="fu">fit_one</span>(d_obs)</span>
+<div class="sourceCode" id="cb11"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb11-1"><a href="#cb11-1" tabindex="-1"></a>fit <span class="ot">&lt;-</span> <span class="fu">fit_one</span>(d_obs, <span class="at">diagnose =</span> <span class="cn">TRUE</span>)</span>
 <span id="cb11-2"><a href="#cb11-2" tabindex="-1"></a><span class="fu">diagnostics</span>(fit, <span class="at">sbc =</span> res)</span></code></pre></div>
 </div>
 <div id="see-also" class="section level2">

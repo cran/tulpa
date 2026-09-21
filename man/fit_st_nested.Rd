@@ -11,7 +11,7 @@ fit_st_nested(
   adjacency,
   temporal_idx,
   n_times,
-  spatial_type = c("icar", "bym2", "car_proper"),
+  spatial_type = c("icar", "bym2", "car_proper", "hsgp", "nngp"),
   temporal_type = c("ar1", "rw1", "rw2"),
   family = "binomial",
   n_trials = NULL,
@@ -20,7 +20,13 @@ fit_st_nested(
   re_idx = NULL,
   n_re_groups = 0L,
   sigma_re = 1,
-  control = list()
+  hyperprior = c("proper", "flat"),
+  control = list(),
+  coords = NULL,
+  nn = 10L,
+  cov_type = 2L,
+  hsgp_m = 6L,
+  hsgp_c = 1.5
 )
 }
 \arguments{
@@ -28,15 +34,22 @@ fit_st_nested(
 
 \item{X}{Fixed-effects design matrix (\code{nrow(X) == length(y)}).}
 
-\item{spatial_idx}{Integer per-observation spatial-unit index (1-based).}
+\item{spatial_idx}{Integer per-observation spatial-unit index (1-based).
+For \code{spatial_type = "icar"/"bym2"/"car_proper"}, an areal unit in
+\verb{[1, nrow(adjacency)]}; for \code{"nngp"}, a location in \verb{[1, nrow(coords)]}.
+Ignored for \code{"hsgp"} (the field is evaluated directly at each
+observation's own coordinates); pass any placeholder (e.g. \code{seq_len(N)}).}
 
-\item{adjacency}{Spatial adjacency (a symmetric 0/1 matrix or \code{sparseMatrix}).}
+\item{adjacency}{Spatial adjacency (a symmetric 0/1 matrix or \code{sparseMatrix}).
+Required for \code{spatial_type = "icar"/"bym2"/"car_proper"}; ignored (pass
+\code{NULL}) for \code{"hsgp"}/\code{"nngp"}, which take \code{coords} instead.}
 
 \item{temporal_idx}{Integer per-observation time index (1-based).}
 
 \item{n_times}{Number of distinct time points.}
 
-\item{spatial_type}{\code{"icar"} (default), \code{"bym2"}, or \code{"car_proper"}.}
+\item{spatial_type}{\code{"icar"} (default), \code{"bym2"}, \code{"car_proper"}, \code{"hsgp"}
+(Hilbert-space GP basis), or \code{"nngp"} (nearest-neighbour GP).}
 
 \item{temporal_type}{\code{"ar1"} (default), \code{"rw1"}, or \code{"rw2"}.}
 
@@ -44,7 +57,17 @@ fit_st_nested(
 
 \item{n_trials}{Binomial denominators, or \code{NULL} (= 1).}
 
-\item{phi}{Dispersion passed to the family.}
+\item{phi}{Dispersion passed to the family, held fixed. One convention at
+every door: for \code{gaussian} / \code{lognormal} this is the residual VARIANCE
+(the SD is \code{sqrt(phi)}), for \code{neg_binomial_2} the size, \code{gamma} the
+shape, \code{beta} the precision, \code{t} the scale; \code{binomial} and \code{poisson}
+ignore it. The compiled kernels parameterize the two variance families by
+the residual SD and are handed \code{sqrt(phi)} at the boundary.
+
+Defaulted, it conditions at 1 and says so with a warning, since for a
+family that reads a dispersion that is a modelling choice rather than a
+neutral value. \code{fit$phi_estimated} records whether the value on the fit
+was estimated or conditioned on.}
 
 \item{cyclic}{Logical; wrap the temporal field (seasonal). Default \code{FALSE}.}
 
@@ -52,15 +75,53 @@ fit_st_nested(
 alongside the fields (conditioned on \code{sigma_re}); \code{n_re_groups = 0} (default)
 is no RE term.}
 
+\item{hyperprior}{The prior an outer hyperparameter axis carries when the
+call states no density for it, \code{"proper"} (default) or \code{"flat"}.
+\code{"proper"} folds a normalised density on the axis's integration coordinate
+into \code{log_marginal}: the PC prior \code{P(sigma > 3) = 0.01} on a standard
+deviation, variance or precision axis, the PC range prior at 0.2 times the
+coordinates' bounding-box diagonal on a range or lengthscale axis, a uniform
+on a bounded axis, and the PC + LKJ prior over a free-covariance block. An
+axis with no sourced density is named in \code{log_hyperprior_declined}.
+\code{"flat"} folds no density of the engine's own, so such an axis is
+integrated under its cell measure alone, is named in
+\code{log_hyperprior_declined} as \code{"flat_hyperprior"}, and the fit's
+\code{log_evidence} declines with \code{"improper_hyperprior"}. A density the call
+states -- a \verb{prior_*} argument, a block's \code{rho_prior}, \code{prior_range} or
+\code{prior_sigma}, the copy coefficient's slab, a \code{\link[=tgmrf]{tgmrf()}} block's own prior --
+applies under either choice. The same two choices, under the same names,
+are offered by \code{\link[=tulpa]{tulpa()}}, \code{\link[=tulpa_eb]{tulpa_eb()}}, \code{\link[=tulpa_re_cov_nested]{tulpa_re_cov_nested()}} and
+\code{\link[=fit_spde]{fit_spde()}}.}
+
 \item{control}{A list of numerical / grid knobs: \code{n_grid_spatial},
 \code{n_grid_temporal} (default 4 each), \code{n_grid_rho} (ar1 only, default 3),
-\code{tau_lower} / \code{tau_upper} (precision grid bounds, default 0.25 / 16),
-\code{rho_lower} / \code{rho_upper} (ar1 grid, default 0.1 / 0.9), \code{max_iter}, \code{tol},
-\code{n_threads}, \code{auto_recenter} (default \code{TRUE}; \code{FALSE} holds the grid
-exactly as specified -- the per-axis policy names
+\code{tau_lower} / \code{tau_upper} (icar / car_proper precision grid bounds,
+default 0.25 / 16), \code{sigma_lower} / \code{sigma_upper} (bym2's spatial SD grid
+bounds in place of \code{tau_lower} / \code{tau_upper}, default 0.1 / 3 --
+\code{n_grid_spatial} sizes this axis too; its mixing-weight axis
+\code{rho_spatial} is always the fixed default node set and is not a \code{control}
+knob), \code{rho_lower} / \code{rho_upper} (ar1 grid, default 0.1 / 0.9), \code{max_iter},
+\code{tol}, \code{n_threads}, \code{auto_recenter} (default \code{TRUE}; \code{FALSE} holds the
+grid exactly as specified -- the per-axis policy names
 \code{\link[=tulpa_nested_laplace]{tulpa_nested_laplace()}} takes are refused here with an error, since this
 driver recentres on the grid's collapsed-edge regime rather than on a
-per-axis rail).
+per-axis rail; declines outright for \code{spatial_type = "bym2"}, whose
+(sigma, rho) spatial axes this recenter has no transform for yet, and for
+\code{"hsgp"}/\code{"nngp"}, same reason), \code{rho_spatial} (the proper-CAR mixing
+value the \code{car_proper} axis is held
+at, default \code{.NL_ST_GRID$rho_spatial}; unrelated to bym2's own integrated
+\code{rho_spatial} grid axis) and \code{within_cell} (\code{"box_uniform"} / \code{"chord"},
+the within-cell construction the reported per-axis intervals are read
+with; defaults to
+\code{.NL_DIAG$within_cell}, as on every other nested door).
+
+For \code{spatial_type = "hsgp"}/\code{"nngp"}, the spatial axes are the field
+variance (\code{sigma2}) paired with the lengthscale (\code{lengthscale}) or NNGP
+range (\code{phi_gp}), read off the same shared default bounds the
+single-field \code{spatial_gp()} path uses (\code{gp_var} / \code{gp_lengthscale},
+\code{R/settings.R}) -- there is no separate \code{sigma2_lower}/\code{upper} knob here,
+only \code{n_grid_spatial}, which sizes the pair as it does for the areal
+families.
 
 The \verb{(tau_lower, tau_upper)} span (and, for \code{ar1}, \verb{(rho_lower, rho_upper)}) is a starting axis, not a hard ceiling:
 when the fitted precision (or, for \code{ar1}, autocorrelation) posterior
@@ -82,12 +143,35 @@ axis leaves the others free to be recentred. A pinned axis keeps its
 nodes exactly and is named in \code{outer_grid_pinned_axes}; with EVERY axis
 pinned the recenter declines outright and
 \code{outer_grid_recenter_declined} records which reason applied.}
+
+\item{coords}{Coordinate matrix for a continuous spatial field, required
+when \code{spatial_type} is \code{"hsgp"} or \code{"nngp"} (ignored otherwise). For
+\code{"hsgp"}, an \verb{N x 2} matrix (one row per observation, matching
+\code{spatial_gp(approx = "hsgp")}'s basis convention -- the basis is built by
+\code{cpp_hsgp_basis_2d()}, 2D only). For \code{"nngp"}, an \verb{n_spatial x d} matrix
+of unique locations that \code{spatial_idx} indexes into (any \code{d}, matching
+\code{\link[=spatial_gp]{spatial_gp()}}'s NNGP convention).}
+
+\item{nn}{Number of nearest neighbours per location, \code{spatial_type = "nngp"}
+only. Default 10 (clamped to \code{nrow(coords) - 1}).}
+
+\item{cov_type}{Integer NNGP covariance code (\code{spatial_type = "nngp"} only):
+0 = exponential, 1 = Matern 3/2, 2 = Matern 5/2 (default), 3 = Gaussian.}
+
+\item{hsgp_m, hsgp_c}{Hilbert-space GP basis size (per dimension, default 6)
+and boundary factor (default 1.5), \code{spatial_type = "hsgp"} only -- the
+same parameterisation and defaults as \code{spatial_gp(approx = "hsgp")}.}
 }
 \value{
 A \code{tulpa_fit} (subclass \code{tulpa_nested_laplace}) carrying the
 fixed-effect posterior (\code{draws} via the grid mixture), \code{spatial_effects},
-\code{temporal_effects}, \code{log_marginal}, \code{weights}, and \code{theta_grid} over
-\verb{(tau_spatial, tau_temporal, rho)}. Also carries \code{pareto_k_regime}
+\code{temporal_effects}, \code{log_marginal}, \code{weights}, \code{theta_grid} over
+\verb{(tau_spatial, tau_temporal, rho)} for an areal spatial field or
+\verb{(sigma2, lengthscale, tau_temporal, rho)} / \verb{(sigma2, phi_gp, tau_temporal, rho)} for \code{"hsgp"} / \code{"nngp"}, and \code{family} / \code{n_trials} /
+\code{phi} (the
+R-level convention), which is what \code{\link[=fitted]{fitted()}}, \code{\link[=residuals]{residuals()}},
+\code{\link[=posterior_predict]{posterior_predict()}} and \code{\link[=simulate]{simulate()}} read the response family from.
+Also carries \code{pareto_k_regime}
 (\code{"spread"} / \code{"collapsed_interior"} / \code{"collapsed_edge"}, see
 \code{\link[=tulpa_nested_laplace_joint]{tulpa_nested_laplace_joint()}}'s return docs for the definition) and
 \code{outer_grid_placement} (\code{"fixed"} or \code{"auto_recentered"}) plus, on a
@@ -107,10 +191,11 @@ fully re-placed one. With every free axis declined the pass reports the
 grid as the fixed one it still is.
 }
 \description{
-Fits \verb{y ~ X beta + u_spatial[s] + v_temporal[t]} with an areal spatial field
-(\code{icar} / \code{bym2} / \code{car_proper}) and a temporal field (\code{rw1} / \code{rw2} / \code{ar1}),
-integrating the spatial precision, temporal precision, and (for \code{ar1}) the
-temporal autocorrelation over a hyperparameter grid via the
+Fits \verb{y ~ X beta + u_spatial[s] + v_temporal[t]} with a spatial field --
+areal (\code{icar} / \code{bym2} / \code{car_proper}) or continuous (\code{hsgp} / \code{nngp}) --
+and a temporal field (\code{rw1} / \code{rw2} / \code{ar1}), integrating the spatial
+hyperparameter(s), temporal precision, and (for \code{ar1}) the temporal
+autocorrelation over a hyperparameter grid via the
 \verb{cpp_nested_laplace_st_*} kernels. The fixed-effect posterior is the
 grid-marginalised mixture; the spatial and temporal field posterior means are
 the grid-weighted latent modes.

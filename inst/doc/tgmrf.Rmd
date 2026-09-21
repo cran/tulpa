@@ -1,4 +1,4 @@
-﻿---
+---
 title: "User-defined GMRF latent blocks with tgmrf()"
 output: rmarkdown::html_vignette
 vignette: >
@@ -421,7 +421,7 @@ For the outer approximation on a structured-tier fit, the relevant
 number is the Pareto-$\hat{k}$, the iid-fit counterpart of Rhat. The
 nested-Laplace fit reports `$pareto_k` and `$pareto_k_is_ess`: the
 integrator fits a Gaussian proposal to the hyperparameter posterior,
-importance-samples it (`control$k_samples`, default `200L`, each one
+importance-samples it (`control$k_samples`, default `500L`, each one
 extra inner solve), and fits a generalised Pareto tail to the importance
 ratios. A $\hat{k} < 0.7$ means the Gaussian grid characterises the
 hyperparameter posterior well and the nested integration is reliable.
@@ -442,7 +442,7 @@ acceptance rate is the signal to switch to NUTS. The NUTS fit reports
 `$mean_accept` plus `$tree_depth` per draw and the adapted `$epsilon`;
 draws repeatedly hitting `max_depth` indicate a step size that is too
 small for the posterior geometry. Both produce a `$draws` matrix you can
-feed to `mcmc_diagnostics(fit)` for Rhat and effective sample size, or to
+feed to `diagnostics(fit)` for Rhat and effective sample size, or to
 `check_diagnostics(fit)` for a pass/fail summary. The cleanest single
 check is to run the structured-tier fit, read its Pareto-$\hat{k}$, and
 only reach for the MCMC tiers when the diagnostic says the Gaussian
@@ -473,7 +473,7 @@ budget and the diagnostic cost. `control$max_iter` (default `50L`) and
 only if cells fail to converge. `control$n_threads` (default `1L`) sets
 OpenMP threads inside each inner solve, useful when `n_latent` is large.
 `control$diagnose_k` (default `TRUE`) and `control$k_samples` (default
-`200L`) control the Pareto-$\hat{k}$ computation; set `diagnose_k = FALSE`
+`500L`) control the Pareto-$\hat{k}$ computation; set `diagnose_k = FALSE`
 to skip the extra inner solves when you do not need the accuracy gate.
 The `bounds` you set on the block itself define the grid extent and the
 hard wall for IMH and NUTS. Set them generously enough to contain the
@@ -553,8 +553,11 @@ approximation is biased, without rewriting anything.
 ## What `tgmrf()` does not require
 
 - No gradient code. The score in `z` is closed-form from `Q`.
+
 - No Hessian code. The Hessian in `z` is just `-Q`.
+
 - No autodiff. Hyperparameter gradients are finite-difference.
+
 - No C++. The R closure path reaches every tier.
 
 The `tgmrf_cpp()` constructor offers a templated-C++ backend with the
@@ -569,7 +572,11 @@ parser, inference layers, methods) treat the two paths identically.
 ## See also
 
 - `?tgmrf`: constructor reference.
+
 - `?tgmrf_cpp`: compiled-C++ backend with the same S3 contract.
+
 - `?tulpa_nested_laplace`: Tier-2 grid integrator.
+
 - `?tulpa_tgmrf_imh`, `?tulpa_tgmrf_nuts`, `?tulpa_tgmrf_vi`: adapter family.
+
 - `inst/examples/tgmrf_periodic_ar1.R`: runnable script form of this vignette.

@@ -66,6 +66,7 @@
 #include "nested_laplace_checkpoint.h"
 #include "nested_laplace_joint_core.h"
 #include "nested_laplace_joint_multi.h"
+#include "nl_entry_inputs.h"        // nl_attach_fitted_eta_single_arm
 #include "unit_precision_block.h"
 #include "car_proper_block.h"
 #include "nested_laplace_joint_batch.h"   // fused batched scatter
@@ -1259,42 +1260,56 @@ int build_joint_blocks_from_spec(
     return latent_offset;
 }
 
-// Parse the optional phi_grid_per_arm Rcpp::List. Reuses the convention from
-// the legacy joint kernels: list of length n_arms; entry k is either NULL
-// (no override) or a NumericVector of length n_grid (per outer-grid phi).
-std::vector<Rcpp::NumericVector> parse_phi_overrides_multi(
-    Rcpp::Nullable<Rcpp::List> phi_grid_per_arm, int n_arms, int n_grid
-) {
-    std::vector<Rcpp::NumericVector> out(n_arms);
-    if (phi_grid_per_arm.isNull()) return out;
-    Rcpp::List phi_list(phi_grid_per_arm);
-    if (static_cast<int>(phi_list.size()) != n_arms) {
-        Rcpp::stop("phi_grid_per_arm must have length n_arms (%d).", n_arms);
-    }
-    for (int k = 0; k < n_arms; k++) {
-        if (Rf_isNull(phi_list[k])) continue;
-        Rcpp::NumericVector v = Rcpp::as<Rcpp::NumericVector>(phi_list[k]);
-        if (v.size() == 0) continue;
-        if (static_cast<int>(v.size()) != n_grid) {
-            Rcpp::stop("phi_grid_per_arm[[%d]] must have length 0 or %d "
-                       "(matching the flat outer-grid size).",
-                       k + 1, n_grid);
-        }
-        out[k] = v;
-    }
-    return out;
-}
-
+// Load each arm's per-cell dispersion for outer-grid cell `k_grid` onto the
+// arm itself, the single-species driver's one column of `phi_table`.
 inline void apply_phi_overrides_multi(
     std::vector<tulpa::JointArm>& arms,
-    const std::vector<Rcpp::NumericVector>& phi_overrides,
+    const tulpa::ArmGridTable& phi_table,
     int k_grid
 ) {
     for (size_t k = 0; k < arms.size(); k++) {
-        if (phi_overrides[k].size() > 0) {
-            arms[k].phi = phi_overrides[k][k_grid];
+        if (phi_table.active(static_cast<int>(k))) {
+            phi_table.load_cell(static_cast<int>(k), k_grid, &arms[k].phi);
         }
     }
+}
+
+// Per-cell fixed-effect covariance retention, extracted inside each cell's own
+// solve. `fixed_block_p` is the leading latent block size; zero extracts
+// nothing. `fixed_block_constraints` is a list of 1-based latent index vectors,
+// one per field sum-to-zero group, so the retained block is the constrained
+// covariance the fit's own posterior draws are generated from.
+inline tulpa::JointFixedBlockRequest parse_joint_fixed_block_request(
+    int fixed_block_p, Rcpp::Nullable<Rcpp::List> fixed_block_constraints
+) {
+    tulpa::JointFixedBlockRequest req;
+    if (fixed_block_p > 0) {
+        req.p = fixed_block_p;
+        if (fixed_block_constraints.isNotNull()) {
+            Rcpp::List ac(fixed_block_constraints);
+            req.A_cols.resize(ac.size());
+            for (int g = 0; g < ac.size(); g++) {
+                Rcpp::IntegerVector col = ac[g];
+                req.A_cols[g].reserve(col.size());
+                for (int e = 0; e < col.size(); e++)
+                    req.A_cols[g].push_back(col[e] - 1);
+            }
+        }
+    }
+    return req;
+}
+
+// The outer-grid layout fields every joint multi-block entry attaches to a grid
+// result: the grid it was solved on, its per-block axis offsets and which
+// blocks the reported modes were centred on.
+inline void attach_joint_grid_layout(
+    Rcpp::List& out, const Rcpp::NumericMatrix& theta_grid,
+    const Rcpp::IntegerVector& axis_offsets,
+    const std::vector<tulpa::LatentBlock>& blocks
+) {
+    out["theta_grid"]      = theta_grid;
+    out["axis_offsets"]    = axis_offsets;
+    out["block_centered"]  = tulpa::block_center_flags(blocks);
 }
 
 // Resolve the parallel (copy_blocks, copy_arms) vectors into a per-block map:
@@ -1338,6 +1353,11 @@ inline std::vector<int> resolve_copy_arm_of_block(
 
 } // namespace
 
+// `screen_iters` is the number of inner Newton steps the cheap screening sweep
+// takes per cell, read only when `prune_tol > 0`. Its engine default is
+// tulpa::CHEAP_SCREEN_ITERS; the literal below restates it because an Rcpp
+// attribute default has to be a literal.
+
 // [[Rcpp::export]]
 Rcpp::List cpp_nested_laplace_joint_multi(
     Rcpp::List          arms_list,
@@ -1373,28 +1393,13 @@ Rcpp::List cpp_nested_laplace_joint_multi(
     Rcpp::Nullable<Rcpp::List> fixed_block_constraints = R_NilValue,
     Rcpp::Nullable<Rcpp::List> debias = R_NilValue,
     Rcpp::Nullable<Rcpp::List> cila = R_NilValue,
-    int                 inner_sparse_override = 0
+    int                 inner_sparse_override = 0,
+    int                 screen_iters = 2,  // cheap-screen Newton steps per cell
+    Rcpp::Nullable<Rcpp::NumericVector> screen_log_offset = R_NilValue,  // per-cell screen offset
+    bool                compute_fitted_var = true  // per-cell predictive variance of eta; see want_eta_var below
 ) {
-    // Per-cell fixed-effect covariance retention, extracted
-    // inside each cell's own solve. `fixed_block_p` is the
-    // leading latent block size; zero extracts nothing.
-    // `fixed_block_constraints` is a list of 1-based latent index vectors, one
-    // per field sum-to-zero group, so the retained block is the constrained
-    // covariance the fit's own posterior draws are generated from.
-    tulpa::JointFixedBlockRequest fixed_block_req;
-    if (fixed_block_p > 0) {
-        fixed_block_req.p = fixed_block_p;
-        if (fixed_block_constraints.isNotNull()) {
-            Rcpp::List ac(fixed_block_constraints);
-            fixed_block_req.A_cols.resize(ac.size());
-            for (int g = 0; g < ac.size(); g++) {
-                Rcpp::IntegerVector col = ac[g];
-                fixed_block_req.A_cols[g].reserve(col.size());
-                for (int e = 0; e < col.size(); e++)
-                    fixed_block_req.A_cols[g].push_back(col[e] - 1);
-            }
-        }
-    }
+    const tulpa::JointFixedBlockRequest fixed_block_req =
+        parse_joint_fixed_block_request(fixed_block_p, fixed_block_constraints);
     const tulpa::JointFixedBlockRequest* fixed_block_ptr =
         fixed_block_req.active() ? &fixed_block_req : nullptr;
 
@@ -1417,8 +1422,8 @@ Rcpp::List cpp_nested_laplace_joint_multi(
     std::vector<tulpa::ParsedArm> parsed;
     std::vector<tulpa::JointArm>  arms;
     int n_x_after_re = tulpa::parse_joint_arms(arms_list, parsed, arms);
-    std::vector<Rcpp::NumericVector> phi_overrides =
-        parse_phi_overrides_multi(phi_grid_per_arm, n_arms, n_grid);
+    const tulpa::ArmGridTable phi_overrides = tulpa::parse_arm_grid_table(
+        phi_grid_per_arm, n_arms, n_grid, 1, "phi_grid_per_arm");
 
     // Detect any per-arm constant `field_coef != 1` so the non-copy block
     // factories know whether to install the per-arm multiplier `arm_scale`
@@ -1591,8 +1596,8 @@ Rcpp::List cpp_nested_laplace_joint_multi(
         for (int j = 0; j < total_axes; j++)
             kb.add_axis(theta_grid.begin() + (std::size_t)j * n_grid);
         for (int a = 0; a < n_arms; a++)
-            if (phi_overrides[a].size() > 0)
-                kb.add_axis(phi_overrides[a].begin());
+            if (phi_overrides.active(a))
+                kb.add_axis(phi_overrides.values[a].data());
         ckpt.reset(new tulpa::GridCheckpoint(checkpoint_path, fp.value(),
                                              kb.take()));
     }
@@ -1605,6 +1610,15 @@ Rcpp::List cpp_nested_laplace_joint_multi(
         tulpa::unwrap_debias(debias, debias_opts);
     tulpa::CilaOptions cila_opts;
     const tulpa::CilaOptions* cila_ptr = tulpa::unwrap_cila(cila, cila_opts);
+
+    // The per-cell linear predictor and its within-cell variance are the pair a
+    // predictive read draws a replicate from (`.tulpa_eta_draws_grid()`), and
+    // the predictor is attachable only at ONE arm -- a multi-arm fit has one
+    // eta per arm and no single [n_grid x N] matrix to carry them in. So the
+    // variance, a real per-cell solve sweep, is asked for exactly where the
+    // mean it belongs to is stored, and `control$fitted_var` can still decline
+    // it (gcol33/tulpa#850).
+    const bool want_eta_var = compute_fitted_var && arms.size() == 1u;
 
     Rcpp::List out = tulpa::run_multi_block_nested_laplace_joint(
         n_grid, arms, parsed, blocks, n_x_after_re,
@@ -1628,11 +1642,22 @@ Rcpp::List cpp_nested_laplace_joint_multi(
         fixed_block_ptr,
         debias_ptr,
         cila_ptr,
-        inner_sparse_override
+        inner_sparse_override,
+        screen_iters,
+        want_eta_var,
+        screen_log_offset.isNull() ? std::vector<double>()
+            : Rcpp::as<std::vector<double>>(screen_log_offset)
     );
-    out["theta_grid"]      = theta_grid;
-    out["axis_offsets"]    = axis_offsets;
-    out["block_centered"]  = tulpa::block_center_flags(blocks);
+    // Per-cell eta at each cell's own mode. The driver leaves `modes` behind
+    // but no linear predictor, so a fit through this entry carried nothing for
+    // the grid-mixture predictive read to draw from (gcol33/tulpa#850). The
+    // helper replays the driver's own eta accumulator, which reads the arm's
+    // offset, `X`, the latent mode and each block's per-cell scaling -- not
+    // `arm.phi`, the only thing the grid-level `prep` above rewrites, so the
+    // per-block `prep` the helper runs is the whole contract it needs and the
+    // driver populates those on this path exactly as on the sparse entry.
+    tulpa::nl_attach_fitted_eta_single_arm(out, arms, parsed, blocks);
+    attach_joint_grid_layout(out, theta_grid, axis_offsets, blocks);
     return out;
 }
 
@@ -1641,7 +1666,15 @@ Rcpp::List cpp_nested_laplace_joint_multi(
 // (reusing parse_joint_arms + build_joint_blocks_from_spec, both in this TU)
 // then routes to the fused batched driver. y_batch[[k]] is a [N_k x B] matrix
 // (species columns) for data arms, R_NilValue for no-data arms (psi);
-// phi_batch is [n_arms x B]. Dense path, all-coupled families (occu_cover).
+// phi_batch is [n_arms x B]. phi_grid_per_arm carries the per-arm dispersion
+// axes crossed onto the outer grid: entry k is NULL (arm k keeps phi_batch) or
+// an [n_grid x B] matrix, species s's dispersion at each outer-grid cell, so
+// every species integrates its own dispersion nodes over the shared cell
+// layout. hessian_pd_mode, step_curvature_mode, force_sparse, fixed_block_p and
+// fixed_block_constraints mean what they mean on the single-species entry.
+// Returns a length-B list; element s is what cpp_nested_laplace_joint_multi
+// returns for species s's responses on the same grid. All-coupled families
+// (occu_cover).
 // ==========================================================================
 
 // [[Rcpp::export]]
@@ -1658,8 +1691,17 @@ Rcpp::List cpp_nested_laplace_joint_multi_batch(
     int                 max_iter = 200,
     double              tol = 1e-6,
     std::string         cell_coupling_name = "separable",
-    bool                store_Q = true
+    bool                store_Q = true,
+    Rcpp::Nullable<Rcpp::List> phi_grid_per_arm = R_NilValue,
+    int                 hessian_pd_mode = 0,
+    int                 step_curvature_mode = 0,
+    bool                force_sparse = false,
+    int                 fixed_block_p = 0,
+    Rcpp::Nullable<Rcpp::List> fixed_block_constraints = R_NilValue,
+    bool                compute_fitted_var = true
 ) {
+    const tulpa::JointFixedBlockRequest fixed_block_req =
+        parse_joint_fixed_block_request(fixed_block_p, fixed_block_constraints);
     int n_arms = arms_list.size();
     int Bspec  = blocks_spec.size();
     if (axis_offsets.size() != Bspec + 1)
@@ -1719,6 +1761,8 @@ Rcpp::List cpp_nested_laplace_joint_multi_batch(
         buf.n_trials[k].assign(arms[k].n_trials.begin(),
                                arms[k].n_trials.end());
     }
+    buf.phi_grid = tulpa::parse_arm_grid_table(
+        phi_grid_per_arm, n_arms, n_grid, n_batch, "phi_grid_per_arm");
 
     std::shared_ptr<tulpa::CellCouplingSpec> spec =
         tulpa::lookup_cell_coupling(cell_coupling_name);
@@ -1728,13 +1772,26 @@ Rcpp::List cpp_nested_laplace_joint_multi_batch(
 
     Rcpp::List res = tulpa::run_multi_block_nested_laplace_joint_batch(
         n_grid, n_batch, arms, parsed, blocks, n_x_after_re, buf,
-        max_iter, tol, nullptr, spec, store_Q);
-
-    return Rcpp::List::create(
-        Rcpp::Named("per_species")  = res,
-        Rcpp::Named("theta_grid")   = theta_grid,
-        Rcpp::Named("axis_offsets") = axis_offsets
-    );
+        max_iter, tol, spec, store_Q,
+        (hessian_pd_mode == 1) ? tulpa::JointPDMode::PSD : tulpa::JointPDMode::LM,
+        (step_curvature_mode == 1) ? tulpa::CurvatureMode::Expected
+                                   : tulpa::CurvatureMode::Observed,
+        force_sparse,
+        fixed_block_req.active() ? &fixed_block_req : nullptr,
+        compute_fitted_var);
+    for (int s = 0; s < n_batch; s++) {
+        Rcpp::List sp = res[s];
+        // The same per-cell predictor the single-species entry attaches, per
+        // species. The helper replays the driver's own eta accumulator off that
+        // species' `modes`, and reads the design, the offsets and each cell's
+        // block scaling -- all shared across the batch -- so one call per
+        // species is the whole difference. Without it this entry returned 15 of
+        // the 17 fields it promises to reproduce (gcol33/tulpa#852).
+        tulpa::nl_attach_fitted_eta_single_arm(sp, arms, parsed, blocks);
+        attach_joint_grid_layout(sp, theta_grid, axis_offsets, blocks);
+        res[s] = sp;
+    }
+    return res;
 }
 
 // ==========================================================================
@@ -2048,7 +2105,10 @@ Rcpp::List tulpa::run_multi_block_nested_laplace_joint(
     // Factorization backend of the DENSE inner Newton: 0 auto, >0 CHOLMOD,
     // <0 dense. Orthogonal to force_sparse, which chooses between this driver
     // and the sparse-assembly one.
-    int                              inner_sparse_override) {
+    int                              inner_sparse_override,
+    int                              screen_iters,
+    bool                             compute_eta_var,
+    const std::vector<double>&       screen_log_offset) {
     const int n_arms = static_cast<int>(arms.size());
     if (static_cast<int>(parsed.size()) != n_arms) {
         Rcpp::stop("parsed and arms vectors must have the same length.");
@@ -2115,7 +2175,8 @@ Rcpp::List tulpa::run_multi_block_nested_laplace_joint(
             cell_coupling_spec, coupled_arms, cell_rows, n_cells, pd_mode,
             step_curvature, hessian_refresh, n_threads_outer, progress,
             checkpoint, x_init_per_cell,
-            compute_skew, skew_probe_idx, fixed_block, debias, cila
+            compute_skew, skew_probe_idx, fixed_block, debias, cila,
+            screen_iters, compute_eta_var, screen_log_offset
         );
     }
 
@@ -2137,7 +2198,8 @@ Rcpp::List tulpa::run_multi_block_nested_laplace_joint(
     // when the driver was asked for a block.
     const bool want_fixed_block = fixed_block && fixed_block->active();
     std::vector<NewtonScratchJoint> scratch_pool(n_outer);
-    for (auto& s : scratch_pool) s.allocate(n_x, arms, want_fixed_block);
+    for (auto& s : scratch_pool)
+        s.allocate(n_x, arms, want_fixed_block || compute_eta_var);
 
     // Resolve each arm to a spec view ONCE for the whole grid: built-in family
     // arms materialize a builtin_family_spec + response, model-supplied arms
@@ -2348,6 +2410,22 @@ Rcpp::List tulpa::run_multi_block_nested_laplace_joint(
                 cell_coupling_spec.get(), coupled_arms, cell_rows, n_cells,
                 arms, nullptr);
         }
+        JointEtaVarRequest eta_var_req;
+        if (compute_eta_var && !is_cheap) {
+            eta_var_req.loadings = [&](const double* xm, RowLoadings& L) {
+                std::vector<std::vector<double>> d_eff(
+                    B, std::vector<double>(n_arms, 0.0));
+                for (int b = 0; b < B; b++) {
+                    for (int k_arm = 0; k_arm < n_arms; k_arm++) {
+                        const double s = blocks[b].arm_scale
+                                         ? blocks[b].arm_scale(k_arm, k_grid)
+                                         : 1.0;
+                        d_eff[b][k_arm] = s * d_fac_cache[b];
+                    }
+                }
+                joint_row_loadings(xm, arms, parsed, blocks, k_grid, d_eff, L);
+            };
+        }
         return laplace_newton_solve_joint_ll(
             n_x,
             max_iter_use, tol,
@@ -2360,7 +2438,8 @@ Rcpp::List tulpa::run_multi_block_nested_laplace_joint(
             is_cheap ? nullptr : debias,
             is_cheap ? nullptr : cila,
             static_cast<std::uint64_t>(k_grid) + 1ULL,
-            inner_sparse_override
+            inner_sparse_override,
+            eta_var_req.active() ? &eta_var_req : nullptr
         );
     };
 
@@ -2382,12 +2461,13 @@ Rcpp::List tulpa::run_multi_block_nested_laplace_joint(
     // in as `warm`, so each cheap solve only corrects the residual drift
     // between adjacent lattice cells (much cheaper and far more
     // rank-faithful than a one-step screen from a single distant pilot).
-    // The cheap pass runs serially after the pilot solve and before any
-    // parallel region, so a dedicated solver + scratch per worker slot keep it
-    // isolated from the parallel fan-out's pool (the pool's entries are
-    // reserved for the inner Newton on survivors). One set per outer worker so
-    // the per-tile cheap chains can run concurrently; CHOLMOD's
-    // cholmod_common is not thread-safe.
+    // The cheap pass runs after the pilot solve and before the full pass's
+    // parallel fan-out, but is not itself serial: given tile metadata and more
+    // than one outer thread, the driver chains the tile pilots serially and
+    // then runs the per-tile chains concurrently. So these are one set per
+    // outer worker slot -- CHOLMOD's cholmod_common is not thread-safe -- and
+    // they stay separate from the fan-out's pool, whose entries are reserved
+    // for the inner Newton on survivors.
     std::vector<SparseCholeskySolver> cheap_solvers(n_cheap_workers);
     std::vector<NewtonScratchJoint> cheap_scratches(n_cheap_workers);
     for (auto& cs : cheap_scratches) cs.allocate(n_x, arms);
@@ -2408,7 +2488,8 @@ Rcpp::List tulpa::run_multi_block_nested_laplace_joint(
     Rcpp::List out = run_nested_laplace_grid(
         n_grid, n_x, solve_at_theta, x_init, store_modes, n_outer,
         tile_ids, tile_pilot_cells,
-        cheap_eval, prune_tol, progress, checkpoint, x_init_per_cell
+        cheap_eval, prune_tol, progress, checkpoint, x_init_per_cell,
+        screen_iters, tulpa::NoResumeRefill{}, screen_log_offset
     );
     pattern_guard.check("the joint nested-Laplace outer grid");
     return out;
@@ -2445,7 +2526,10 @@ Rcpp::List tulpa::run_multi_block_nested_laplace_joint_sparse_impl(
     const std::vector<int>*          skew_probe_idx,
     const JointFixedBlockRequest*    fixed_block,
     const SubspaceDebiasOptions*     debias,
-    const CilaOptions*               cila
+    const CilaOptions*               cila,
+    int                              screen_iters,
+    bool                             compute_eta_var,
+    const std::vector<double>&       screen_log_offset
 ) {
     const int n_arms = static_cast<int>(arms.size());
     const int B      = static_cast<int>(blocks.size());
@@ -2461,9 +2545,12 @@ Rcpp::List tulpa::run_multi_block_nested_laplace_joint_sparse_impl(
     // the Newton scratch, the per-arm likelihood specs (whose built-in
     // dispersion the phi-grid axis rewrites per cell), the scatter index cache,
     // and the DENSE_BASIS scratch -- so each outer thread gets its own. The
-    // cheap-screen sweep runs serially (before any parallel region), so its
-    // resources stay a single set. n_outer == 1 reproduces the prior serial
-    // path exactly (one pool slot, used by every cell).
+    // cheap-screen sweep is not serial either -- it chains per-tile across the
+    // same outer workers -- so it is worker-indexed the same way and SHARES
+    // these pools slot for slot, the two phases being disjoint in time; only
+    // its CHOLMOD solvers are separate. See the note at the `cheap_solvers`
+    // declaration below. n_outer == 1 reproduces the prior serial path exactly
+    // (one pool slot, used by every cell).
     //
     // The subspace sampler draws from R's RNG (rwmh.h), which is neither
     // reentrant nor schedule-independent, so a debiased grid is integrated
@@ -2602,7 +2689,8 @@ Rcpp::List tulpa::run_multi_block_nested_laplace_joint_sparse_impl(
 
     const bool want_fixed_block = fixed_block && fixed_block->active();
     std::vector<NewtonScratchJointSparse> scratches(n_outer);
-    for (auto& s : scratches) s.allocate(n_x, arms, want_fixed_block);
+    for (auto& s : scratches)
+        s.allocate(n_x, arms, want_fixed_block || compute_eta_var);
 
     // Per-thread arm specs, built in place: JointArmSpecs is self-referential
     // (its views point at the owner's own storage and members), so it cannot be
@@ -2865,6 +2953,12 @@ Rcpp::List tulpa::run_multi_block_nested_laplace_joint_sparse_impl(
                 cell_coupling_spec.get(), coupled_arms, cell_rows, n_cells,
                 arms, coupled_phi_ptr);
         }
+        JointEtaVarRequest eta_var_req;
+        if (compute_eta_var && !use_cheap_scratch) {
+            eta_var_req.loadings = [&](const double* xm, RowLoadings& L) {
+                joint_row_loadings(xm, arms, parsed, blocks, k_grid, d_eff, L);
+            };
+        }
         return laplace_newton_solve_joint_sparse_ll(
             n_x,
             max_iter_use, tol,
@@ -2877,7 +2971,8 @@ Rcpp::List tulpa::run_multi_block_nested_laplace_joint_sparse_impl(
             use_cheap_scratch ? nullptr : fixed_block,
             use_cheap_scratch ? nullptr : debias,
             use_cheap_scratch ? nullptr : cila,
-            static_cast<std::uint64_t>(k_grid) + 1ULL
+            static_cast<std::uint64_t>(k_grid) + 1ULL,
+            eta_var_req.active() ? &eta_var_req : nullptr
         );
     };
 
@@ -2905,7 +3000,8 @@ Rcpp::List tulpa::run_multi_block_nested_laplace_joint_sparse_impl(
         n_grid, n_x, solve_at_theta, x_init, store_modes,
         /*n_outer=*/n_outer,
         tile_ids, tile_pilot_cells,
-        cheap_eval, prune_tol, progress, checkpoint, x_init_per_cell
+        cheap_eval, prune_tol, progress, checkpoint, x_init_per_cell,
+        screen_iters, tulpa::NoResumeRefill{}, screen_log_offset
     );
     pattern_guard.check("the sparse joint nested-Laplace outer grid");
     // Report the outer width the solve actually ran at. It is what the memory

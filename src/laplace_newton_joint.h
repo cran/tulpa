@@ -463,8 +463,8 @@ struct NewtonScratchJoint {
     std::unique_ptr<SparseCholeskySolver> extract_solver;
 
     void allocate(int n_x, const std::vector<JointArm>& arms,
-                  bool want_fixed_block = false) {
-        if (want_fixed_block && !extract_solver) {
+                  bool want_extract = false) {
+        if (want_extract && !extract_solver) {
             extract_solver.reset(new SparseCholeskySolver());
         }
         x       = Rcpp::NumericVector(n_x, 0.0);
@@ -488,152 +488,41 @@ struct NewtonScratchJoint {
     }
 };
 
-// Scratch-aware, likelihood-agnostic joint Newton solver. Like the single-arm
-// laplace_newton_solve_ll, the data log-lik enters ONLY through
-// `log_lik_fn(etas) -> double`, so the loop carries no family knowledge: the
-// nested joint driver passes a JointSpecLogLik backed by each arm's resolved
-// LikelihoodSpec (built-in family or model-supplied), so this is the single
-// joint Newton loop for every likelihood. Performs zero Rcpp allocations once
-// `scratch` is supplied; safe inside an OpenMP parallel region with a
-// thread-local `shared_solver`.
-template<typename ComputeEtaJoint, typename ScatterJoint,
-         typename CenterEffects, typename ComputeLogPriorJoint, typename JointLogLik>
-LaplaceResult laplace_newton_solve_joint_ll(
-    int n_x,
-    int max_iter, double tol,
-    ComputeEtaJoint compute_eta_joint,
-    ScatterJoint scatter_joint,
-    CenterEffects center_effects_fn,
-    ComputeLogPriorJoint compute_log_prior_joint,
-    JointLogLik log_lik_fn,
-    NewtonScratchJoint& scratch,
-    const std::vector<double>& x_init,
-    SparseCholeskySolver* shared_solver,
-    bool store_Q,
-    // PD enforcement for the inner step (joint_pd_step.h). A coupled arm's
-    // observed Hessian is indefinite wherever the mixture term is not concave,
-    // which for the occupancy mixture is any sparse-detection data set at the
-    // x = 0 start; without a conditioner the Cholesky yields a non-finite step,
-    // nothing is accepted, and the loop reports the start vector as its mode.
-    // LM (the default) reduces to the plain Newton step wherever H is already
-    // PD.
-    JointPDMode pd_mode = JointPDMode::LM,
-    // Inner-Laplace skewness diagnostic (inner_laplace_skew.h), opt-in like
-    // store_Q. curvature3_fns carries one per-observation oracle per arm plus the
-    // optional coupled-cell tensor contraction (build_joint_curvature3_fns +
-    // build_cell_curvature3_tensor); nullptr declines entirely. skew_probe_idx
-    // == nullptr probes every latent
-    // index. Computed BEFORE center_effects_fn(x) below -- unlike the single-arm
-    // loop, this joint loop centers x POST-HOC, after log_marginal, purely to
-    // present mean(phi) = 0 in the reported mode (see the comment on that call);
-    // the Newton-converged x and its freshly-factored scratch.chol / scratch.H
-    // (what dispatch_factor_log_det and log_lik_fn just used) are the consistent
-    // point to probe, not the cosmetically-shifted one.
-    bool compute_skew = false,
-    const std::vector<int>* skew_probe_idx = nullptr,
-    const JointCurvature3Oracles* curvature3_fns = nullptr,
-    // Per-cell fixed-effect covariance block. Extracted from
-    // this cell's precision here, so the caller no longer has to keep every
-    // cell's precision alive to read it afterwards. Independent of store_Q: a
-    // fit that did not ask for the precision still gets the block, and one that
-    // did gets both. nullptr / p == 0 extracts nothing.
-    const JointFixedBlockRequest* fixed_block = nullptr,
-    // Subspace debias (subspace_debias.h). Runs on the
-    // same pre-centering iterate and the same live factor the two inner
-    // diagnostics probe, since that is the point log_marginal belongs to. Empty
-    // or absent leaves the solve untouched and consumes no random number.
-    const SubspaceDebiasOptions* debias = nullptr,
-    // Corrected integrated Laplace (inner_cila.h). Runs on
-    // the same pre-centering iterate and the same live factor, and presents its
-    // draws under the same centering fold the reported mode carries. Absent or
-    // inactive leaves the solve untouched.
-    const CilaOptions* cila = nullptr,
-    // Distinguishes this cell's auxiliary stream from its neighbours' on an
-    // outer grid; irrelevant for the deterministic net, load-bearing for the
-    // randomized-QMC shifts.
-    std::uint64_t cila_cell_key = 0,
-    // sparse_override: 0 = auto (size threshold), >0 = force CHOLMOD, <0 =
-    // force the dense factorization. Same three states as the single-arm loop's
-    // parameter of the same name, and the same purpose: one joint problem can
-    // be driven through both factorization backends for an equivalence gate.
-    // The Hessian is assembled densely either way; this selects only what
-    // factorizes it.
-    int sparse_override = 0
+// The final pass of the dense joint Newton solve, from the Hessian and gradient
+// the likelihood + prior scatter built at the returned iterate `scratch.x`
+// (etas already at that point, no ridge loaded): the conditioned
+// log-determinant, the log-marginal, the inner-layer probes, the centred mode,
+// the stored precision and the fixed-effect block. `result` arrives with the
+// iteration's `converged` and `n_iter`. The one final pass behind the
+// single-species loop and each species of the batched driver.
+template<typename ComputeEtaJoint, typename CenterEffects,
+         typename ComputeLogPriorJoint, typename JointLogLik,
+         typename EvalObjective>
+inline void joint_newton_finalize_dense(
+    LaplaceResult& result, int n_x, NewtonScratchJoint& scratch,
+    DenseMat& H, DenseVec& grad,
+    SparseCholeskySolver& sparse_solver, bool use_sparse,
+    ComputeEtaJoint& compute_eta_joint, CenterEffects& center_effects_fn,
+    ComputeLogPriorJoint& compute_log_prior_joint, JointLogLik& log_lik_fn,
+    EvalObjective& eval_objective,
+    bool store_Q, JointPDMode pd_mode,
+    bool compute_skew, const std::vector<int>* skew_probe_idx,
+    const JointCurvature3Oracles* curvature3_fns,
+    const JointFixedBlockRequest* fixed_block,
+    const SubspaceDebiasOptions* debias, const CilaOptions* cila,
+    std::uint64_t cila_cell_key, const JointEtaVarRequest* eta_var
 ) {
-    LaplaceResult result;
-    result.mode.assign(n_x, 0.0);
-    result.converged = false;
-    result.n_iter = 0;
-    result.log_det_Q = 0.0;
-    result.log_marginal = 0.0;
-
     Rcpp::NumericVector& x = scratch.x;
-    if (static_cast<int>(x_init.size()) == n_x) {
-        for (int j = 0; j < n_x; j++) x[j] = x_init[j];
-    } else {
-        for (int j = 0; j < n_x; j++) x[j] = 0.0;
-    }
-    bool use_sparse = (sparse_override == 0)
-                          ? (n_x >= SPARSE_THRESHOLD)
-                          : (sparse_override > 0);
-
-    SparseCholeskySolver local_solver;
-    SparseCholeskySolver& sparse_solver = shared_solver ? *shared_solver : local_solver;
-
-    auto eval_objective = [&](const Rcpp::NumericVector& xv) -> double {
-        return eval_penalized_log_lik_joint_ll(
-            xv, compute_eta_joint, compute_log_prior_joint, log_lik_fn,
-            scratch.etas_tmp
-        );
-    };
-
-    auto cholesky_solve = [&]() -> bool {
-        return joint_pd_step_solve_dense(scratch.H, scratch.grad, scratch.delta,
-                                         n_x, sparse_solver, use_sparse,
-                                         scratch.chol, pd_mode);
-    };
-
-    double obj_current = -1e300;
-    bool obj_valid = false;
-    NewtonConvState conv_state;
-
-    auto refresh_grad_hess = [&]() {
-        compute_eta_joint(x, scratch.etas);
-        scratch.zero_for_iter();
-        scatter_joint(x, scratch.etas, scratch.grad, scratch.H, /*finalize=*/false);
-    };
-
-    for (int iter = 0; iter < max_iter; iter++) {
-        if (newton_step(x, scratch, n_x, iter, tol, refresh_grad_hess,
-                        cholesky_solve, eval_objective, obj_current, obj_valid,
-                        conv_state, result.n_iter)) {
-            result.converged = true;
-            break;
-        }
-    }
-
-    // Compute log_marginal at the Newton mode (uncentered). For BYM2/ICAR the
-    // ICAR prior is rank-deficient along the constant-shift direction in phi,
-    // and the obs Hessian is what pins that direction down, so the joint MAP
-    // is at the uncentered Newton iterate. Centering phi without compensating
-    // each arm's intercept would shift eta off the mode and corrupt log_lik
-    // (and would also shift the proper-CAR log_prior). We center post-hoc
-    // *after* log_marginal so the reported mode block has mean(phi) = 0 with
-    // the equivalent intercept shift absorbed into each arm's first beta
-    // column. Net effect: same eta, same log_marginal, centered phi block.
-    compute_eta_joint(x, scratch.etas);
-    scratch.zero_for_iter();
-    scatter_joint(x, scratch.etas, scratch.grad, scratch.H, /*finalize=*/true);
-    result.score_max = max_abs(scratch.grad);
+    result.score_max = max_abs(grad);
 
     // The base ridge is loaded ONCE onto this assembly, here, and both the
     // log-determinant and the escalating solve below read the same loaded
     // matrix. Letting each entry apply its own would start the escalation ladder
     // at twice the documented base and shift every rank-deficient direction's
     // log-determinant contribution by log(2).
-    add_uniform_ridge_dense(scratch.H, n_x, LAPLACE_UNIFORM_RIDGE);
+    add_uniform_ridge_dense(H, n_x, LAPLACE_UNIFORM_RIDGE);
     const bool hessian_pd_at_mode = dispatch_factor_log_det_ridged(
-        scratch.H, n_x, sparse_solver, use_sparse, scratch.chol,
+        H, n_x, sparse_solver, use_sparse, scratch.chol,
         result.log_det_Q);
 
     // A non-finite log-determinant is the plain Cholesky reporting that the
@@ -646,7 +535,7 @@ LaplaceResult laplace_newton_solve_joint_ll(
     result.hessian_pd_at_mode = hessian_pd_at_mode;
     result.pd_conditioned = !hessian_pd_at_mode;
     if (!hessian_pd_at_mode) {
-        joint_pd_step_solve_dense_ridged(scratch.H, scratch.grad, scratch.delta,
+        joint_pd_step_solve_dense_ridged(H, grad, scratch.delta,
                                          n_x, sparse_solver, use_sparse,
                                          scratch.chol, pd_mode,
                                          &result.log_det_Q);
@@ -739,10 +628,18 @@ LaplaceResult laplace_newton_solve_joint_ll(
     // `converged` flag is what says why, and the R retention reads it.
     const bool want_block =
         fixed_block && fixed_block->active() && scratch.extract_solver;
-    if ((store_Q || want_block) && hessian_pd_at_mode) {
+    const bool want_eta_var =
+        eta_var && eta_var->active() && scratch.extract_solver;
+    RowLoadings loadings;
+    if (want_eta_var) {
+        eta_var->loadings(pre_center_x.data(), loadings);
+        result.eta_var.assign(static_cast<std::size_t>(loadings.n_rows()),
+                              std::numeric_limits<double>::quiet_NaN());
+    }
+    if ((store_Q || want_block || want_eta_var) && hessian_pd_at_mode) {
         std::vector<int> csc_p, csc_i;
         std::vector<double> csc_x;
-        dense_to_csc_lower_drop_raw(scratch.H, n_x, SPARSE_DROP_TOL_DISPATCH,
+        dense_to_csc_lower_drop_raw(H, n_x, SPARSE_DROP_TOL_DISPATCH,
                                     csc_p, csc_i, csc_x);
         if (want_block) {
             extract_joint_fixed_block(
@@ -751,6 +648,15 @@ LaplaceResult laplace_newton_solve_joint_ll(
                 *scratch.extract_solver,
                 result.re_cov_flat, result.re_cov_block_sizes);
         }
+        // The dense scatter writes every sum-to-zero pin into H itself, so the
+        // stored precision is the whole one and nothing is folded on the side.
+        if (want_eta_var) {
+            extract_joint_eta_var(
+                csc_p.data(), csc_i.data(), csc_x.data(), n_x,
+                static_cast<int>(csc_x.size()), loadings,
+                /*pin_groups=*/{}, /*pin_Dinv=*/{},
+                *scratch.extract_solver, result.eta_var);
+        }
         if (store_Q) {
             result.Q_csc_p = std::move(csc_p);
             result.Q_csc_i = std::move(csc_i);
@@ -758,6 +664,155 @@ LaplaceResult laplace_newton_solve_joint_ll(
             result.Q_csc_n = n_x;
         }
     }
+
+}
+
+// Scratch-aware, likelihood-agnostic joint Newton solver. Like the single-arm
+// laplace_newton_solve_ll, the data log-lik enters ONLY through
+// `log_lik_fn(etas) -> double`, so the loop carries no family knowledge: the
+// nested joint driver passes a JointSpecLogLik backed by each arm's resolved
+// LikelihoodSpec (built-in family or model-supplied), so this is the single
+// joint Newton loop for every likelihood. Performs zero Rcpp allocations once
+// `scratch` is supplied; safe inside an OpenMP parallel region with a
+// thread-local `shared_solver`.
+template<typename ComputeEtaJoint, typename ScatterJoint,
+         typename CenterEffects, typename ComputeLogPriorJoint, typename JointLogLik>
+LaplaceResult laplace_newton_solve_joint_ll(
+    int n_x,
+    int max_iter, double tol,
+    ComputeEtaJoint compute_eta_joint,
+    ScatterJoint scatter_joint,
+    CenterEffects center_effects_fn,
+    ComputeLogPriorJoint compute_log_prior_joint,
+    JointLogLik log_lik_fn,
+    NewtonScratchJoint& scratch,
+    const std::vector<double>& x_init,
+    SparseCholeskySolver* shared_solver,
+    bool store_Q,
+    // PD enforcement for the inner step (joint_pd_step.h). A coupled arm's
+    // observed Hessian is indefinite wherever the mixture term is not concave,
+    // which for the occupancy mixture is any sparse-detection data set at the
+    // x = 0 start; without a conditioner the Cholesky yields a non-finite step,
+    // nothing is accepted, and the loop reports the start vector as its mode.
+    // LM (the default) reduces to the plain Newton step wherever H is already
+    // PD.
+    JointPDMode pd_mode = JointPDMode::LM,
+    // Inner-Laplace skewness diagnostic (inner_laplace_skew.h), opt-in like
+    // store_Q. curvature3_fns carries one per-observation oracle per arm plus the
+    // optional coupled-cell tensor contraction (build_joint_curvature3_fns +
+    // build_cell_curvature3_tensor); nullptr declines entirely. skew_probe_idx
+    // == nullptr probes every latent
+    // index. Computed BEFORE center_effects_fn(x) below -- unlike the single-arm
+    // loop, this joint loop centers x POST-HOC, after log_marginal, purely to
+    // present mean(phi) = 0 in the reported mode (see the comment on that call);
+    // the Newton-converged x and its freshly-factored scratch.chol / scratch.H
+    // (what dispatch_factor_log_det and log_lik_fn just used) are the consistent
+    // point to probe, not the cosmetically-shifted one.
+    bool compute_skew = false,
+    const std::vector<int>* skew_probe_idx = nullptr,
+    const JointCurvature3Oracles* curvature3_fns = nullptr,
+    // Per-cell fixed-effect covariance block. Extracted from
+    // this cell's precision here, so the caller no longer has to keep every
+    // cell's precision alive to read it afterwards. Independent of store_Q: a
+    // fit that did not ask for the precision still gets the block, and one that
+    // did gets both. nullptr / p == 0 extracts nothing.
+    const JointFixedBlockRequest* fixed_block = nullptr,
+    // Subspace debias (subspace_debias.h). Runs on the
+    // same pre-centering iterate and the same live factor the two inner
+    // diagnostics probe, since that is the point log_marginal belongs to. Empty
+    // or absent leaves the solve untouched and consumes no random number.
+    const SubspaceDebiasOptions* debias = nullptr,
+    // Corrected integrated Laplace (inner_cila.h). Runs on
+    // the same pre-centering iterate and the same live factor, and presents its
+    // draws under the same centering fold the reported mode carries. Absent or
+    // inactive leaves the solve untouched.
+    const CilaOptions* cila = nullptr,
+    // Distinguishes this cell's auxiliary stream from its neighbours' on an
+    // outer grid; irrelevant for the deterministic net, load-bearing for the
+    // randomized-QMC shifts.
+    std::uint64_t cila_cell_key = 0,
+    // sparse_override: 0 = auto (size threshold), >0 = force CHOLMOD, <0 =
+    // force the dense factorization. Same three states as the single-arm loop's
+    // parameter of the same name, and the same purpose: one joint problem can
+    // be driven through both factorization backends for an equivalence gate.
+    // The Hessian is assembled densely either way; this selects only what
+    // factorizes it.
+    int sparse_override = 0,
+    // Per-row predictive variance of the linear predictor, read off the same
+    // precision at the mode the fixed-effect block is (see the sparse loop's
+    // parameter of the same name).
+    const JointEtaVarRequest* eta_var = nullptr
+) {
+    LaplaceResult result;
+    result.mode.assign(n_x, 0.0);
+    result.converged = false;
+    result.n_iter = 0;
+    result.log_det_Q = 0.0;
+    result.log_marginal = 0.0;
+
+    Rcpp::NumericVector& x = scratch.x;
+    if (static_cast<int>(x_init.size()) == n_x) {
+        for (int j = 0; j < n_x; j++) x[j] = x_init[j];
+    } else {
+        for (int j = 0; j < n_x; j++) x[j] = 0.0;
+    }
+    bool use_sparse = (sparse_override == 0)
+                          ? (n_x >= SPARSE_THRESHOLD)
+                          : (sparse_override > 0);
+
+    SparseCholeskySolver local_solver;
+    SparseCholeskySolver& sparse_solver = shared_solver ? *shared_solver : local_solver;
+
+    auto eval_objective = [&](const Rcpp::NumericVector& xv) -> double {
+        return eval_penalized_log_lik_joint_ll(
+            xv, compute_eta_joint, compute_log_prior_joint, log_lik_fn,
+            scratch.etas_tmp
+        );
+    };
+
+    auto cholesky_solve = [&]() -> bool {
+        return joint_pd_step_solve_dense(scratch.H, scratch.grad, scratch.delta,
+                                         n_x, sparse_solver, use_sparse,
+                                         scratch.chol, pd_mode);
+    };
+
+    double obj_current = -1e300;
+    bool obj_valid = false;
+    NewtonConvState conv_state;
+
+    auto refresh_grad_hess = [&]() {
+        compute_eta_joint(x, scratch.etas);
+        scratch.zero_for_iter();
+        scatter_joint(x, scratch.etas, scratch.grad, scratch.H, /*finalize=*/false);
+    };
+
+    for (int iter = 0; iter < max_iter; iter++) {
+        if (newton_step(x, scratch, n_x, iter, tol, refresh_grad_hess,
+                        cholesky_solve, eval_objective, obj_current, obj_valid,
+                        conv_state, result.n_iter)) {
+            result.converged = true;
+            break;
+        }
+    }
+
+    // Compute log_marginal at the Newton mode (uncentered). For BYM2/ICAR the
+    // ICAR prior is rank-deficient along the constant-shift direction in phi,
+    // and the obs Hessian is what pins that direction down, so the joint MAP
+    // is at the uncentered Newton iterate. Centering phi without compensating
+    // each arm's intercept would shift eta off the mode and corrupt log_lik
+    // (and would also shift the proper-CAR log_prior). We center post-hoc
+    // *after* log_marginal so the reported mode block has mean(phi) = 0 with
+    // the equivalent intercept shift absorbed into each arm's first beta
+    // column. Net effect: same eta, same log_marginal, centered phi block.
+    compute_eta_joint(x, scratch.etas);
+    scratch.zero_for_iter();
+    scatter_joint(x, scratch.etas, scratch.grad, scratch.H, /*finalize=*/true);
+    joint_newton_finalize_dense(
+        result, n_x, scratch, scratch.H, scratch.grad, sparse_solver, use_sparse,
+        compute_eta_joint, center_effects_fn, compute_log_prior_joint,
+        log_lik_fn, eval_objective, store_Q, pd_mode, compute_skew,
+        skew_probe_idx, curvature3_fns, fixed_block, debias, cila,
+        cila_cell_key, eta_var);
 
     return result;
 }

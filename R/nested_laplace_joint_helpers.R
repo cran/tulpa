@@ -302,10 +302,14 @@
 #     multiplier always applied to that arm's field amplitude. For arms with
 #     a hyperparam-driven coefficient this is 1 (the hyperparam carries the
 #     coefficient).
-#   * `field_coef_axis` NULL or list(name = , grid = ) -- when set, this arm
-#     declares a hyperparam-driven field coefficient. The driver maps that
+#   * `field_coef_axis` NULL or list(name = , grid = , n = ) -- when set, this
+#     arm declares a hyperparam-driven field coefficient. The driver maps that
 #     declaration to the existing `copy = list(arm, alpha_grid)` plumbing
-#     (at most one such axis is supported).
+#     (at most one such axis is supported). `grid` states the axis's nodes; `n`
+#     re-reads the engine's own axis at a higher resolution instead
+#     (gcol33/tulpa#633), keeping its atom at 0 and its slab bounds.
+#     `grid_auto` records whether a stated `grid` carried the `auto_grid()`
+#     marker, which is the provenance the refinement rule reads.
 .normalise_arm_field_coef <- function(a, k) {
     fc <- a$field_coef
     if (is.null(fc)) {
@@ -324,7 +328,8 @@
     }
     if (is.character(fc) && length(fc) == 1L) {
         a$field_coef_const <- 1.0
-        a$field_coef_axis  <- list(name = fc, grid = NULL)
+        a$field_coef_axis  <- list(name = fc, grid = NULL, alpha_n = NULL,
+                                   grid_auto = FALSE)
         return(a)
     }
     if (is.list(fc)) {
@@ -334,6 +339,14 @@
                  "`name`.", call. = FALSE)
         }
         gr <- fc$grid
+        # `as.numeric()` drops attributes, so the `auto_grid()` marker -- a
+        # wrapper package declaring these nodes a default of its own rather than
+        # a user's choice -- is read off the value before it is coerced and
+        # carried on the resolved axis, where the refinement provenance rule
+        # reads it. A declaration asking for the nodes AS WRITTEN
+        # (`auto_grid(place = FALSE)`) is a statement about where the fit
+        # integrates like a pin is, so refinement treats it as one.
+        gr_auto <- is_auto_grid(gr) && auto_grid_place(gr)
         if (!is.null(gr)) {
             gr <- as.numeric(gr)
             if (length(gr) == 0L || any(!is.finite(gr)) || any(gr < 0)) {
@@ -342,8 +355,20 @@
                      call. = FALSE)
             }
         }
+        # `[[` and not `$`: `$` PARTIAL-matches on a list, so `fc$n` resolves
+        # to `fc$name` on every spec that names its coefficient and feeds a
+        # character into the integer check below.
+        an <- fc[["n"]]
+        if (!is.null(an)) {
+            an <- suppressWarnings(as.integer(an))
+            if (length(an) != 1L || is.na(an) || an < 1L) {
+                stop("Arm ", k, ": `field_coef$n` must be a single integer ",
+                     ">= 1.", call. = FALSE)
+            }
+        }
         a$field_coef_const <- 1.0
-        a$field_coef_axis  <- list(name = as.character(nm), grid = gr)
+        a$field_coef_axis  <- list(name = as.character(nm), grid = gr,
+                                   alpha_n = an, grid_auto = gr_auto)
         return(a)
     }
     stop("Arm ", k, ": `field_coef` must be NULL, a numeric scalar, a single ",
@@ -429,10 +454,8 @@
     }
     k_axis <- which(has_axis_per_arm)
     spec   <- axes[[k_axis]]
-    alpha_axis <- spec$grid
-    if (is.null(alpha_axis)) {
-        alpha_axis <- .nl_grid_axis("copy_alpha")
-    }
+    alpha_axis <- .nl_copy_alpha_axis(spec[["grid"]], spec[["alpha_n"]],
+                                      what = paste0("Arm ", k_axis))
     if (length(alpha_axis) == 0L) {
         stop("Arm ", k_axis, ": `field_coef$grid` must have at least one ",
              "non-negative value.", call. = FALSE)
@@ -446,33 +469,6 @@
          field_coef_const = consts)
 }
 
-# Recalibrate per-axis posterior moments after the joint pass. Slice
-# cells from mode-tracked refinement on axis Y are pinned at modal
-# (non-Y) values; including them in axis X's marginal (X != Y) collapses
-# X to a point and shrinks Sd(X). Recompute mean/Sd for each column of
-# `theta_grid` using only cells that vary that column -- cartesian cells
-# (`refining_axis == ""`) plus same-axis slice cells.
-#
-# Joint theta_mean / theta_sd come from `.nl_posterior_moments` and are
-# left in place for axes with no foreign slice cells (the recompute is a
-# no-op there). The original `theta_mean` / `theta_sd` are overwritten
-# in place rather than augmented -- downstream callers should read the
-# axis marginal, not the cartesian-only joint moment.
-.joint_recalibrate_axis_moments <- function(res) {
-    if (is.null(res$refining_axis) || all(res$refining_axis == "")) return(res)
-    if (is.null(res$theta_grid) || !is.matrix(res$theta_grid)) return(res)
-    moments <- .hyper_recalibrate_axis_moments(
-        theta_grid    = res$theta_grid,
-        log_marginal  = res$log_marginal,
-        refining_axis = res$refining_axis,
-        theta_mean    = res$theta_mean,
-        theta_sd      = res$theta_sd
-    )
-    res$theta_mean <- moments$theta_mean
-    res$theta_sd   <- moments$theta_sd
-    res
-}
-
 # Weighted-quantile median + 2.5/97.5 empirical CI for every hyperparameter
 # axis are produced generically by `.nl_axis_quantiles` (defined in
 # nested_laplace.R) and attached by `.nl_posterior_moments`. No alpha-
@@ -483,9 +479,164 @@
 
 # Alpha refinement piggybacks on the generic consistency pass: alpha
 # appears in `.hyper_refinable_names`, and `.hyper_consistency_pass`
-# fires whenever the joint-grid alpha SD falls short of the Laplace-at-
-# mode alpha SD on its own axis. No bespoke helper.
+# fires whenever the alpha marginal spreads over too few nodes to carry a
+# spread. No bespoke helper.
 
+
+# --- which axes the joint grid carries, and how far each may be refined -------
+#
+# The axes one `grids` list produces specs for. The alpha column is present in
+# the paired-vector representation whether or not a copy arm was declared, so a
+# fit with no copy drops it.
+.joint_spec_axis_names <- function(grids, cp) {
+    axes <- names(grids)
+    has_alpha <- isTRUE(cp$has_copy) && length(grids$alpha) > 0L
+    if (!has_alpha) axes <- setdiff(axes, "alpha")
+    axes
+}
+
+# Which axes the joint refinement machinery can place nodes on at all. This is
+# a property of the DRIVER -- the copy coefficient and the per-arm dispersions
+# are the axes its passes know how to propose on -- not of where the nodes came
+# from, which is the separate question `.joint_axis_is_stated()` answers.
+.joint_axis_refine_eligible <- function(axis) {
+    identical(axis, "alpha") || startsWith(axis, "phi_")
+}
+
+# One entry of the user-facing `phi_grid` argument, by arm name. The argument is
+# either named by arm or positional over `arm_names`, and the axis it produces
+# is `phi_<arm name>` either way.
+.joint_phi_grid_entry <- function(phi_grid, arm, arm_names = NULL) {
+    if (!is.list(phi_grid) || !length(phi_grid)) return(NULL)
+    if (!is.null(names(phi_grid))) {
+        if (!arm %in% names(phi_grid)) return(NULL)
+        return(phi_grid[[arm]])
+    }
+    k <- match(arm, arm_names %||% character(0))
+    if (is.na(k) || k > length(phi_grid)) return(NULL)
+    phi_grid[[k]]
+}
+
+# Did the CALLER write this axis's nodes down?
+#
+# A stated axis is a statement about where the fit integrates, so refinement
+# resolves it more finely and does not leave it; an axis the engine placed
+# carries no such statement. Three things count as engine-placed, matching the
+# provenance vocabulary the recentring pass already uses
+# (`.nl_axis_hold()`): no nodes given at all (the copy axis resolved from
+# `alpha_n`, or from the engine default), nodes marked with `auto_grid()` by a
+# wrapper package that computed a default of its own, and nodes that ARE the
+# engine's own default axis, which carry nothing a statement would add. A
+# package default marked `auto_grid(place = FALSE)` is NOT among them: asking
+# for the nodes as written is the statement, whoever made it.
+.joint_axis_is_stated <- function(axis, arms, phi_grid = NULL,
+                                  arm_names = NULL, phi_auto = NULL) {
+    if (identical(axis, "alpha")) {
+        for (a in arms) {
+            fc <- a$field_coef_axis
+            if (is.null(fc)) next
+            g <- fc$grid
+            if (is.null(g) || !length(g)) return(FALSE)
+            if (isTRUE(fc$grid_auto)) return(FALSE)
+            return(!.nl_axis_matches_default(g, "alpha_grid", ".copy"))
+        }
+        return(FALSE)
+    }
+    if (startsWith(axis, "phi_")) {
+        arm <- sub("^phi_", "", axis)
+        v <- .joint_phi_grid_entry(phi_grid, arm, arm_names)
+        if (is.null(v) || length(v) < 2L) return(FALSE)
+        # The front door's record first: it is taken before the markers are
+        # stripped, so it is the only reading available once they are gone. A
+        # caller reaching this with the marked value itself is read off the
+        # value.
+        if (!is.null(phi_auto)) return(!is.null(.nl_phi_axis_hold(arm, phi_auto)))
+        return(!is_auto_grid(v) || !auto_grid_place(v))
+    }
+    FALSE
+}
+
+# The refinement mode of every axis of one joint grid, as a named character
+# vector over `.NL_AXIS_REFINE_MODES`. Eligible axes take the provenance
+# default; everything else takes "none". `user` -- the caller's
+# `control$axis_refine`, already validated -- overrides per axis.
+.joint_axis_refine_modes <- function(grids, cp, arms, phi_grid = NULL,
+                                     arm_names = NULL, user = NULL,
+                                     phi_auto = NULL) {
+    axes <- .joint_spec_axis_names(grids, cp)
+    out  <- stats::setNames(rep("none", length(axes)), axes)
+    for (a in axes) {
+        if (!.joint_axis_refine_eligible(a)) next
+        out[[a]] <- if (.joint_axis_is_stated(a, arms, phi_grid, arm_names,
+                                              phi_auto))
+            .nl_axis_refine("stated") else .nl_axis_refine("placed")
+    }
+    if (!is.null(user)) {
+        for (a in intersect(names(user), axes)) out[[a]] <- user[[a]]
+    }
+    out
+}
+
+# Validate `control$axis_refine` against the axes this fit actually has.
+#
+# Accepts a named character vector (or list) keyed by axis name, or one unnamed
+# value applying to every eligible axis. An unknown axis name is an error rather
+# than a silent no-op, and so is asking for nodes on an axis the driver's passes
+# cannot place any on: a knob that quietly does nothing is how a caller comes to
+# believe a range was honoured when it was not.
+.joint_check_axis_refine <- function(x, axis_names) {
+    if (is.null(x)) return(NULL)
+    if (is.list(x)) x <- unlist(x, use.names = TRUE)
+    if (!is.character(x) || !length(x) || anyNA(x)) {
+        stop("`control$axis_refine` must be a character vector of ",
+             paste(sprintf('"%s"', .NL_AXIS_REFINE_MODES), collapse = " / "),
+             ", named by outer-grid axis.", call. = FALSE)
+    }
+    bad <- setdiff(unique(unname(x)), .NL_AXIS_REFINE_MODES)
+    if (length(bad)) {
+        stop("`control$axis_refine`: unknown mode ",
+             paste(shQuote(bad), collapse = ", "), ". Use one of ",
+             paste(sprintf('"%s"', .NL_AXIS_REFINE_MODES), collapse = ", "),
+             ".", call. = FALSE)
+    }
+    eligible <- axis_names[vapply(axis_names, .joint_axis_refine_eligible,
+                                  logical(1))]
+    nm <- names(x)
+    if (is.null(nm) || !all(nzchar(nm))) {
+        if (length(x) != 1L) {
+            stop("`control$axis_refine` must be named by axis, or a single ",
+                 "mode applying to every refinable axis.", call. = FALSE)
+        }
+        if (!length(eligible)) return(NULL)
+        return(stats::setNames(rep(unname(x), length(eligible)), eligible))
+    }
+    unknown <- setdiff(nm, axis_names)
+    if (length(unknown)) {
+        stop("`control$axis_refine` names axes this fit does not have: ",
+             paste(shQuote(unknown), collapse = ", "), ". Its axes are ",
+             paste(shQuote(axis_names), collapse = ", "), ".", call. = FALSE)
+    }
+    wrong <- nm[!nm %in% eligible & x != "none"]
+    if (length(wrong)) {
+        stop("`control$axis_refine`: ",
+             paste(shQuote(wrong), collapse = ", "),
+             " cannot take refinement nodes on this driver, so only \"none\" ",
+             "applies there. The axes it refines are ",
+             if (length(eligible)) paste(shQuote(eligible), collapse = ", ")
+             else "none of this fit's", ".", call. = FALSE)
+    }
+    x
+}
+
+# The mode one axis ends up at. Absent provenance -- a spec list rebuilt from an
+# assembled grid, which no refinement pass reads -- keeps the driver's
+# eligibility as the answer.
+.joint_axis_refine_mode <- function(axis_refine, axis) {
+    if (!is.null(axis_refine) && axis %in% names(axis_refine)) {
+        return(as.character(axis_refine[[axis]]))
+    }
+    if (.joint_axis_refine_eligible(axis)) .nl_axis_refine("placed") else "none"
+}
 
 # Generic axis-spec adapter (Step 3).
 #
@@ -496,23 +647,42 @@
 # with the sorted unique levels keeps the spec object self-describing.
 #
 # Hardcoded metadata captures what the legacy joint helpers `.axis_is_log_scale`,
-# `.axis_bounds`, `.refinable_axes`, `.axis_refinement_order` encoded by name --
-# the same set, in one place.
-.joint_axis_specs <- function(grids, cp) {
-    has_alpha <- cp$has_copy && length(grids$alpha) > 0L
-    axes <- names(grids)
-    if (!has_alpha) axes <- setdiff(axes, "alpha")
+# `.axis_bounds`, `.axis_refinement_order` encoded by name -- the same set, in
+# one place. `axis_refine` carries the one piece of metadata that is NOT a
+# property of the axis's name: how far each axis may be refined, which follows
+# from where its nodes came from and so is resolved by
+# `.joint_axis_refine_modes()` at the front door.
+# `user_priors` carries the caller's regularizing hyperpriors, named by the axis
+# each applies to (`sigma`, `alpha`, `phi` -- the last matching every `phi_<arm>`
+# axis), matching how `.joint_hp_vec_for_grids()` folds them into
+# `log_marginal`. An axis with one keeps the flat-over-declared-span measure,
+# because applying the engine's declared density as well would put two priors on
+# one axis, and carries the density on the spec so the axis quadrature knows
+# what the fold will apply -- which is what lets a declared point mass keep its
+# prior probability (`.hyper_atom_fold_scale()`).
+.joint_axis_specs <- function(grids, cp, user_priors = NULL,
+                              copy_atom_mass = .TULPA_COPY_ATOM_MASS,
+                              copy_slab = "exponential",
+                              axis_refine = NULL,
+                              folded_axes = NULL) {
+    copy_slab <- .hyper_check_copy_slab(copy_slab)
+    axes <- .joint_spec_axis_names(grids, cp)
     lapply(axes, function(a) {
-        log_scale <- a %in% c("sigma", "alpha", "tau", "sigma2",
-                                "phi_gp", "lengthscale") ||
-                     startsWith(a, "phi_")
-        bounds <- if (a == "sigma")            c(0, Inf)
-                  else if (a == "alpha")        c(0, Inf)
-                  else if (a == "rho")          c(0, 1)
-                  else if (a == "rho_car")      c(-Inf, 1)
-                  else if (startsWith(a, "phi_")) c(0, Inf)
-                  else NULL
-        refinable <- a == "alpha" || startsWith(a, "phi_")
+        # A multi-block grid prefixes its axes (`b1.sigma`), so the scale, the
+        # domain and the point-mass metadata are resolved on the bare axis name:
+        # an axis's support does not change because the block it is laid on is
+        # the second one. Which axes refine, and in what order, stays keyed on
+        # the full name.
+        bare <- sub("^b[0-9]+[.]", "", a)
+        scale_known <- .hyper_axis_scale(bare)
+        log_scale <- isTRUE(scale_known)
+        bounds <- .hyper_spec_bounds(bare)
+        # How far refinement may move this axis: whether it participates at all,
+        # and whether it may place a node past the nodes it was given. Both come
+        # from `axis_refine`, resolved from the caller's provenance one level up
+        # -- deciding by axis NAME would opt a caller's stated nodes into being
+        # extended (gcol33/tulpa#658).
+        mode <- .joint_axis_refine_mode(axis_refine, a)
         refine_priority <- if (a == "alpha") 1L
                            else if (startsWith(a, "phi_")) 2L
                            else 100L
@@ -521,11 +691,189 @@
             grid      = sort(unique(as.numeric(grids[[a]]))),
             log_scale = log_scale,
             bounds    = bounds,
-            refinable = refinable
+            refinable = !identical(mode, "none"),
+            extend    = identical(mode, "extend")
         )
         spec$refine_priority <- refine_priority
+        # An axis this table does not classify keeps equal node weights, which
+        # is what the engine integrated before any coordinate was declared.
+        if (is.na(scale_known)) spec$unweighted <- TRUE
+        # The copy scale carries an explicit zero level ("no coupling"), which
+        # is a point mass rather than part of the log continuum, so it needs a
+        # declared prior probability. Fixing it here keeps it independent of how
+        # many continuum nodes the grid ends up with.
+        if (identical(bare, "alpha")) spec$atom_mass <- copy_atom_mass
+        # A flat measure on a log axis is improper, so the support is a prior
+        # choice. The incoming grid is what the user declared, so the support is
+        # its span widened by half a node step at each end: that is the region
+        # the initial nodes already tile, so an unrefined grid integrates what it
+        # always did, and fixing it here, ahead of any refinement, is what keeps
+        # the measure independent of the data.
+        pos <- sort(unique(spec$grid[spec$grid > 0]))
+        user_fn <- if (identical(a, "sigma")) user_priors$sigma
+                   else if (identical(a, "alpha")) user_priors$alpha
+                   else if (startsWith(a, "phi_")) user_priors$phi
+                   else NULL
+        user_prior <- !is.null(user_fn)
+        if (user_prior) {
+            # The joint driver's hyperprior families are densities on the axis's
+            # natural scale.
+            spec$log_prior <- user_fn
+            spec$log_prior_coord <- "natural"
+        }
+        if (log_scale && length(pos) >= 2L) {
+            copy_exp_slab <- identical(bare, "alpha") && !user_prior &&
+                             identical(copy_slab, "exponential")
+            if (copy_exp_slab) {
+                # The copy scale is the axis a user cannot be expected to bracket
+                # in advance, and the one carrying the point mass the continuum
+                # is weighed against. It therefore gets a proper density over the
+                # whole positive line rather than a span: refinement can then
+                # follow the posterior out as far as it needs to, and still be
+                # integrating the measure declared here, before the fit.
+                #
+                # `copy_slab = "flat"` takes the other branch instead, so the
+                # copy scale is flat in log alpha over the span its declared
+                # nodes tile, the same measure sigma and phi carry.
+                spec$slab_log_density <- .hyper_copy_slab_density(max(pos))
+            } else if (!a %in% folded_axes) {
+                # An axis whose normalised density is folded into the marginal
+                # (`R/hyperprior_default.R`) needs no span to make its measure
+                # proper, and refinement may follow the posterior past its nodes.
+                bd <- .hyper_default_coord_bounds(.hyper_axis_coord(pos, spec))
+                spec$slab_bounds <- exp(bd)
+            }
+        }
         spec
     })
+}
+
+# Axis specs for a grid that is already assembled, keyed off its column names.
+# The multi-block driver builds its grid before any spec list exists, so it
+# recovers the same metadata from the columns rather than carrying a second
+# description of the same axes. `logchol` is each free-covariance block's
+# declared design (`.hp_logchol_designs()`), stamped on the block's specs as
+# `logchol_design`; it defaults to the design `theta_grid` itself declares, and a
+# caller measuring a grid it did not declare -- a subset of the declared tensor
+# -- passes the declaration it folded the hyperprior under.
+#' Rebuild axis specs from an already-assembled outer grid
+#'
+#' Rebuilds each axis's declared spec (support, log/linear coordinate,
+#' prior) from a `theta_grid`'s columns, keyed off column names -- the same
+#' metadata the multi-block joint driver recovers rather than carrying a
+#' second description of the axes it already assembled. A column holding one
+#' value across every cell is treated as a fixed setting rather than an axis
+#' (e.g. a fixed NB-size node) and dropped. Intended for a caller that needs
+#' an axis's declared span, coordinate or prior off a settled grid without
+#' restating tulpa's own hyperprior declarations alongside it.
+#'
+#' @param theta_grid A named `[n_cells x n_axes]` matrix (see
+#'   [tulpa_theta_matrix()]).
+#' @param copy_slab `"exponential"` or `"flat"`; the copy-scale axis's
+#'   continuum measure (see [tulpa_hyper_check_copy_slab()]).
+#' @param folded_axes Optional names of axes folded onto `[0, Inf)`.
+#' @param logchol Free-covariance block design(s) as returned by
+#'   `.hp_logchol_designs()`; defaults to the design `theta_grid` itself
+#'   declares.
+#' @return A named list of per-axis spec lists, or `NULL` if `theta_grid` has
+#'   no axis names.
+#' @seealso [tulpa_theta_matrix()], [tulpa_grid_log_quad()],
+#'   [tulpa_hyper_grid_supports()]
+#' @export
+tulpa_joint_axis_specs_from_grid <- function(
+    theta_grid, copy_slab = "exponential", folded_axes = NULL,
+    logchol = .hp_logchol_designs(theta_grid)) {
+  .joint_axis_specs_from_grid(theta_grid, copy_slab = copy_slab,
+                              folded_axes = folded_axes, logchol = logchol)
+}
+
+.joint_axis_specs_from_grid <- function(theta_grid,
+                                        copy_slab = "exponential",
+                                        folded_axes = NULL,
+                                        logchol = .hp_logchol_designs(theta_grid)) {
+    if (is.null(theta_grid) || is.null(colnames(theta_grid))) return(NULL)
+    theta_grid <- as.matrix(theta_grid)
+    grids <- stats::setNames(
+        lapply(colnames(theta_grid),
+               function(a) sort(unique(as.numeric(theta_grid[, a])))),
+        colnames(theta_grid))
+    # A column holding one value across every cell is a fixed setting rather
+    # than an axis of the grid: it contributes the same factor to every cell,
+    # which cancels when the weights are normalised. Some are not quantities to
+    # integrate at all, such as the `r = Inf` node a Poisson count grid carries
+    # to pin the negative-binomial size, so they are dropped before an axis spec
+    # is built for them.
+    grids <- grids[vapply(grids, function(g) length(g) > 1L, logical(1))]
+    if (length(grids) == 0L) return(NULL)
+    specs <- .joint_axis_specs(grids, list(has_copy = TRUE), copy_slab = copy_slab,
+                               folded_axes = folded_axes)
+    lapply(specs, function(sp) {
+        if (.hp_is_logchol_col(.hyper_axis_bare(sp$name))) {
+            sp$logchol_design <- logchol[[.hp_logchol_key(.hp_col_prefix(sp$name))]]
+        }
+        sp
+    })
+}
+
+# The continuum levels of one axis: its distinct finite values, with the zero
+# level dropped on a log-scale axis, where it is the point mass rather than a
+# point of the continuum. The same convention `.hyper_axis_support()` applies
+# before it measures a span.
+.joint_axis_continuum_levels <- function(v, spec) {
+    v <- sort(unique(as.numeric(v)))
+    v <- v[is.finite(v)]
+    if (isTRUE(spec$log_scale)) v <- v[v > 0]
+    v
+}
+
+# The span each outer axis was integrated over, and the two terms that separate
+# it from the nodes the caller wrote down.
+#
+# `axis_support` reports the interval the quadrature finally reached, which is
+# the number a reader needs and not one they can decompose: it carries both the
+# half node step the outermost cells own -- `k / (k - 1)` times the node range on
+# the axis's integration coordinate, for `k` equally spaced nodes, so 2x at two
+# nodes and 1.125x at nine -- and whatever refinement added past the end nodes.
+# Reported side by side the two terms are readable off the fit:
+#
+#   nodes       range of the axis's continuum nodes, before any refinement pass
+#   declared    support of that initial node set (the nodes plus the half step)
+#   integrated  the region the final grid's measure integrates, read through
+#               `.hyper_grid_supports()` with the final grid's `refining` tags,
+#               so it is `axis_support`
+#   refine      the mode that governed how far refinement could move the axis
+#   n_nodes     continuum node count, initial and final
+#
+# An axis with fewer than two continuum levels has no span to report and is left
+# out, matching what `.hyper_grid_supports()` does with it.
+.joint_axis_span <- function(theta_grid_init, theta_grid_final, specs,
+                             refining = NULL) {
+    if (is.null(theta_grid_init) || is.null(specs)) return(NULL)
+    theta_grid_init  <- as.matrix(theta_grid_init)
+    theta_grid_final <- if (is.null(theta_grid_final)) theta_grid_init
+                        else as.matrix(theta_grid_final)
+    integrated <- .hyper_grid_supports(theta_grid_final, specs,
+                                       refining = refining)
+    out <- list()
+    for (spec in specs) {
+        a <- spec$name
+        if (!a %in% colnames(theta_grid_init)) next
+        lev0 <- .joint_axis_continuum_levels(theta_grid_init[, a], spec)
+        if (length(lev0) < 2L) next
+        lev1 <- if (a %in% colnames(theta_grid_final))
+            .joint_axis_continuum_levels(theta_grid_final[, a], spec) else lev0
+        mode <- if (!isTRUE(spec$refinable)) "none"
+                else if (.hyper_axis_may_extend(spec)) "extend" else "densify"
+        out[[a]] <- list(
+            nodes      = range(lev0),
+            declared   = .hyper_axis_support(theta_grid_init[, a], spec),
+            integrated = integrated[[a]],
+            refine     = mode,
+            n_nodes    = c(initial = length(lev0), final = length(lev1))
+        )
+    }
+    if (!length(out)) return(NULL)
+    out
 }
 
 # Convert a generic `new_cells` matrix [n_new x n_axes] back to the joint
@@ -541,8 +889,8 @@
 
 # Build the generic `kernel_fn(new_cells, warm_start, store_extras)` closure
 # refinement passes around `backend$call_kernel`. Packs the joint kernel's
-# per-cell modes + n_iter + Q_csc_* into a list of per-cell `extras` so the
-# generic helpers can carry them along across refinement appends (and the
+# per-cell side data (`.JOINT_CELL_FIELDS`) into a list of per-cell `extras` so
+# the generic helpers can carry them along across refinement appends (and the
 # warm-start chain still reads `extras[[idx0]]$mode`).
 .joint_make_kernel_fn <- function(arms, prior, cp, backend, max_iter, tol,
                                   n_threads, x_init_default, store_Q,
@@ -618,24 +966,7 @@
                                       cila = cila)
         extras <- NULL
         if (isTRUE(store_extras)) {
-            n <- nrow(new_cells)
-            extras <- vector("list", n)
-            modes_mat  <- res_x$modes
-            n_iter_vec <- res_x$n_iter
-            Qp <- res_x$Q_csc_p_per_grid
-            Qi <- res_x$Q_csc_i_per_grid
-            Qx <- res_x$Q_csc_x_per_grid
-            CB <- res_x$cov_block_per_grid
-            for (k in seq_len(n)) {
-                e <- list()
-                if (!is.null(modes_mat))  e$mode   <- as.numeric(modes_mat[k, ])
-                if (!is.null(n_iter_vec)) e$n_iter <- as.integer(n_iter_vec[k])
-                if (!is.null(Qp))         e$Q_csc_p <- Qp[[k]]
-                if (!is.null(Qi))         e$Q_csc_i <- Qi[[k]]
-                if (!is.null(Qx))         e$Q_csc_x <- Qx[[k]]
-                if (!is.null(CB))         e$cov_block <- CB[[k]]
-                extras[[k]] <- e
-            }
+            extras <- .joint_extras_from_res(res_x, nrow(new_cells))
         }
         list(log_marginal = res_x$log_marginal, extras = extras,
              inner_skew = res_x$inner_skew,
@@ -662,62 +993,173 @@
     }
 }
 
+# The per-cell side data a joint kernel result carries: one entry per cell of
+# the outer grid, in the grid's own cell order. Refinement extends the grid cell
+# by cell, so every one of these has to travel out through `extras` and back --
+# a list left behind indexes the grid the fit had BEFORE refinement. The three
+# passes that move them (slice the initial result, slice a refinement pass's
+# result, glue the merged list back on) read this one table, so a field added to
+# the kernel's output is added once rather than at three sites that then drift.
+#
+# `kind` is how a cell is taken out of a result and put back:
+#   "row" -- an [n_grid x m] matrix; cell k is row k, a cell without one is NA
+#   "int" -- a length-n_grid integer vector
+#   "elt" -- a length-n_grid list; cell k is element k
+.JOINT_CELL_FIELDS <- list(
+    list(res = "modes",             extra = "mode",      kind = "row"),
+    # The per-cell linear predictor and its within-cell variance: the pair a
+    # grid-mixture predictive read draws a replicate from
+    # (`.tulpa_eta_draws_grid()`, gcol33/tulpa#850). Present on a single-arm fit
+    # only, the variance additionally only under `control$fitted_var`.
+    list(res = "fitted_eta",        extra = "eta",       kind = "row"),
+    list(res = "fitted_eta_var",    extra = "eta_var",   kind = "row"),
+    list(res = "n_iter",            extra = "n_iter",    kind = "int"),
+    list(res = "Q_csc_p_per_grid",  extra = "Q_csc_p",   kind = "elt"),
+    list(res = "Q_csc_i_per_grid",  extra = "Q_csc_i",   kind = "elt"),
+    list(res = "Q_csc_x_per_grid",  extra = "Q_csc_x",   kind = "elt"),
+    list(res = "cov_block_per_grid", extra = "cov_block", kind = "elt")
+)
+
+# Per-cell extras for the first `n` cells of a joint kernel result: the fields
+# it actually carries, under their `extras` names. Built for the initial
+# cartesian pass (`.joint_init_extras_from_res`) and for every refinement
+# append (`.joint_make_kernel_fn`) through the same walk.
+.joint_extras_from_res <- function(res, n) {
+    if (n == 0L) return(vector("list", 0L))
+    lapply(seq_len(n), function(k) {
+        e <- list()
+        for (f in .JOINT_CELL_FIELDS) {
+            v <- res[[f$res]]
+            if (is.null(v)) next
+            e[[f$extra]] <- switch(f$kind,
+                                   row = as.numeric(v[k, ]),
+                                   int = as.integer(v[k]),
+                                   elt = v[[k]])
+        }
+        e
+    })
+}
+
 # Build the initial per-cell extras list from the initial joint kernel result,
 # matching what `.joint_make_kernel_fn` would have produced for the cartesian
 # pass. Refinement extends this list; `.joint_glue_extras_to_res` puts the
 # refined extras back into `res` once integration is done.
 .joint_init_extras_from_res <- function(res) {
-    n <- length(res$log_marginal)
-    if (n == 0L) return(vector("list", 0L))
-    modes_mat  <- res$modes
-    n_iter_vec <- res$n_iter
-    Qp <- res$Q_csc_p_per_grid
-    Qi <- res$Q_csc_i_per_grid
-    Qx <- res$Q_csc_x_per_grid
-    CB <- res$cov_block_per_grid
-    lapply(seq_len(n), function(k) {
-        e <- list()
-        if (!is.null(modes_mat))  e$mode   <- as.numeric(modes_mat[k, ])
-        if (!is.null(n_iter_vec)) e$n_iter <- as.integer(n_iter_vec[k])
-        if (!is.null(Qp))         e$Q_csc_p <- Qp[[k]]
-        if (!is.null(Qi))         e$Q_csc_i <- Qi[[k]]
-        if (!is.null(Qx))         e$Q_csc_x <- Qx[[k]]
-        if (!is.null(CB))         e$cov_block <- CB[[k]]
-        e
-    })
+    .joint_extras_from_res(res, length(res$log_marginal))
+}
+
+# The first cell carrying `field`, or 0 when none does.
+#
+# Which per-cell side data a fit holds is a property of the FIT (`store_Q`, the
+# kernel's own outputs), but which cells hold it is not: a cheap-pass pruned
+# cell is never solved, so it has no mode, no precision and no covariance
+# block, whatever the fit stored. Reading cell 1 to decide for the whole list
+# reads a pruned cell whenever the screen dropped the grid's first corner.
+.joint_extras_first_with <- function(extras, field) {
+    for (k in seq_along(extras)) {
+        if (!is.null(extras[[k]][[field]])) return(k)
+    }
+    0L
 }
 
 # Glue refined extras + log_marginal + refining_axis back into the joint
-# kernel result. Downstream `.joint_recalibrate_axis_moments` /
-# `.nl_posterior_moments` / `.nl_refit_axis_sd_laplace` read `res$modes`,
+# kernel result. Downstream `.nl_posterior_moments` / `.nl_attach_axis_sd`
+# read `res$modes`,
 # `res$log_marginal`, `res$refining_axis` directly; this keeps them in sync
 # after refinement without touching their implementations.
+#
+# Every per-cell list is rewritten from `extras`, which the refinement passes
+# extend cell for cell with the grid. A list left behind indexes the grid the
+# fit had BEFORE refinement, and the per-cell precisions are what
+# `tulpa_posterior_draws()` builds its mixture from, so a stale one stops
+# prediction on a fit that otherwise converged.
 .joint_glue_extras_to_res <- function(res, theta_grid_matrix, log_marginal,
                                       extras, refining_axis) {
     res$log_marginal  <- log_marginal
     res$n_grid        <- nrow(theta_grid_matrix)
     res$refining_axis <- refining_axis
     if (is.null(extras) || length(extras) == 0L) return(res)
-    if (!is.null(extras[[1L]]$mode)) {
-        n_x <- length(extras[[1L]]$mode)
-        res$modes <- do.call(rbind, lapply(extras, function(e) {
-            if (is.null(e$mode)) rep(NA_real_, n_x) else as.numeric(e$mode)
-        }))
-    }
-    if (!is.null(extras[[1L]]$n_iter)) {
-        res$n_iter <- vapply(extras, function(e) {
-            if (is.null(e$n_iter)) NA_integer_ else as.integer(e$n_iter)
-        }, integer(1))
-    }
-    if (!is.null(extras[[1L]]$Q_csc_p)) {
-        res$Q_csc_p_per_grid <- lapply(extras, `[[`, "Q_csc_p")
-        res$Q_csc_i_per_grid <- lapply(extras, `[[`, "Q_csc_i")
-        res$Q_csc_x_per_grid <- lapply(extras, `[[`, "Q_csc_x")
-    }
-    if (!is.null(extras[[1L]]$cov_block)) {
-        res$cov_block_per_grid <- lapply(extras, `[[`, "cov_block")
+    for (f in .JOINT_CELL_FIELDS) {
+        k0 <- .joint_extras_first_with(extras, f$extra)
+        if (k0 == 0L) next
+        res[[f$res]] <- switch(
+            f$kind,
+            row = {
+                m <- length(extras[[k0]][[f$extra]])
+                do.call(rbind, lapply(extras, function(e) {
+                    v <- e[[f$extra]]
+                    if (is.null(v)) rep(NA_real_, m) else as.numeric(v)
+                }))
+            },
+            int = vapply(extras, function(e) {
+                v <- e[[f$extra]]
+                if (is.null(v)) NA_integer_ else as.integer(v)
+            }, integer(1)),
+            elt = lapply(extras, `[[`, f$extra))
     }
     res
+}
+
+#' Per-cell constrained inverse-precision sub-block for a joint fit
+#'
+#' Runs the same per-outer-grid-cell selected-inversion the joint
+#' nested-Laplace driver's own fixed-effect retention uses internally
+#' (`extract_inner_vcov_block_cell()`, see the note above
+#' `.joint_attach_grid_fixed()`), for a caller-chosen index set. A consumer
+#' package computing its own standard-error correction on a subset of a
+#' joint fit's latent coordinates -- a different `idx` than whatever the fit
+#' itself retained on `$cov_block_per_grid` -- reruns the extraction through
+#' this door instead of reimplementing the sparse selected inversion.
+#'
+#' @param Q_p_per_grid,Q_i_per_grid,Q_x_per_grid Per-outer-grid-cell CSC
+#'   storage of the latent precision `Q` (`fit$Q_csc_p_per_grid` /
+#'   `_i_per_grid` / `_x_per_grid`), one list element per cell.
+#' @param n_x Integer, the latent dimension `Q` is built over
+#'   (`fit$Q_csc_n`).
+#' @param idx Integer vector (1-based) of latent coordinates to extract the
+#'   sub-block for.
+#' @param n_dense Integer, the number of leading `idx` entries that are
+#'   dense fixed effects rather than field coordinates (see Details).
+#' @param A_cols_list A list of integer vectors, one per sum-to-zero
+#'   constraint group, each the (1-based) latent coordinates that group
+#'   averages to zero.
+#' @param field_marginal Logical; if `TRUE` (default) and
+#'   `n_dense < length(idx)`, only the field coordinates' marginal variances
+#'   are computed (a single Takahashi pass) rather than their full dense
+#'   sub-block.
+#' @param n_threads Integer, grid cells processed concurrently.
+#'
+#' @return A list of length `n_grid` (one per outer-grid cell), each element
+#'   either `NULL` (the cell stored no `Q`, or its sparse Cholesky failed)
+#'   or a dense `length(idx) x length(idx)` matrix: the constrained
+#'   covariance sub-block for `idx`, with the sum-to-zero constraints in
+#'   `A_cols_list` conditioned out by the same kriging correction the fit's
+#'   own posterior draws use.
+#'
+#' @details When a field is present (`n_dense < length(idx)`), the
+#'   extraction takes a cheap selected-inversion path: the dense
+#'   (fixed-effect) block and the fixed-effect x field cross terms are
+#'   exact; the field x field block is either its marginal diagonal
+#'   (`field_marginal = TRUE`) or left at zero (`FALSE`) -- never the full
+#'   field x field covariance.
+#' @export
+#' @examples
+#' \dontrun{
+#' tulpa_joint_inner_vcov_blocks(
+#'   fit$Q_csc_p_per_grid, fit$Q_csc_i_per_grid, fit$Q_csc_x_per_grid,
+#'   n_x = fit$Q_csc_n, idx = 1:2, n_dense = 2L, A_cols_list = list()
+#' )
+#' }
+tulpa_joint_inner_vcov_blocks <- function(Q_p_per_grid, Q_i_per_grid, Q_x_per_grid,
+                                          n_x, idx, n_dense, A_cols_list,
+                                          field_marginal = TRUE, n_threads = 1L) {
+  cpp_joint_inner_vcov_blocks(
+    Q_p_per_grid = Q_p_per_grid, Q_i_per_grid = Q_i_per_grid,
+    Q_x_per_grid = Q_x_per_grid,
+    n_x = as.integer(n_x), idx = as.integer(idx), n_dense = as.integer(n_dense),
+    A_cols_list = lapply(A_cols_list, as.integer),
+    field_marginal = isTRUE(field_marginal), n_threads = as.integer(n_threads)
+  )
 }
 
 # ----------------------------------------------------------------------------
@@ -872,6 +1314,15 @@
   switch(x, auto = 0L, sparse = 1L, dense = -1L)
 }
 
+# The observations a joint fit is scored on: every arm's response, named by
+# arm, and their total count -- the number of likelihood terms the arms
+# contribute together, which is what nobs() and logLik() report.
+.joint_attach_observations <- function(res, responses) {
+    res$y <- lapply(responses, function(r) r$y)
+    res$N <- sum(lengths(res$y))
+    res
+}
+
 # Compute per-arm latent offsets so callers can decode `modes` back into
 # per-arm (beta, re) blocks plus the shared spatial block(s). For BYM2 the
 # spatial block is two sub-blocks (phi, theta); for ICAR/CAR_proper it's
@@ -912,4 +1363,41 @@
         out[[spatial_block_names[b]]] <- spatial_starts[b]
     }
     out
+}
+
+# The one R -> compiled-kernel dispersion boundary for the joint tier. Every
+# R-level `phi` in the package is the engine convention (gaussian / lognormal:
+# the residual VARIANCE); the kernels parameterize those two families by the
+# residual SD. An arm carries its own family, so the arm scalar, the per-arm
+# outer-grid override (`phi_grid_per_arm`, a per-cell vector or, on the batched
+# entry, an [n_grid x n_batch] matrix whose shape is kept) and the per-species
+# batch matrix (`phi_batch`, [n_arms x n_batch]) all convert against the same
+# family here rather than at each of the joint entries.
+#' @keywords internal
+.joint_phi_args_to_kernel <- function(args) {
+    arms <- args$arms_list
+    if (is.null(arms)) return(args)
+    fams <- vapply(arms, function(a) as.character(a$family %||% ""), character(1))
+    for (k in seq_along(arms)) {
+        arms[[k]]$phi <- .phi_to_kernel(fams[k], as.numeric(arms[[k]]$phi %||% 1.0))
+    }
+    args$arms_list <- arms
+    g <- args$phi_grid_per_arm
+    if (!is.null(g)) {
+        for (k in seq_along(g)) {
+            if (!is.null(g[[k]])) {
+                g[[k]][] <- .phi_to_kernel(fams[k], as.numeric(g[[k]]))
+            }
+        }
+        args$phi_grid_per_arm <- g
+    }
+    pb <- args$phi_batch
+    if (!is.null(pb)) {
+        pb <- as.matrix(pb)
+        for (k in seq_len(nrow(pb))) {
+            pb[k, ] <- .phi_to_kernel(fams[k], as.numeric(pb[k, ]))
+        }
+        args$phi_batch <- pb
+    }
+    args
 }

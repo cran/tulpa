@@ -7,16 +7,25 @@
 # another. Checking each derivative against a numerical derivative of the value
 # it differentiates catches exactly this class of drift.
 
-COV <- c(exponential = 0L, matern32 = 1L, gaussian = 2L, spherical = 3L)
+COV <- c(exponential = 0L, matern32 = 1L, gaussian = 2L, spherical = 3L,
+         matern52 = 4L)
 
 test_that("dcov_dphi matches a numerical derivative of compute_cov", {
   h <- 1e-6
+  s2_grid <- c(0.5, 1.0, 3.0); phi_grid <- c(0.3, 1.0, 2.5)
+  d_grid <- c(0.05, 0.25, 0.7, 1.3, 3.0)
+  # CRAN reads every kernel with sigma2 and phi at their two ends and distances
+  # short, middle and long; the dev loop reads the whole grid.
+  if (cran_fixture()) {
+    s2_grid <- range(s2_grid); phi_grid <- range(phi_grid)
+    d_grid <- c(0.05, 0.7, 3.0)
+  }
   for (nm in names(COV)) {
     ct <- COV[[nm]]
-    for (sigma2 in c(0.5, 1.0, 3.0)) {
-      for (phi in c(0.3, 1.0, 2.5)) {
+    for (sigma2 in s2_grid) {
+      for (phi in phi_grid) {
         # stay off the spherical kink at d == phi
-        for (d in c(0.05, 0.25, 0.7, 1.3, 3.0)) {
+        for (d in d_grid) {
           if (identical(nm, "spherical") && abs(d - phi) < 1e-2) next
           num <- (cpp_test_compute_cov(d, sigma2, phi + h, ct) -
                   cpp_test_compute_cov(d, sigma2, phi - h, ct)) / (2 * h)
@@ -39,6 +48,9 @@ test_that("each covariance kernel matches its closed form", {
                  sigma2 * (1 + u) * exp(-u), tolerance = 1e-8)
     expect_equal(cpp_test_compute_cov(d, sigma2, phi, COV[["gaussian"]]),
                  sigma2 * exp(-(d / phi)^2), tolerance = 1e-12)
+    v <- sqrt(5) * d / phi
+    expect_equal(cpp_test_compute_cov(d, sigma2, phi, COV[["matern52"]]),
+                 sigma2 * (1 + v + v^2 / 3) * exp(-v), tolerance = 1e-8)
     r <- d / phi
     sph <- if (d >= phi) 0 else sigma2 * (1 - 1.5 * r + 0.5 * r^3)
     expect_equal(cpp_test_compute_cov(d, sigma2, phi, COV[["spherical"]]),

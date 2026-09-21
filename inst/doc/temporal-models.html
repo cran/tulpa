@@ -749,30 +749,20 @@ rather than a time-specific one.</p>
 <h2>Comparing against no temporal field</h2>
 <p>Does the trend earn its place? Fit the same model without a time term
 and compare evidence. On a Laplace-tier fit <code>logLik()</code>
-returns the approximate log marginal likelihood, the quantity to compare
-across specifications.</p>
+returns the approximate log marginal likelihood, and with no
+hyperparameter left to integrate that is already the model evidence.</p>
 <div class="sourceCode" id="cb15"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb15-1"><a href="#cb15-1" tabindex="-1"></a>m_nt <span class="ot">&lt;-</span> <span class="fu">tulpa</span>(y <span class="sc">~</span> x, <span class="at">data =</span> df, <span class="at">family =</span> <span class="st">&quot;binomial&quot;</span>, <span class="at">mode =</span> <span class="st">&quot;laplace&quot;</span>)</span>
 <span id="cb15-2"><a href="#cb15-2" tabindex="-1"></a><span class="fu">as.numeric</span>(<span class="fu">logLik</span>(m_nt))</span></code></pre></div>
 <p>A nested fit integrates over a grid of <span class="math inline">\(\tau\)</span>, so its <code>$log_marginal</code>
-is a vector with one entry per grid point. The model evidence is the log
-of the grid-summed marginal likelihood, a log-sum-exp over that
-vector.</p>
-<div class="sourceCode" id="cb16"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb16-1"><a href="#cb16-1" tabindex="-1"></a>lse <span class="ot">&lt;-</span> <span class="cf">function</span>(v) { m <span class="ot">&lt;-</span> <span class="fu">max</span>(v); m <span class="sc">+</span> <span class="fu">log</span>(<span class="fu">sum</span>(<span class="fu">exp</span>(v <span class="sc">-</span> m))) }</span>
-<span id="cb16-2"><a href="#cb16-2" tabindex="-1"></a>evidence_temporal <span class="ot">&lt;-</span> <span class="fu">lse</span>(fit<span class="sc">$</span>log_marginal)</span>
-<span id="cb16-3"><a href="#cb16-3" tabindex="-1"></a><span class="fu">c</span>(<span class="at">no_temporal =</span> <span class="fu">as.numeric</span>(<span class="fu">logLik</span>(m_nt)), <span class="at">temporal =</span> evidence_temporal)</span></code></pre></div>
+is a vector with one entry per grid point. Each point also stands for a
+cell of the grid, and the cell’s prior mass (<code>$log_quad</code>) is
+part of the integral, so the evidence is the log of the mass-weighted
+sum over the cells rather than of the plain sum. <code>logLik()</code>
+returns it, and since both fits now report a log evidence,
+<code>compare_models()</code> ranks them on it directly.</p>
+<div class="sourceCode" id="cb16"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb16-1"><a href="#cb16-1" tabindex="-1"></a><span class="fu">compare_models</span>(<span class="at">no_temporal =</span> m_nt, <span class="at">temporal =</span> fit, <span class="at">criterion =</span> <span class="st">&quot;loglik&quot;</span>)</span></code></pre></div>
 <p>The temporal model carries substantially higher evidence, matching
-the fact that a trend really was in the data.
-<code>compare_models()</code> ranks fits by a shared criterion, reading
-each one’s <code>logLik()</code>.</p>
-<div class="sourceCode" id="cb17"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb17-1"><a href="#cb17-1" tabindex="-1"></a>cmp <span class="ot">&lt;-</span> <span class="fu">compare_models</span>(<span class="at">no_temporal =</span> m_nt,</span>
-<span id="cb17-2"><a href="#cb17-2" tabindex="-1"></a>                      <span class="at">temporal =</span> fit,</span>
-<span id="cb17-3"><a href="#cb17-3" tabindex="-1"></a>                      <span class="at">criterion =</span> <span class="st">&quot;loglik&quot;</span>)</span>
-<span id="cb17-4"><a href="#cb17-4" tabindex="-1"></a>cmp</span></code></pre></div>
-<p>On the nested temporal fit <code>logLik()</code> returns the
-integrated evidence, the log-sum-exp of <code>$log_marginal</code>
-computed above, so <code>compare_models()</code> carries one row per
-model and reproduces the manual comparison alongside the non-temporal
-<code>logLik()</code>.</p>
+the fact that a trend really was in the data.</p>
 <p>A word on what this comparison settles. The marginal likelihood
 already integrates over the walk and its smoothing precision, so it
 charges the temporal model for the extra flexibility it brought, and a
@@ -784,8 +774,10 @@ piece added. The raw maximised likelihood cannot do this job, since it
 always rises with more parameters and would crown the temporal model
 even when the curve was only chasing noise. Predictive scores such as
 WAIC and LOO answer a related but separate question about out-of-sample
-accuracy; they need a pointwise log-likelihood the base engine does not
-carry, so they live in the model packages built on it.</p>
+accuracy. The engine computes them from each fit’s pointwise
+log-likelihood, read off its linear predictor with the temporal field
+included:</p>
+<div class="sourceCode" id="cb17"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb17-1"><a href="#cb17-1" tabindex="-1"></a><span class="fu">compare_models</span>(<span class="at">no_temporal =</span> m_nt, <span class="at">temporal =</span> fit, <span class="at">criterion =</span> <span class="st">&quot;waic&quot;</span>)</span></code></pre></div>
 </div>
 <div id="a-second-family" class="section level2">
 <h2>A second family</h2>
@@ -883,13 +875,13 @@ later wiring.</p>
 <div id="see-also" class="section level2">
 <h2>See also</h2>
 <ul>
-<li><code>?temporal_rw1</code>: constructor reference.</li>
-<li>The spatial vignette: the same nested-Laplace path on an areal ICAR
-field.</li>
-<li>The <code>tgmrf()</code> vignette: building a custom GMRF latent
-block, including a periodic AR(1), end to end.</li>
-<li>The inference-modes vignette: what the Tier-2 nested-Laplace
-guarantee means.</li>
+<li><p><code>?temporal_rw1</code>: constructor reference.</p></li>
+<li><p>The spatial vignette: the same nested-Laplace path on an areal
+ICAR field.</p></li>
+<li><p>The <code>tgmrf()</code> vignette: building a custom GMRF latent
+block, including a periodic AR(1), end to end.</p></li>
+<li><p>The inference-modes vignette: what the Tier-2 nested-Laplace
+guarantee means.</p></li>
 </ul>
 </div>
 

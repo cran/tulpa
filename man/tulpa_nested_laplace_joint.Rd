@@ -12,6 +12,7 @@ tulpa_nested_laplace_joint(
   prior_sigma = NULL,
   prior_alpha = NULL,
   prior_phi = NULL,
+  hyperprior = c("proper", "flat"),
   cell_coupling = "separable",
   control = list()
 )
@@ -98,7 +99,17 @@ On the multi-block path \code{copy} is an unnamed list of specs --
 \code{list(list(arm, block, alpha_grid),...)} -- coupling N distinct shared
 latent fields, each onto its own arm with its own \eqn{\alpha} axis,
 integrated over the product outer grid. Each spec must name a distinct
-block. The copy block may be any of \code{icar} / \code{bym2} / \code{car_proper} / \code{rw1}
+block.
+
+The \eqn{\alpha} axis takes EITHER \code{alpha_grid}, which states its nodes, OR
+\code{alpha_n} (\code{field_coef$n} on the single-block path), which re-reads the
+engine's own axis at a higher RESOLUTION -- more nodes between the same
+bounds, keeping the atom at 0 that gives the "no copy" base model posterior
+mass. They are different requests and supplying both is an error. Use
+\code{alpha_n} to integrate the same axis more accurately: it is the only outer
+axis a copy fit could not otherwise raise, since stating nodes for it also
+restates the prior structure it carries (gcol33/tulpa#633).
+The copy block may be any of \code{icar} / \code{bym2} / \code{car_proper} / \code{rw1}
 / \code{rw2} / \code{ar1} / \code{iid}; blocks with their own per-arm scaling (\code{lf},
 \code{hsgp_mo}) or a precomputed precision (\code{tgmrf}) do not take a copy. A
 copy block's own \code{sigma_grid} (the donor field amplitude, same default
@@ -119,16 +130,25 @@ parse-time scalar \code{responses[[k]]$phi}.
 Family-specific interpretation of \code{arm$phi} (the parse-time scalar
 and the grid values):
 \itemize{
-\item \code{gaussian} -- residual SD (variance is \code{phi^2}). Use \code{phi_grid} to
-estimate the residual SD as a hyperparameter instead of pinning
-it pre-fit.
-\item \code{lognormal} -- residual SD on the log scale; identical kernel
+\item \code{gaussian} -- residual VARIANCE, the one engine convention (the SD is
+\code{sqrt(phi)}). Use \code{phi_grid} to estimate it as a hyperparameter
+instead of pinning it pre-fit.
+\item \code{lognormal} -- residual variance on the log scale; identical kernel
 parameterization as \code{gaussian} plus the \code{-log(y)} Jacobian.
 \item \code{neg_binomial_2} -- dispersion (variance is \code{mu + mu^2/phi}).
 \item \code{beta} -- precision (variance is \code{mu(1-mu)/(1+phi)}).
 \item \code{gamma}, \code{inverse_gaussian} -- shape / dispersion.
 \item \code{binomial}, \code{poisson} -- ignored.
 }
+
+A dispersion axis is PLACED like a prior block's scale axis when the caller
+declares it a default with \code{\link[=auto_grid]{auto_grid()}} -- \code{phi_grid = list(pos = auto_grid(nodes))}. The engine has no default dispersion axis of its own,
+so an unmarked vector is read as a pin and integrated exactly as written;
+the fit records that per axis in \code{outer_grid_axis_declined}. Marked, the
+axis is re-laid on \verb{mode +/- span * sd} from the same mode/Hessian stencil
+the field-SD axes are placed from, which on a span wide enough to hold no
+node near the posterior is the difference between an estimate and an
+endpoint.
 
 Each \verb{phi_<arm>} axis is appended to the Cartesian product and
 varies slowest (within-spatial warm starts hold). The axis appears
@@ -137,8 +157,8 @@ as a regular hyperparameter in \code{theta_grid}, \code{theta_mean}, and
 
 \item{prior_sigma, prior_alpha}{Optional regularizing hyperpriors on the
 donor field amplitude \eqn{\sigma} and on the copy coefficient
-\eqn{\alpha}. Each is \code{NULL} (flat, default) or a list of the form
-\code{list(family, params)}:
+\eqn{\alpha}. Each is \code{NULL} (default: the axis carries what \code{hyperprior}
+gives it) or a list of the form \code{list(family, params)}:
 \itemize{
 \item \code{list("pc.prec", c(U, alpha))} -- Penalized Complexity prior,
 calibrated by \code{P(theta > U) = alpha}. Closed-form density
@@ -149,11 +169,20 @@ so the prior shrinks the tail without biasing the modal cell when
 the data identifies it: default-friendly choice on \eqn{\sigma} is
 \code{c(U = 1.0, alpha = 0.01)} (donor amplitude); on the dimensionless
 copy coefficient \eqn{\alpha} the recommended choice is
-\code{c(U = 8.0, alpha = 0.01)}. Too small a \code{U} over-shrinks the copy
-coefficient past the modal cell and, through the \code{alpha * sigma} copy
-axis, inflates the coupled donor amplitude \code{sigma} -- e.g. on a fixture
-with truth \eqn{\alpha = 1}, \code{c(U = 2.0, alpha = 0.01)} pulls the
-\eqn{\alpha} posterior below 1 and lifts \code{sigma} above its truth.
+\code{c(U = 4.0, alpha = 0.01)}. What counts as strong is set by the
+measure the axis already carries, and on the copy scale that is not
+flat: with no \code{prior_alpha} it takes the engine's own exponential
+slab, whose rate puts 5 \% of the prior above the largest declared
+node (\code{control$copy_slab}). A \code{prior_alpha} REPLACES that slab, so it
+shrinks harder than the default only once its own
+\code{lambda = -log(alpha)/U} beats the slab's -- on a copy grid reaching
+\code{alpha = 2}, \code{lambda = 1.50}, the strength of \code{U = 3.07}. Too small a
+\code{U} over-shrinks the copy coefficient past the modal cell and, through
+the \code{alpha * sigma} copy axis, inflates the coupled donor amplitude
+\code{sigma}: on a fixture with truth \eqn{\alpha = 1} and \code{sigma = 0.6},
+\code{c(U = 2.0, alpha = 0.01)} pulls the \eqn{\alpha} geometric mean to
+0.93 and lifts \code{sigma} to 0.68, and \code{c(U = 0.25, alpha = 0.01)} to
+0.51 and 0.94.
 \item \code{list("half_normal", scale)} -- half-normal with scale \code{scale > 0}.
 Sharper tail decay than PC; use when stronger regularization is
 desired and the truth is well inside the prior.
@@ -165,6 +194,29 @@ essentially harmless -- the lever is tail-shrinkage at small
 \code{n_pos}. \code{prior_alpha} only applies when \code{copy} is active;
 \code{prior_sigma} applies on any \code{sigma}-named axis.
 }
+
+WHICH AXES ONE SPEC REACHES. A list-of-blocks \code{prior} can carry the same
+axis on several blocks at once -- two copied fields carry \code{b1.alpha} and
+\code{b2.alpha}, and each copy block carries its own donor \verb{b<k>.sigma}. One
+spec applies to EVERY block carrying the axis it names, each block taking
+its own independent copy of the density (its atom / continuum split is
+normalised against its own axis, so nothing is shared between blocks).
+To regularize the blocks differently, or only some of them, key the prior
+by block the way a multi-block \code{copy} spec does:
+
+\if{html}{\out{<div class="sourceCode">}}\preformatted{prior_alpha = list(
+  list(block = 1, prior = list("pc.prec", c(4.0, 0.01))),
+  list(block = 2, prior = list("half_normal", 2.0))
+)
+}\if{html}{\out{</div>}}
+
+A block the list does not name carries no prior on that axis. An entry
+naming a block that carries no such axis is an error, and the message
+names the blocks that do. The per-block shape is a multi-block one: on a
+single-block \code{prior}, where the axis is unique, pass the spec itself.
+A fit reports what it applied in \code{hyperprior_axes}: one record per role
+with the scope the caller stated it at (\code{"every_block"} / \code{"per_block"}),
+the block indices reached, and the grid columns those are.
 
 \code{prior_sigma} also interacts with the auto-recenter above: its second
 attempt engages the engine's own weakly-informative PC(U = 3,
@@ -180,14 +232,31 @@ full escalation.}
 \item{prior_phi}{Optional regularizing hyperprior on the per-arm
 dispersion axes declared through \code{phi_grid} (e.g. a Beta precision on a
 cover arm, a negbin dispersion, a Gaussian residual SD). Same families
-as \code{prior_sigma} -- \code{NULL} (flat over the phi grid, default),
-\code{list("pc.prec", c(U, alpha))}, or \code{list("half_normal", scale)}. A
-single spec re-weights every \verb{phi_<arm>} axis on the grid, the way
+as \code{prior_sigma} -- \code{NULL} (default: the axis carries what \code{hyperprior}
+gives it), \code{list("pc.prec", c(U, alpha))}, or \code{list("half_normal", scale)}.
+A single spec re-weights every \verb{phi_<arm>} axis on the grid, the way
 \code{prior_sigma} re-weights any sigma-named axis; with no \code{phi_grid} it is
-a no-op. Without it the phi grid carries an implicit flat prior over its
-bounds. The PC scale is the dispersion's own units (a precision for
+a no-op. The PC scale is the dispersion's own units (a precision for
 \code{beta}, a size for \code{neg_binomial_2}), so pick \code{U} at the upper end of
 plausible values.}
+
+\item{hyperprior}{The prior an outer hyperparameter axis carries when the
+call states no density for it, \code{"proper"} (default) or \code{"flat"}.
+\code{"proper"} folds a normalised density on the axis's integration coordinate
+into \code{log_marginal}: the PC prior \code{P(sigma > 3) = 0.01} on a standard
+deviation, variance or precision axis, the PC range prior at 0.2 times the
+coordinates' bounding-box diagonal on a range or lengthscale axis, a uniform
+on a bounded axis, and the PC + LKJ prior over a free-covariance block. An
+axis with no sourced density is named in \code{log_hyperprior_declined}.
+\code{"flat"} folds no density of the engine's own, so such an axis is
+integrated under its cell measure alone, is named in
+\code{log_hyperprior_declined} as \code{"flat_hyperprior"}, and the fit's
+\code{log_evidence} declines with \code{"improper_hyperprior"}. A density the call
+states -- a \verb{prior_*} argument, a block's \code{rho_prior}, \code{prior_range} or
+\code{prior_sigma}, the copy coefficient's slab, a \code{\link[=tgmrf]{tgmrf()}} block's own prior --
+applies under either choice. The same two choices, under the same names,
+are offered by \code{\link[=tulpa]{tulpa()}}, \code{\link[=tulpa_eb]{tulpa_eb()}}, \code{\link[=tulpa_re_cov_nested]{tulpa_re_cov_nested()}} and
+\code{\link[=fit_spde]{fit_spde()}}.}
 
 \item{cell_coupling}{Character scalar naming a per-cell coupled likelihood
 registered against tulpa's process-global registry (see
@@ -231,6 +300,13 @@ dispatched across \code{n_threads_outer} threads with its own CHOLMOD solver
 and NewtonScratch (inner OpenMP auto-disabled). \code{1L} is serial, chained
 warm-starts -- bitwise identical to the pre-speedup driver. Recommended
 on multi-core workstations: \code{parallel::detectCores() - 1L}.
+It is a REQUEST: the driver clamps it to the team the OpenMP environment
+hands out (\code{omp_get_max_threads()}, \code{OMP_THREAD_LIMIT}, and the check
+farm's core cap), because the per-cell block cache sizes its slot array
+from that same number. A job script exporting \code{OMP_NUM_THREADS=1} to pin
+the INNER threads therefore runs the outer grid serially whatever is
+asked for here; the fit says so once, in a message, and records the pair
+in \code{n_threads_outer_requested} / \code{n_threads_outer_realised}.
 \item \code{tile_warm} (\code{TRUE}) -- when \code{n_threads_outer > 1} and a copy block is
 present, group outer cells into tiles sharing every axis except the copy
 coefficient \code{alpha}, solve one warm Tier-2 per tile from the centre
@@ -247,13 +323,45 @@ sweep keeps every cheap mode near its cell's true mode, so the cheap
 ranking is faithful to the full-solve ranking even when the inner latent
 mode moves substantially across the grid. Pruned cells get
 \code{log_marginal = -Inf}, \code{n_iter = 0}, and inherit the pilot mode; the
-pilot cell is never pruned. A safety gate falls back to the full grid
-(with a warning) if the cheap-screen argmax disagrees with the
-full-solve argmax or the kept posterior collapses onto a cell the screen
-badly mis-estimated, so a silently-wrong pruned posterior is impossible.
-Stacks with \code{n_threads_outer}. \code{prune_tol} must be in \verb{[0, 1)}. Keep it
-conservative (\verb{<= 1e-3}); pruning helps most when the grid has many
-low-mass tail cells. Default \code{FALSE} (the full grid is correct).
+pilot cell is never pruned, and at least \code{prune_min_keep} cells (5) are
+solved in full whatever the tolerance says -- the highest-ranked dropped
+cells are restored up to that floor, because the outer grid placement
+pass reads a finite-difference curvature off the cells that were SOLVED
+and a kept set of one carries none. Two fallbacks to the full grid, each
+with a warning: the cheap-pass safety gate (the cheap-screen argmax
+disagrees with the full-solve argmax, or the kept posterior collapses
+onto a cell the screen mis-estimated by more than the margin it discarded
+cells by), and a screened fit whose grid placement declined for want of
+curvature. Neither bounds the error from a cell that was discarded and
+never solved: the gate compares the screen against the cells it kept.
+Stacks with \code{n_threads_outer}. \code{prune_tol} must be in \verb{[0, 1)}. Default
+\code{FALSE} (the full grid is correct).
+\item \code{prune_log_gap} (unset) -- the screening cut in nats: keep every cell
+within this many nats of the best screened cell. \code{prune_tol} is a
+normalised weight, so what it cuts at is the gap
+\code{-(log(prune_tol) + log(Z))}, and the whole range a caller would type is
+a few tens of nats -- on an outer surface spanning thousands every
+setting returns the same kept set. It reaches the kernel as
+\code{prune_tol = exp(-gap)}, so the realised cut is the requested gap less
+\code{log(Z)}; the fit reports the realised value in \code{prune_log_gap_cut}.
+Setting both this and \code{prune_tol} is an error.
+\item \code{screen_iters} (\code{5L}) -- inner Newton steps the cheap screen takes per
+cell, read only when \code{prune = TRUE}. The screen only has to RANK the
+cells, and each one is warm-started from its already-screened lattice
+neighbour, so its quasi-mode is near the cell's own mode after very few
+steps. Every step is paid on every cell of the grid, including the cells
+the screen keeps and then solves in full, so a depth above what the
+ranking needs makes screening cost more than the solves it avoids. Must
+be a single integer \verb{>= 1}.
+\item \code{fitted_var} (\code{TRUE}) -- also fill \code{fitted_eta_var}, the per-cell,
+per-observation predictive variance of the linear predictor. It is the
+WITHIN-cell spread a grid-mixture replicate is drawn with
+(\code{\link[=posterior_predict]{posterior_predict()}}); the per-cell predictor \code{fitted_eta} itself is
+stored either way. Computed by a per-cell solve sweep on top of the inner
+Newton, so a fit that will not be predicted from can decline it; the
+replicates of a fit run without it then carry the across-cell spread
+only. Read on a single-arm fit, which is the one that carries a single
+linear predictor to report.
 \item \code{x_init} (\code{NULL}) -- warm-start for the first grid point's inner solve.
 \item \code{verbose} (\code{FALSE}) -- when \code{TRUE}, announce the engaged outer integrator
 for a multi-block prior in one line at selection time (see \code{integration}),
@@ -275,12 +383,31 @@ mode-tracked 1D refinement pass triggers on any axis whose marginal
 boundary weight exceeds \code{adaptive_grid_edge_thresh}. New points are
 appended on that axis (interior densification + outward log-spaced
 extension) paired with the boundary cell's modal other-axis values, each
-carrying a calibration term so it contributes on the marginal scale --
+measured by the part of its row's base cells it takes over (a slice past
+the outermost node adds that row's extension region) --
 \code{O(n_new_points)} kernel solves, not the full cartesian product. The
 edge score is \verb{max(marginal_weight_at_boundary, exp(max_log_marginal_at _boundary - max_log_marginal_overall))}, catching both boundary pile-up
 and integrand truncation; \code{0.02} is ~4 log units of decay.
 \code{adaptive_grid_max_passes} caps the passes (one usually suffices). Fixes
 posterior CI under-coverage when truth sits near a grid edge.
+
+How far a given axis may be moved depends on where its nodes came from.
+An axis whose nodes the CALLER wrote down -- \code{copy$alpha_grid} /
+\code{field_coef$grid}, an entry of \code{phi_grid} -- states where the fit
+integrates, so refinement densifies it and never places a node past
+either end node; a mode outside that range shows up as mass at the edge.
+An axis the ENGINE placed (\code{alpha_n} / \code{field_coef$n}, or no nodes given)
+carries no such statement, so refinement may follow the posterior out
+past its ends. Nodes a wrapper package computed as a default of its own
+are declared with \code{\link[=auto_grid]{auto_grid()}} and count as engine-placed.
+\item \code{axis_refine} (\code{NULL}) -- per-axis override of the rule above, named by
+outer-grid axis (\code{"alpha"}, \code{"phi_<arm>"}): \code{"none"} (the axis takes no
+refinement nodes), \code{"densify"} (nodes inside the declared span only) or
+\code{"extend"} (nodes past the end nodes too). A single unnamed value applies
+to every refinable axis. An unknown axis name, or a request for nodes on
+an axis this driver does not refine, is an error rather than a silent
+no-op. Read only when \code{adaptive_grid = TRUE} or
+\code{var_of_means_consistency = TRUE}.
 \item \code{var_of_means_consistency} (\code{TRUE}) -- run a post-integration
 consistency pass on the variance of the per-arm posterior means and
 attach \code{var_of_means_consistency_info}.
@@ -328,8 +455,23 @@ resolved integrator is also returned on the joint result as
 \verb{$integration}, alongside \verb{$integration_requested} and
 \verb{$integration_declined} (see Value), so a fallback is on the fit itself
 and not only in a verbose message.
+\item \code{ccd_budget} (\code{1}) -- ceiling on what PLACING a CCD may spend, as a
+multiple of the tensor grid the design replaces. Every mode-find probe is
+one full inner Newton solve, the same solve an outer grid cell costs, and
+a placement round is \verb{1 + 2d + 4 C(d, 2)} of them (33 at \code{d = 4}), so at
+the round caps alone a placement can spend far more than the integration
+it avoids. At \code{1} a placement plus its design costs no more than that
+tensor grid; the fit declines to the tensor grid with
+\code{integration_declined = "placement_budget"} when the ceiling is reached,
+and reports what it spent as \code{ccd_modefind_evals} (see Value). \code{Inf}
+places without a ceiling. \code{ccd_budget_floor} (\code{TRUE}) exempts the
+designed first attempt -- the eight rounds from the grid-median seed,
+whose cost is set by the axis count and not by the grid -- so the ceiling
+bounds the escalation (grid seed, step calibration, the 30-round rescue
+mode-find) rather than the path the CCD was built for; \code{FALSE} makes
+\code{ccd_budget} a hard cap on the whole placement.
 \item \code{local_ccd} (\code{NULL}) -- local CCD refinement of a multi-block tensor grid.
-\code{TRUE} (defaults) or a \code{list(max_cells =, f0 =, skew_max =)} refines a few high-weight,
+\code{TRUE} (defaults) or a \code{list(max_cells =, f0 =, skew_max =, rank =)} refines a few high-weight,
 mutually non-adjacent interior cells, replacing each with a small
 curvature-aware CCD node cloud so a coarse base grid resolves the
 sharply-peaked directions without the \code{k^d} tensor blow-up. The local
@@ -338,7 +480,10 @@ the cell's own grid neighbours (no mode-find; only the off-centre nodes are
 new solves), warm-started from the cell's inner mode; each refined cell's
 sub-nodes carry partition-of-unity design weights so the total integration
 weight is conserved (no double-count). \code{max_cells} (\code{8L}) caps the refined
-cells; \code{f0} (\code{1.1}) is the CCD radius. The design scale is shrunk per cell
+cells, chosen in order of \code{rank}: \code{"weight"} (default), the cell's
+integration weight, or \code{"mass_moved"}, the weight times
+\verb{|exp(log_box_ratio) - 1|} the box-mass rule predicts the cell's midpoint
+atom misplaces; \code{f0} (\code{1.1}) is the CCD radius. The design scale is shrunk per cell
 so the cloud fits the cell's Voronoi box (the local-Gaussian mass beyond it
 belongs to the neighbouring cells). A cell keeps its cloud only while the
 nodes' own log-marginals stay within \code{skew_max} (the \code{gamma3_ok} band,
@@ -384,15 +529,21 @@ confidently usable, resp. good) and raise the default \code{k_samples}
 (to \code{800L} / \code{2000L}, unless you set it) so the bootstrap CI can resolve it.
 \code{"none"} disables the diagnostic. The fit carries an honest verdict --
 \code{k_quality_requested}, \code{k_quality_reached}, \code{k_quality_best},
-\code{k_quality_reason}, \code{k_quality_rounds} -- and never silently downgrades: if
-the requested band is not confidently met it reports the band actually
-reached and why. For \code{"ok"} / \code{"good"}, when the first fit does not reach
-the band the engine escalates by REFINING THE INTEGRATION GRID, driven by
-the bad \eqn{\hat{k}} (see \code{k_refine}): each round widens / densifies the
-grid where the posterior mass escapes its current bounds and re-diagnoses,
-up to \code{k_max_rounds} times. This is the actual fix for a grid-width
-deficiency; \code{k_samples} is the separate knob that sharpens the
-\eqn{\hat{k}} ESTIMATE and is not escalated here.
+\code{k_quality_miss}, \code{k_quality_reason}, \code{k_quality_rounds},
+\code{k_quality_k_trace} -- and never silently downgrades: if the requested band
+is not confidently met it reports the band actually reached and why.
+For \code{"ok"} / \code{"good"}, when the first fit does not reach the band the
+engine escalates by REFINING THE INTEGRATION GRID (see \code{k_refine}),
+widening / densifying it where the posterior mass escapes its current
+bounds and re-diagnosing, up to \code{k_max_rounds} rounds. Refinement is the
+first lever on either kind of miss because it lowers \eqn{\hat{k}}
+itself rather than the uncertainty around it. Once refinement is
+exhausted -- no boundary mass left to chase -- what remains depends on
+the miss (\code{k_quality_miss}): a \code{"resolution"} miss (\eqn{\hat{k}}
+confidently outside the band) ends the chase, while a \code{"precision"} miss
+(the bootstrap CI straddling a boundary, so \eqn{\hat{k}} may already be
+inside the band) spends its remaining rounds doubling the
+importance-draw budget, the one lever refinement does not touch.
 \item \code{k_refine} (\code{"grid"}) -- the integration-refinement rung for \code{k_quality}
 \code{"ok"} / \code{"good"}. \code{"grid"} (default) re-fits with adaptive grid refinement
 (\code{adaptive_grid}) each escalation round, driven by the bad \eqn{\hat{k}}, so
@@ -405,18 +556,28 @@ direction rather than too narrow; it forces a tensor base grid (the
 curvature stencil needs axis neighbours) and engages only on the
 multi-block path at >= 4 transformable latent axes. \code{"none"} disables
 refinement: the band is reported but not chased.
-\item \code{k_max_rounds} (\code{2L}) -- the grid-refinement round budget for \code{k_quality}
-\code{"ok"} / \code{"good"}: the maximum number of refine-and-re-fit rounds after the
-first fit. Each round allows one more refinement pass than the last. \code{0L}
-disables escalation (single-shot, the band is reported but not chased).
+\item \code{k_max_rounds} (\code{2L}) -- the escalation round budget for \code{k_quality}
+\code{"ok"} / \code{"good"}: the maximum number of re-fit rounds after the first fit.
+A refinement round allows one more pass than the last refinement round
+did; a round taken after refinement is exhausted leaves the grid where it
+stands and doubles the importance-draw budget instead. \code{0L} disables
+escalation (single-shot, the band is reported but not chased).
 \item \code{diagnose_k} (\code{TRUE}), \code{k_samples} (\code{500L}) -- compute the outer
 Pareto-\eqn{\hat{k}} accuracy diagnostic by importance-sampling the joint
 hyperparameter posterior against the proposal the integrator fits (mixed
 per-axis transforms: \code{log} for positive scales, logit for the BYM2 mixing
 weight, identity for the copy coefficient \eqn{\alpha}). \code{k_samples}
 is the number of importance draws, each one an extra inner joint solve, and
-is the diagnostic's precision knob: a tighter k-hat needs MORE actual tail
-ratios, so increase \code{k_samples} (not \code{k_bootstrap}). The draws are
+is where more tail information comes from: a tighter k-hat needs MORE
+actual tail ratios, so increase \code{k_samples} (not \code{k_bootstrap}). It is not
+a pure precision knob, though. Under the automatic PSIS tail rule
+(\verb{min(S/5, 3 sqrt(S))}) the fitted tail FRACTION shrinks as \code{3 / sqrt(S)},
+so a larger budget describes a DEEPER quantile of the weight distribution
+and the reported k-hat can move materially -- measured on a synthetic
+heavy-tailed outer target, 0.57 at 500 draws and 7.94 at 50000
+(gcol33/tulpa#631). Set \code{k_tail_points} in proportion to \code{k_samples} to
+hold the fraction and get a strictly sharper estimate of the same number;
+the \code{k_quality} escalation's draw rung does exactly that. The draws are
 RNG-restored so the fit's modes / draws are unchanged. A fit carrying an
 axis whose support is not safely known (CAR_proper's \code{rho_car}) declines to
 the quadrature-ESS fallback (\code{pareto_k = NA}). \code{FALSE} skips the diagnostic.
@@ -425,7 +586,6 @@ hyperparameter axes (the other arms held at their posterior mean), reported
 in \code{pareto_k_by_arm}, to localise which arm drives a tail-heavy joint k; the
 joint k itself is unchanged. Per-arm k is defined for the multi-block layout
 with two or more arms and declines for the single-block shared-field layout.
-The legacy \code{k_samples} name is accepted as an alias for \code{k_samples}.
 \item \code{k_threads} (\code{NULL}) -- outer-thread width for the diagnostic's importance
 batch. The \code{k_samples} re-solves are independent and run after the grid
 (every core free), each solved single-threaded once the batch saturates the
@@ -576,10 +736,44 @@ to draw with and is declined with \code{"sparse_factor_not_ll"}.
 posterior mode and refit when the fit rails against a boundary node.
 \code{FALSE} integrates over the grid exactly as given, whatever it is, and
 records \code{outer_grid_recenter_declined = "auto_recenter_disabled"}. The
-joint rescues trigger on the whole grid's collapsed-edge regime rather
-than on a per-axis rail, so the per-axis policy names
+joint FIELD rescues trigger on the whole grid's collapsed-edge regime
+rather than on a per-axis rail, so the per-axis policy names
 \code{\link[=tulpa_nested_laplace]{tulpa_nested_laplace()}} takes (\code{"rail"}, \code{"resolve"}, \code{"always"}) are
-refused here with an error rather than accepted and ignored.
+refused here with an error rather than accepted and ignored. A per-arm
+dispersion axis (\code{phi_grid}) is the exception and fires on its own
+sizing: it is crossed onto the tensor independently of the field's
+geometry, so whether the field's grid collapsed says nothing about
+whether the dispersion axis brackets its own posterior. \code{FALSE} holds
+that axis too.
+\item \code{recenter_pilot} (\code{FALSE}) -- detect the placement above on a THINNED
+grid rather than on the full one. Placement reads two things, the argmax
+cell and an FD curvature stencil at it, and reads both off
+\code{log_marginal}; neither is read off the integration the detecting pass
+paid for, so every inner Newton solve of that pass is discarded the
+moment a placement fires. With the pilot on, the detecting grid keeps
+each axis's endpoints and at most \code{TRUE}'s three nodes between them (an
+integer names its own resolution), and the full grid is solved once, at
+the placed axes.
+
+Off by default because the trade is a property of the WORKLOAD. With \code{F}
+full cells, \code{P} pilot cells and a firing rate \code{p}, the un-piloted cost is
+\code{F + p (S + F)} against the pilot's \verb{P + p S + F}, so the pilot pays
+exactly when \verb{P < p F}. Measured on a 3-axis (sigma, alpha, phi) donor +
+copy fixture over 48 paired seeds: 0.78x the cells solved on the
+configuration that places on 10 of 12 seeds, and 1.29x on the one that
+never places.
+
+A coarse detector is not the same detector. The collapse trigger is
+\code{ess_grid < 2}, which falls with the cell count, so a pilot fires
+somewhat more readily than the full grid: on that same sweep the two
+disagreed on 9 of 48 pairs, every one of them the pilot placing where the
+full grid did not, and 7 of the 9 reached a HIGHER maximum inner
+log-marginal after placing (+0.35 to +2.14 nats) while 2 lost 0.46 and
+0.72. It cannot go the other way: a declined pilot is followed by the
+full fit, which then gets its own detection, so the pilot only ever adds
+a placement. A fit that declines both is bit-identical to the same fit
+with the knob off. What the pilot detected on is recorded in
+\code{outer_grid_pilot}.
 \item \code{max_grid_cells} (\code{2048L}) -- cell-count ceiling on a multi-block tensor
 outer grid, refused with an error above it. Each cell is one inner
 Newton solve, so the default catches per-block grids that multiplied out
@@ -616,6 +810,13 @@ a boundary), where the posterior mean is pulled by the right
 tail away from the bulk and \verb{mean +/- 1.96 sd} mis-states the
 uncertainty.
 \item \code{modes} -- \verb{[n_grid x n_x]} matrix of inner modes.
+\item \code{fitted_eta} -- \verb{[n_grid x N]} matrix of the linear predictor at each
+cell's own mode, offset and latent field included. Present on a
+single-arm fit, which is the one that has a single linear predictor to
+report; a cell that was pruned or whose block preparation failed reads
+\code{NA}. \code{fitted_eta_var} is its per-cell within-cell variance, present
+under \code{control$fitted_var} (the default). Together these are the
+per-cell Gaussian \code{\link[=posterior_predict]{posterior_predict()}} draws a replicate from.
 \item \code{n_iter} -- inner Newton iterations per grid point.
 \item \code{arm_layout} -- list with per-arm \code{beta_start}, \code{re_start},
 spatial offset(s) and \code{n_x} for decoding modes.
@@ -667,6 +868,16 @@ collapse, which axes the dominant cell sits against and on which side
 (\code{"lower"} / \code{"upper"}); widen those axes and refit to confirm the mode
 is bracketed. Axes the grid pins to one value are excluded (pinned, not
 at a boundary).
+\item \code{axis_span} -- per outer axis, the span the fit worked over and the two
+terms that separate it from the nodes it was given: \code{nodes} (the range
+of the axis's initial continuum nodes), \code{declared} (their support, i.e.
+those nodes plus the half node step the outermost cells own -- for \code{k}
+equally spaced nodes that is \code{k / (k - 1)} times the node range on the
+axis's integration coordinate, so 2x at two nodes and 1.125x at nine),
+\code{integrated} (the region the final grid's cell measure integrates, the
+same interval \code{axis_support} reports), \code{refine} (the mode refinement
+ran under: \code{"none"} / \code{"densify"} / \code{"extend"}) and \code{n_nodes} (initial
+and final continuum node counts).
 \item \code{outer_grid_placement} -- \code{"fixed"} (the default \code{sigma_grid} axis was
 used as-is) or \code{"auto_recentered"} when a \code{collapsed_edge} on \code{sigma}
 triggered the mode-Hessian recenter-and-refit (see the \code{prior}
@@ -679,10 +890,34 @@ but the caller's pinned \code{prior_sigma} held that prior back.
 recenter did not run: \code{"grid_not_collapsed"} (the grid already brackets
 the mode -- the common case, no refit needed), \code{"axis_pinned"} (the
 caller pinned \code{sigma_grid}; mark it with \code{\link[=auto_grid]{auto_grid()}} if it is a
-default rather than a choice), or \code{"no_usable_curvature"} (the
-mode-Hessian the recenter needs was unavailable or degenerate, e.g. a
-car_proper grid whose \code{rho_car} axis has unguessable support). Absent
-when the fit WAS recentred.
+default rather than a choice), \code{"default_axis_pinned"} (a wrapper
+package declared the nodes with \code{auto_grid(place = FALSE)} and asked
+for them as written -- nothing you pinned), or \code{"no_usable_curvature"}
+(the mode-Hessian the recenter needs was unavailable or degenerate,
+e.g. a car_proper grid whose \code{rho_car} axis has unguessable support).
+Absent when the fit WAS recentred. A joint fit's field SD and its
+per-arm dispersion are placed by different passes over the same grid,
+and this slot reduces over them rather than holding the last to speak:
+an axis held because it was declared does not stand as the fit's answer
+while a pass with a movable axis has one.
+\item \code{outer_grid_axis_declined} -- the same question PER AXIS, as a named
+character vector. The slot above holds one reason for the whole fit and
+is written only while the fit is unplaced, so on a fit where one axis
+moved and another did not it says \code{auto_recentered} and nothing about
+the axis that stayed -- which is the axis \code{grid_coarsest_axis} then
+names. Written by the field-SD passes for \code{sigma} (\verb{b<k>.sigma} on a
+copy block) and by the per-arm dispersion pass for \verb{phi_<arm>}, and
+carried across a later pass placing a different axis; absent on a fit
+no pass declined an axis of.
+\item \code{outer_grid_pilot} -- present only when \code{control$recenter_pilot} ran: the
+pilot's resolution (\code{n_pilot}), its cell count (\code{cells}), the axes it
+thinned (\code{axes}) and those it could not (\code{axes_kept}), and what the
+placement was DECIDED from -- the pilot's own \code{regime}, \code{ess_grid} and
+\code{edge_axes}. The reported grid is never the grid the trigger was read
+on, so a two-pass fit is legible from the object rather than only from
+the progress log. \code{outer_grid_pilot_declined = "pilot_placement_declined"}
+records a pilot whose detection placed nothing and which was therefore
+followed by the full fit and the full fit's own detection.
 \item \code{outer_grid_recenter_sd_clamp}, \code{outer_grid_recenter_sd_raw},
 \code{outer_grid_recenter_sd_used} -- on a recentred fit, one entry per moved
 axis: which mode-SD bound the placement hit (\code{"none"} / \code{"floor"} /
@@ -723,15 +958,29 @@ uncertainty: \code{pareto_k_by_arm_se_boot}, \code{pareto_k_by_arm_ci_low} /
 \code{pareto_k_by_arm_ci_high}, \code{pareto_k_by_arm_se_formula},
 \code{pareto_k_by_arm_tail_points} and \code{pareto_k_by_arm_band_confident}.
 \item \code{k_quality_requested}, \code{k_quality_reached}, \code{k_quality_best},
-\code{k_quality_reason}, \code{k_quality_rounds} -- the reliability verdict for the
+\code{k_quality_miss}, \code{k_quality_reason}, \code{k_quality_rounds},
+\code{k_quality_k_trace} -- the reliability verdict for the
 \code{control$k_quality} intent. \code{k_quality_requested}
-echoes the intent; \code{k_quality_best} is the band actually achieved
+echoes the intent; \code{k_quality_best} is the band THIS fit reached
 (\code{"good"} / \code{"ok"} / \code{"unreliable"}, or \code{"uncertain"} when the bootstrap CI
-crosses a boundary); \code{k_quality_reached} is \code{TRUE}/\code{FALSE} for an \code{"ok"} /
+crosses a boundary) -- the band of the returned fit, not the best band
+seen while escalating, which \code{k_quality_k_trace} carries;
+\code{k_quality_reached} is \code{TRUE}/\code{FALSE} for an \code{"ok"} /
 \code{"good"} target (\code{NA} for \code{"report"} / \code{"none"}), never silently
-downgraded; \code{k_quality_reason} records why it stopped; and
+downgraded; \code{k_quality_miss} classifies a miss as \code{"resolution"} (the
+\eqn{\hat{k}} confidently outside the band -- a grid deficiency) or
+\code{"precision"} (the bootstrap CI straddling a boundary -- the estimator's
+variance), \code{NA} when there is no miss to classify, and is what the
+escalation reads once refinement is exhausted; \code{k_quality_reason}
+records why it stopped;
 \code{k_quality_rounds} is the number of escalation re-fits performed (\code{0} when
-the first fit sufficed or escalation was off).
+the first fit sufficed or escalation was off); and \code{k_quality_k_trace} is
+the outer \eqn{\hat{k}} round by round, starting at the first fit's, so a
+chase that did not descend monotonically is visible. The refinement rungs
+rebuild the proposal from the grid they just changed, so a rising trace is
+a re-founded proposal on a strictly larger grid rather than a worse fit,
+which is why the LAST round is returned rather than the lowest-\eqn{\hat{k}}
+one.
 \item \code{adaptive_grid_info} -- when \code{adaptive_grid = TRUE}, a list with
 \code{triggered_axes} (character) and \code{n_points_added} (integer)
 describing the refinement passes. NULL otherwise.
@@ -779,8 +1028,22 @@ otherwise one of \code{"axis_count"} (fewer transformable latent axes than the
 requested mode's threshold), \code{"unguessable_axis"} (a CAR_proper
 \code{rho_car} or a non-BYM2 \code{rho}), \code{"degenerate_axis"} (a single-valued
 axis), \code{"modefind_ridge"} / \code{"modefind_boundary"} /
-\code{"modefind_degenerate"} / \code{"modefind_failed"}, \code{"hessian_singular"} or
-\code{"hessian_not_pd"}. Multi-block fits only.
+\code{"modefind_degenerate"} / \code{"modefind_failed"}, \code{"hessian_singular"},
+\code{"hessian_not_pd"}, \code{"copy_atom_components"} (more copy atoms than the
+design splits into, see \code{copy_atom_mass}), \code{"copy_atom_mass"} (a
+declared atom mass outside \verb{[0, 1)}) or \code{"placement_budget"} (placing
+the design would cost more inner solves than integrating the tensor grid
+it replaces; see the \code{ccd_budget} control knob). Multi-block fits only.
+\item \code{ccd_modefind_evals}, \code{ccd_modefind_budget}, \code{ccd_modefind_rounds},
+\code{ccd_modefind_seconds} -- what PLACING the CCD cost: inner Newton solves
+spent by the mode-find (seed, step calibration and every round of every
+mixture component), the ceiling they were spent against, the rounds
+taken and the wall-clock seconds. Present on any multi-block fit that
+attempted a placement, including one that declined -- a decline reports
+what it had already paid -- and absent when no placement was attempted,
+which is not the same as a placement that cost nothing. Read alongside
+\verb{$integration} to judge whether the CCD earned its design on this model
+rather than arguing it from the round caps.
 \item \code{weight_kind} -- one entry per outer-grid cell, \code{"mass"} or \code{"design"}.
 A tensor cell holds the mass of its own cell and a CCD node holds a
 design weight, so a fit integrated by one rule reports one value
@@ -845,15 +1108,28 @@ axis's own posterior mode, which is a stronger statement about the fit
 than any ratio, and the whole-grid \code{resolved} verdict is withheld while
 one is present rather than being read off the axes that did score.
 \item \code{prune_cheap_log_marginal}, \code{prune_mask}, \code{prune_n_pruned},
-\code{prune_tol} -- present only when \code{prune = TRUE} and the safety gate did
-not fall back. Cheap-pass log-marginals at every cell, a logical mask
-of pruned cells, the pruned-cell count, and the threshold actually
-applied. Pruned cells have \code{log_marginal = -Inf} so they get zero
+\code{prune_tol}, \code{prune_screen_iters} -- present only when \code{prune = TRUE}
+and the safety gate did not fall back. Cheap-pass log-marginals at every
+cell, a logical mask of pruned cells, the pruned-cell count, the
+threshold actually applied, and the screening depth the driver actually
+ran at. Pruned cells have \code{log_marginal = -Inf} so they get zero
 weight under \code{.nl_normalise_weights_safe}.
+\item \code{prune_log_gap_cut}, \code{prune_cheap_lm_spread}, \code{prune_min_keep},
+\code{prune_n_floor_restored} -- the screen read on the scale it operates on:
+how many nats below the best screened cell the tolerance cut at, how
+many nats the screened surface spans, the kept-cell floor applied, and
+how many cells that floor put back. A cut that is a sliver of the spread
+is a tolerance with no resolution on this grid.
 \item \code{prune_fallback_triggered}, \code{prune_fallback_reason} -- present only when
-the safety gate fell back to the full grid. The returned fit is the
-full-grid (unpruned) result; the reason string records which gate
-condition tripped.
+a fallback to the full grid fired. The returned fit is the full-grid
+(unpruned) result; the reason string records whether the cheap-pass
+safety gate tripped or the screened grid left the placement pass no
+curvature.
+\item \code{n_threads_outer_requested}, \code{n_threads_outer_realised} -- the outer-grid
+width asked for and the width the grid ran at. The driver clamps the
+request to the team the OpenMP environment hands out, so a fit launched
+under \code{OMP_NUM_THREADS=1} with \code{n_threads_outer = 10} runs serial; the
+pair is what a timing has to be recorded against.
 }
 }
 \description{

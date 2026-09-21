@@ -23,11 +23,17 @@ namespace tulpa {
 // solver can populate it inside an OpenMP parallel region — Rf_allocVector
 // is not thread-safe (run_nested_laplace_grid relies on this).
 struct LaplaceResult {
-  std::vector<double> mode;     // Mode of latent field x*(theta)
-  double log_det_Q;             // Log determinant of posterior precision
-  double log_marginal;          // Log p(y | theta) approximation
-  int n_iter;                   // Newton iterations used
-  bool converged;               // Convergence flag
+  // Initialized in-class, not by each construction site: NoCheapEval
+  // (nested_laplace_grid.h) default-constructs one and sets log_marginal
+  // alone, leaving three fields read from indeterminate storage
+  // (gcol33/tulpa#705). Every other site sets all four, so the initializers
+  // change nothing there and remove the one case where a reader could not
+  // tell a written value from whatever the stack held.
+  std::vector<double> mode;         // Mode of latent field x*(theta)
+  double log_det_Q = 0.0;           // Log determinant of posterior precision
+  double log_marginal = -std::numeric_limits<double>::infinity();
+  int n_iter = 0;                   // Newton iterations used
+  bool converged = false;           // Convergence flag
 
   // Achieved residual: max_j |d(log p(y|x,theta) + log p(x|theta))/dx_j| at the
   // reported mode. The solve's convergence flag says the STOPPING RULE was met;
@@ -107,6 +113,13 @@ struct LaplaceResult {
   // Cov(u_g | y, Sigma) per group.
   std::vector<double> re_cov_flat;
   std::vector<int>    re_cov_block_sizes;
+
+  // Per-row predictive variance of the linear predictor at the mode,
+  // var(eta_r | theta, y), rows arm-major. Filled by the joint Newton loops when
+  // the driver asks for it (JointEtaVarRequest); empty means "not requested",
+  // NaN where the precision at the mode is not the covariance of anything (a
+  // non-PD Hessian) or a solve failed.
+  std::vector<double> eta_var;
 
   // Inner-Laplace skewness diagnostic (Rue, Martino & Chopin 2009, JRSSB
   // 71(2) Sec 3.2.3, eq. 21's cubic term, generalized to tulpa's eta =

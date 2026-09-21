@@ -37,11 +37,21 @@ struct HMCResultCpp {
   std::vector<int> n_leapfrog;
   std::vector<int> divergent;
   std::vector<int> treedepth;    // Actual tree depth per iteration (NUTS only)
+  // The Hamiltonian (-log_post + kinetic energy) at each iteration's sampled
+  // momentum, Stan's energy__ -- read by plot_energy() and the E-BFMI check
+  // (gcol33/tulpa#783). Row-aligned with log_prob/divergent/treedepth.
+  std::vector<double> energy;
   double epsilon;
   int n_warmup;
   int n_sample;
   int chain_id;
-  int n_max_treedepth = 0;       // Count of iterations hitting max treedepth
+  int n_max_treedepth = 0;       // Post-warmup iterations hitting max treedepth
+  // Post-warmup divergences the SoftAbs retry re-ran successfully. Those
+  // iterations are STILL counted as divergent -- the trajectory the chain was
+  // asked for did diverge -- so this says how many of them the rescue moved
+  // rather than replacing the count (gcol33/tulpa#695). Zero on every
+  // production entry, which passes riemannian = 0.
+  int n_softabs_rescued = 0;
   std::string sampler;           // Sampler name (e.g., "NUTS", "HMC", "NUTS->HMC(L=10)")
 
   // Warm-start / resume outputs. Both length n_params after

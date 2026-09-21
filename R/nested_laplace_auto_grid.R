@@ -56,9 +56,60 @@
 #   "always"        every movable default axis is recentred whatever the fit
 #                   did.
 #
-# A recentred axis is `mode +/- span * sd` over `n_pts` nodes, so it is
-# `h / sd = 1.25` BY CONSTRUCTION, against a census median of 3.9 on the fixed
+# A recentred axis is `mode +/- span * sd_used` over `n_pts` nodes, so its
+# spacing is `1.25` PLACEMENT SDs, against a census median of 3.9 on the fixed
 # spans.
+#
+# THAT IS NOT WHAT `.nl_axis_h_over_sd()` COMPUTES, and the two were read as one
+# number (gcol33/tulpa#636). The trigger's ratio divides the spacing by the
+# grid-WEIGHTED posterior SD the placed grid realizes, so on a recentred axis it
+# is
+#
+#   h / sd_realized = 1.25 * sd_used / sd_realized,
+#
+# which is 1.25 only where the placement SD is the one the weights then realize.
+# Wherever `.nl_recenter_sd_clamp()` SUBSTITUTED a bound it is not: the floor
+# `min_sd_u` exists precisely to widen an axis whose measured curvature is
+# sharper than it, so a floor-clamped placement reports
+# `1.25 * min_sd_u / sd_raw` and is LARGER than 1.25 by exactly the factor the
+# floor widened by. Measured on a (sigma, alpha, phi) donor + copy fixture, 18
+# placed fits, the floor binding on all 18: `sd_raw` median 0.0543 against the
+# substituted 0.15, realized weighted SD 0.0489, reported ratio 3.83 -- and
+# `1.25 * 0.15 / 0.0489 = 3.83`. A reported 6.03 is `sd_raw = 0.031`. The
+# placement is still doing its work there: the same axis un-recentred reads a
+# median 55.2 on the same fixture. `outer_grid_recenter_sd_clamp` / `_sd_raw` /
+# `_sd_used` are what separate a substituted spread from a measured one on the
+# fit, and a recentred axis's reported ratio cannot be read without them.
+#
+# The FIT'S OWN `outer_grid_h_over_sd` is a third quantity again, and the two
+# are not interchangeable (gcol33/tulpa#660). That field is filled by
+# `.nl_axis_resolution()` (`R/nested_laplace_moments.R`), whose denominator is
+# the three-point Laplace-at-mode SD of the UNWEIGHTED marginal -- a local
+# curvature, which is finite on an axis whose weights have collapsed onto one
+# node where the trigger's moment spread is 0 and the ratio `Inf`, and which
+# declines `mode_at_edge` on a railed axis the trigger scores a number for.
+# Measured on twelve axes of BYM2 and ICAR fits (`dev_notes/issue660/
+# probe660b.R`): both finite on eight, equal on none, field-over-trigger median
+# 1.0012 and range 0.0000 to 1.3793, six orders apart on a collapsed BYM2
+# `sigma`. The two are kept because they answer differently on purpose -- the
+# trigger has to fire on a collapsed axis, and the report has to decline what it
+# cannot score -- so read the derivation above against `.nl_axis_h_over_sd()`,
+# which is what `test-recenter-pilot.R` asserts it on, and not against the
+# field.
+#
+# An axis NO rescue moves -- a copy `alpha`, a caller-pinned per-arm dispersion
+# axis -- carries no such relation at all: its ratio is whatever its own fixed
+# nodes and its own posterior make it (median 1605 and 1.95 on the same
+# fixture), and reading a large one there as a placement failure mistakes a
+# sharp posterior on a fixed axis for a mis-sized one.
+#
+# A DECLARED per-arm dispersion axis is no longer in that set
+# (`.joint_phi_grid_rescue()`, gcol33/tulpa#663): marked with `auto_grid()` it
+# is placed like a field SD, and left unmarked it is a pin whose ratio means
+# what the paragraph above says it means. Which of the two a given axis is, is
+# recorded on the fit per axis (`outer_grid_axis_declined`), because the
+# whole-fit `outer_grid_recenter_declined` slot holds the reason from ONE rescue
+# and says nothing about an axis a different one left alone.
 #
 # The default is "resolve" and not "always" for COST, and the two are closer
 # than the coverage table alone reads. They agree seed for seed on five of the
@@ -118,12 +169,14 @@
 #' setting exactly as given, and re-centres (or, for a prior, engages its own
 #' regularizer over) a marked one when the fit rails against its ceiling.
 #'
-#' Three kinds of setting take the mark:
+#' Four kinds of setting take the mark:
 #' \itemize{
 #'   \item a grid axis on a nested-Laplace `prior` block (`sigma_grid`,
 #'     `tau_grid`, ...) -- a numeric vector of nodes, or the `[n_cells x k]`
 #'     matrix of pre-paired coordinates the families whose axis is a matrix
 #'     take (`mcar` / `miid`'s `logchol_grid`, `tgmrf`'s `theta_grid_built`);
+#'   \item an entry of [tulpa_nested_laplace_joint()]'s `phi_grid` -- one arm's
+#'     dispersion axis;
 #'   \item a scalar grid-construction knob in `control`, for a driver that
 #'     builds its axes rather than taking them (`fit_st_nested()`'s
 #'     `n_grid_spatial`, `tau_upper`, ...);
@@ -137,24 +190,51 @@
 #' otherwise be indistinguishable from a user who pinned that setting
 #' deliberately. Mark it and the rescue stays live. A setting whose value is
 #' exactly the engine's own default is recognised without a mark; anything else
-#' needs one.
+#' needs one -- and a dispersion axis ALWAYS needs one, since the engine has no
+#' default of its own to recognise it against.
 #'
 #' The mark is an attribute, so it is dropped by `sort()`, `[`, `c()` and
 #' `as.numeric()`: build the value first, mark it last.
 #'
+#' @section Declaring a default the engine must integrate as written:
+#' `place = FALSE` separates the two questions the mark otherwise answers at
+#' once. Provenance -- whose choice these nodes are -- and placement policy --
+#' whether the pass may move them -- are different questions, and a package that
+#' measured its own default as the one to integrate has an answer to the second
+#' that is not "the user pinned it". Such an axis is treated exactly as a pin
+#' everywhere the engine ACTS on it (the placement pass leaves it, refinement
+#' densifies within its span rather than following the posterior past the end
+#' nodes, and no curvature is computed for it), and differs only in what the fit
+#' REPORTS: `"default_axis_pinned"` rather than `"axis_pinned"`, so a reader is
+#' not told they pinned an axis they never wrote down. Leaving the mark off
+#' instead buys the same integration and says the wrong thing about it.
+#'
+#' `place` is read wherever the engine would otherwise RE-PLACE the setting: a
+#' grid axis, and a scalar grid-construction knob. A `prior_sigma`
+#' specification is not re-placed but replaced, by the engine's own
+#' regularizer, and carries no `place`.
+#'
 #' @param x Numeric vector or matrix of grid nodes, a numeric scalar knob, or a
 #'   prior-specification list.
+#' @param place May the auto-placement pass move this axis onto its own
+#'   posterior? `TRUE` (default) declares a default the engine may re-place;
+#'   `FALSE` declares one it must integrate as written.
 #' @return `x` carrying the marker attribute. Numeric input is coerced to
 #'   double IN PLACE, so everything else it carries -- `dim()` and `dimnames()`
 #'   above all -- survives the mark; a list is returned unchanged apart from
 #'   the attribute.
-#' @seealso [is_auto_grid()], [tulpa_nested_laplace_joint()], [fit_st_nested()]
+#' @seealso [is_auto_grid()], [auto_grid_place()],
+#'   [tulpa_nested_laplace_joint()], [fit_st_nested()]
 #' @examples
 #' prior <- list(type = "icar", sigma_grid = auto_grid(c(0.1, 0.5, 1, 2, 3)))
 #' is_auto_grid(prior$sigma_grid)
 #' is_auto_grid(auto_grid(list("pc.prec", c(U = 3, alpha = 0.01))))
+#' auto_grid_place(auto_grid(c(0.5, 1, 2), place = FALSE))
 #' @export
-auto_grid <- function(x) {
+auto_grid <- function(x, place = TRUE) {
+    if (!is.logical(place) || length(place) != 1L || is.na(place)) {
+        stop("`auto_grid(place = )` takes TRUE or FALSE.", call. = FALSE)
+    }
     if (is.list(x)) {
         if (!length(x)) {
             stop("`auto_grid()` takes a non-empty prior specification.",
@@ -172,19 +252,44 @@ auto_grid <- function(x) {
         }
     }
     attr(x, "tulpa_auto_grid") <- TRUE
+    # Only the non-default state is carried, so a placeable mark is the byte it
+    # always was and `auto_grid_place()` answers for an unmarked value too.
+    attr(x, "tulpa_auto_place") <- if (place) NULL else FALSE
     x
 }
 
 #' Is an outer-grid setting marked as a default?
 #'
 #' @param x Any object.
-#' @return `TRUE` when `x` carries the [auto_grid()] marker.
-#' @seealso [auto_grid()]
+#' @return `TRUE` when `x` carries the [auto_grid()] marker. This is the
+#'   PROVENANCE question -- whose choice the nodes are -- and is `TRUE` whether
+#'   or not the mark also asked for them to be integrated as written; that is
+#'   [auto_grid_place()].
+#' @seealso [auto_grid()], [auto_grid_place()]
 #' @examples
 #' is_auto_grid(auto_grid(c(0.5, 1, 2)))
 #' is_auto_grid(c(0.5, 1, 2))
 #' @export
 is_auto_grid <- function(x) isTRUE(attr(x, "tulpa_auto_grid", exact = TRUE))
+
+#' May the placement pass move a marked outer-grid axis?
+#'
+#' Reads back what [auto_grid()]'s `place` argument recorded, so a wrapper that
+#' rebuilds a value (`as.numeric()` drops every attribute) can re-apply both
+#' halves of the declaration rather than only the provenance half.
+#'
+#' @param x Any object.
+#' @return `FALSE` when `x` was marked `auto_grid(place = FALSE)`, `TRUE`
+#'   otherwise -- including for a value carrying no mark at all, which the
+#'   engine holds because it reads as a pin rather than because it asked to be
+#'   held.
+#' @seealso [auto_grid()], [is_auto_grid()]
+#' @examples
+#' auto_grid_place(auto_grid(c(0.5, 1, 2)))
+#' auto_grid_place(auto_grid(c(0.5, 1, 2), place = FALSE))
+#' @export
+auto_grid_place <- function(x)
+    !isFALSE(attr(x, "tulpa_auto_place", exact = TRUE))
 
 # Is a supplied `prior_sigma` a PIN? The prior-spec counterpart of
 # `.nl_axis_is_pinned()`. The second recenter attempt exists
@@ -198,15 +303,17 @@ is_auto_grid <- function(x) isTRUE(attr(x, "tulpa_auto_grid", exact = TRUE))
     if (is.null(prior_sigma)) return(FALSE)
     if (is_auto_grid(prior_sigma)) return(FALSE)
     d <- .nl_recenter("sigma_pc_prior")
-    p <- prior_sigma
-    attr(p, "tulpa_auto_grid") <- NULL
-    !isTRUE(all.equal(d, p, check.attributes = FALSE))
+    !isTRUE(all.equal(d, .nl_strip_auto(prior_sigma), check.attributes = FALSE))
 }
 
 # Drop the marker so nothing downstream of the rescue sees an attributed
-# object (a prior spec is passed on to `.joint_parse_sigma_prior()`).
+# object (a prior spec is passed on to `.joint_parse_sigma_prior()`). Both
+# halves of the declaration go: `auto_grid()` writes two attributes and a value
+# that kept one of them would still reach `expand.grid()` / `cbind()` / C++
+# attributed.
 .nl_strip_auto <- function(x) {
-    attr(x, "tulpa_auto_grid") <- NULL
+    attr(x, "tulpa_auto_grid")  <- NULL
+    attr(x, "tulpa_auto_place") <- NULL
     x
 }
 
@@ -241,18 +348,23 @@ is_auto_grid <- function(x) isTRUE(attr(x, "tulpa_auto_grid", exact = TRUE))
     FALSE
 }
 
-# Names of the grid fields on ONE block that carry the `auto_grid()` marker.
+# The grid fields on ONE block that carry the `auto_grid()` marker, as a NAMED
+# LOGICAL: the names are the declared fields, and each value is whether that
+# declaration also lets the placement pass move the axis
+# (`auto_grid(place = )`). One record carries both halves, so no call site can
+# read the provenance half and miss the policy half.
 .nl_block_auto_fields <- function(block) {
-    if (!is.list(block) || !length(block)) return(character(0))
+    if (!is.list(block) || !length(block)) return(logical(0))
     nm <- names(block) %||% character(0)
-    if (!length(nm)) return(character(0))
-    marked <- vapply(block, is_auto_grid, logical(1))
-    nm[marked & nzchar(nm)]
+    if (!length(nm)) return(logical(0))
+    keep <- vapply(block, is_auto_grid, logical(1)) & nzchar(nm)
+    if (!any(keep)) return(logical(0))
+    stats::setNames(vapply(block[keep], auto_grid_place, logical(1)), nm[keep])
 }
 
 .nl_block_strip_auto <- function(block) {
-    for (f in .nl_block_auto_fields(block)) {
-        attr(block[[f]], "tulpa_auto_grid") <- NULL
+    for (f in names(.nl_block_auto_fields(block))) {
+        block[[f]] <- .nl_strip_auto(block[[f]])
     }
     block
 }
@@ -260,8 +372,8 @@ is_auto_grid <- function(x) isTRUE(attr(x, "tulpa_auto_grid", exact = TRUE))
 # Record which axes a prior declared as defaults, and hand back the prior with
 # the markers removed, so nothing downstream of the front door ever sees an
 # attributed numeric (grid values reach C++, `expand.grid()` and `cbind()`
-# unchanged). `auto` is a character vector for a single-block prior and a
-# per-block list for a multi-block one -- read it back with
+# unchanged). `auto` is a named logical for a single-block prior and a
+# per-block list of them for a multi-block one -- read it back with
 # `.nl_auto_fields_at()`.
 .nl_grid_provenance <- function(prior) {
     if (.is_multi_block_prior(prior)) {
@@ -269,25 +381,39 @@ is_auto_grid <- function(x) isTRUE(attr(x, "tulpa_auto_grid", exact = TRUE))
         prior <- lapply(prior, .nl_block_strip_auto)
         return(list(prior = prior, auto = auto))
     }
-    if (!is.list(prior)) return(list(prior = prior, auto = character(0)))
+    if (!is.list(prior)) return(list(prior = prior, auto = logical(0)))
     list(prior = .nl_block_strip_auto(prior), auto = .nl_block_auto_fields(prior))
 }
 
 .nl_auto_fields_at <- function(auto, block_index = NULL) {
-    if (is.null(auto)) return(character(0))
-    if (is.null(block_index)) {
-        if (is.list(auto)) return(character(0))
-        return(as.character(auto))
+    if (is.null(auto)) return(logical(0))
+    at <- if (is.null(block_index)) {
+        if (is.list(auto)) return(logical(0))
+        auto
+    } else {
+        if (!is.list(auto) || block_index > length(auto)) return(logical(0))
+        auto[[block_index]] %||% logical(0)
     }
-    if (!is.list(auto) || block_index > length(auto)) return(character(0))
-    as.character(auto[[block_index]] %||% character(0))
+    # A plain character vector names the declared fields and says nothing about
+    # placement, which is the placeable default.
+    if (is.character(at)) return(stats::setNames(rep(TRUE, length(at)), at))
+    at
 }
 
-# THE provenance predicate every rescue guards on. `block` is the prior block
-# carrying the axis, `field` its grid field, `auto_fields` the marker record
-# `.nl_grid_provenance()` took for that block. An absent axis, a marked one,
-# and one whose nodes are the engine's own default are all defaults; anything
-# else is a pin the rescue must leave alone.
+# THE provenance predicate every rescue guards on: why must the placement pass
+# leave this axis exactly as declared, and NULL when it may move it. `block` is
+# the prior block carrying the axis, `field` its grid field, `auto_fields` the
+# marker record `.nl_grid_provenance()` took for that block. An absent axis, a
+# marked one, and one whose nodes are the engine's own default are all defaults;
+# anything else is a pin.
+#
+# Two answers hold the axis, and the engine ACTS identically on both -- the pass
+# leaves it, refinement densifies within its span (`.NL_AXIS_REFINE`), and no
+# curvature is computed for it. They differ in WHOSE declaration it was, which
+# is the whole of what a reader can act on: `"axis_pinned"` is the caller's own
+# nodes, `"default_axis_pinned"` a default the package that built the fit asked
+# to have integrated as written (`auto_grid(place = FALSE)`). Reporting the
+# second as the first tells a user they pinned an axis they never wrote down.
 #
 # `type` narrows the default comparison to the axis that ONE path-and-family
 # lays on the field, and must be passed EXPLICITLY -- it is deliberately not
@@ -298,13 +424,25 @@ is_auto_grid <- function(x) isTRUE(attr(x, "tulpa_auto_grid", exact = TRUE))
 # `sigma_grid` at all. Inferring would silently answer "pinned" there, reading
 # an engine default as a user pin. Unnarrowed (`NULL`) compares against
 # every family's binding for the field, which errs toward recognising a default.
-.nl_axis_is_pinned <- function(block, field, auto_fields = character(0),
-                               type = NULL) {
+.nl_axis_hold <- function(block, field, auto_fields = logical(0), type = NULL) {
     g <- if (is.list(block)) block[[field]] else NULL
-    if (is.null(g)) return(FALSE)
-    if (field %in% auto_fields) return(FALSE)
-    if (is_auto_grid(g)) return(FALSE)
-    !.nl_axis_matches_default(g, field, type)
+    if (is.null(g)) return(NULL)
+    auto_fields <- .nl_auto_fields_at(auto_fields)
+    i <- match(field, names(auto_fields) %||% character(0))
+    # The record is taken with the markers stripped; a call site holding the
+    # value before that reads the same declaration off the value itself.
+    declared <- !is.na(i) || is_auto_grid(g)
+    if (declared) {
+        place <- if (!is.na(i)) isTRUE(auto_fields[[i]]) else auto_grid_place(g)
+        return(if (place) NULL else "default_axis_pinned")
+    }
+    if (.nl_axis_matches_default(g, field, type)) return(NULL)
+    "axis_pinned"
+}
+
+.nl_axis_is_pinned <- function(block, field, auto_fields = logical(0),
+                               type = NULL) {
+    !is.null(.nl_axis_hold(block, field, auto_fields, type = type))
 }
 
 # --- axis consumption --------------------------------------
@@ -403,7 +541,34 @@ is_auto_grid <- function(x) isTRUE(attr(x, "tulpa_auto_grid", exact = TRUE))
 # retired (sigma_occ, sigma_pos) parameterization reached this spec and was
 # neither read nor reported, so a pinned amplitude axis fell back to the
 # engine's own default with a bit-identical `log_marginal`).
-.NL_COPY_SPEC_FIELDS <- c("arm", "block", "alpha_grid")
+.NL_COPY_SPEC_FIELDS <- c("arm", "block", "alpha_grid", "alpha_n")
+
+# Resolve a copy spec's alpha axis. `alpha_grid` REPLACES the axis (the caller
+# states the nodes, and with them the prior structure the axis carries);
+# `alpha_n` re-reads the engine's declared axis at a higher RESOLUTION, keeping
+# the atom at 0 and the slab bounds. They answer different questions, so
+# supplying both is refused rather than silently ranked (gcol33/tulpa#633).
+#
+# Why the resolution knob has to exist: the alpha axis is the one outer axis a
+# copy fit cannot raise. Measured engine-side on an ICAR chain with a gaussian
+# copy arm, raising the donor `sigma_grid` from 13 to 29 nodes leaves the alpha
+# axis at its declared 6 at every setting and the grid ESS at 1.7 / 3.1 / 4.3,
+# while supplying the alpha nodes explicitly takes it to 2.5 / 7.6 / 14.4. The
+# saturation is in the PLACEMENT, not in the prune: `prune = TRUE` reproduces
+# the same node counts and the same ESS to the digit
+# (`dev_notes/issue633/probe_alpha_engine.R`).
+.nl_copy_alpha_axis <- function(alpha_grid, alpha_n, what = "copy") {
+    has_grid <- !is.null(alpha_grid) && length(alpha_grid) > 0L
+    has_n    <- !is.null(alpha_n) && length(alpha_n) > 0L
+    if (has_grid && has_n) {
+        stop(what, ": give `alpha_grid` OR `alpha_n`, not both -- `alpha_grid` ",
+             "states the axis's nodes, `alpha_n` re-reads the engine's own axis ",
+             "at a higher resolution, and the two are different requests.",
+             call. = FALSE)
+    }
+    if (has_grid) return(as.numeric(alpha_grid))
+    .nl_grid_axis("copy_alpha", n = if (has_n) alpha_n else NULL)
+}
 
 .nl_copy_spec_refusal <- function(spec_index, field, type) {
     paste0(
@@ -572,8 +737,44 @@ is_auto_grid <- function(x) isTRUE(attr(x, "tulpa_auto_grid", exact = TRUE))
 # that happens exactly when the mode is AT or BEYOND that endpoint, so the span
 # does not contain it and the axis integrates a tail at any spacing.
 
+# The three measures one axis's marginal can be read against. They differ only
+# in which cell widths the nodes are weighed by, and each answers a different
+# question (gcol33/tulpa#660):
+#
+#   "posterior"  the cells' own quadrature weights, closed inside the axis's
+#                declared domain -- the measure the fit integrates and the one
+#                every reported mean, interval and spread has to carry.
+#   "span"       the same widths with the outermost cell left on its naive
+#                half-step mirror. Where the support closes is prior-side
+#                bookkeeping; a detector asking how much of the marginal the
+#                span leaves out must not weaken because the boundary it is
+#                looking at is the boundary the parameter stops at.
+#   "inner"      no measure at all: the likelihood the grid measured. What an
+#                ARGMAX question reads, since a mode is a property of the
+#                density and not of the cells it is tiled with.
+.NL_AXIS_MEASURE <- c("posterior", "span", "inner")
+
+# The cells' log quadrature weights under `measure`, or NULL for none.
+#
+# The "span" weights are rebuilt from the grid rather than stored, and the
+# rebuild is the SAME call every producer fills `log_quad` with
+# (`.nl_grid_log_quad()` on the grid alone, no caller specs), with the domain
+# closure switched off -- so the two differ in the outermost cell and in
+# nothing else.
+.nl_axis_measure_quad <- function(res, measure) {
+    switch(measure,
+           posterior = res$log_quad,
+           inner     = NULL,
+           span      = if (is.null(res$log_quad)) NULL else
+                           .nl_grid_log_quad(.nl_theta_matrix(res),
+                                             close_domain = FALSE,
+                                             refining = res$refining_axis))
+}
+
 # One axis's marginal over its own sorted distinct nodes, normalized.
-.nl_axis_marginal_w <- function(res, axis) {
+.nl_axis_marginal_w <- function(res, axis,
+                                measure = c("posterior", "span", "inner")) {
+    measure <- match.arg(measure)
     tg <- res$theta_grid
     lm <- res$log_marginal
     if (is.null(tg) || is.null(lm)) return(NULL)
@@ -585,7 +786,15 @@ is_auto_grid <- function(x) isTRUE(attr(x, "tulpa_auto_grid", exact = TRUE))
     j <- match(axis, cn)
     if (is.na(j) && ncol(tg) == 1L) j <- 1L
     if (is.na(j) || length(lm) != nrow(tg)) return(NULL)
-    m <- .nl_axis_marginal_logdensity(as.numeric(tg[, j]), lm)
+    lq <- .nl_axis_measure_quad(res, measure)
+    measured <- !is.null(lq) && length(lq) == length(lm)
+    if (measured) {
+        lm <- lm + lq
+        lm[is.na(lm)] <- -Inf
+    }
+    m <- .nl_axis_marginal_logdensity(
+        as.numeric(tg[, j]), lm,
+        .nl_axis_read_cells(res$refining_axis, nrow(tg), measured = measured))
     if (length(m$vals) < 2L) return(NULL)
     top <- max(m$log_marg)
     if (!is.finite(top)) return(NULL)
@@ -605,19 +814,33 @@ is_auto_grid <- function(x) isTRUE(attr(x, "tulpa_auto_grid", exact = TRUE))
 # and moved onto curvature it does not have -- a near-flat direction returns a
 # huge mode SD, and a grid laid over it is coarser than the one it replaced.
 #
+# Both clauses read the INNER marginal, the likelihood the grid measured, with
+# the cells' quadrature weights left out. A rail asks whether the span stops
+# short of where the data are still pulling the marginal, and the answer must
+# not move when the outer prior's cells are re-apportioned: a cell width is a
+# property of the node spacing and of where the axis's own domain closes the
+# outermost cell (`.hyper_domain_clamp()`), and the boundary cell is precisely
+# the one both of those shorten. Folding the widths in makes the detector
+# weakest at the boundary it is being asked about -- on the 100-region BYM2
+# `rho` fixture the same railed configuration reads 2.511 on the inner marginal
+# against 2.099 with the widths folded in, and the shortened boundary cell of a
+# clamped support takes the latter to 1.696, below a threshold calibrated at
+# 2.511. The posterior summaries of the axis keep the weighted marginal, which
+# is what a reported mean or interval has to carry.
+#
 # The guard reads the boundary node's weight against what a FLAT marginal would
 # put there, `1 / m`, rather than against a fixed share. The
 # two differ by exactly the node count, and that is the whole defect: an axis's
 # weights are a distribution over its OWN nodes, so the same posterior read at
 # more nodes carries less on any one of them and a fixed share turns a longer
 # axis into a weaker detector. `lift = m * w[k]` is 1 for a flat marginal at any
-# node count and any spacing, so the threshold means the same thing wherever it
-# is applied. Measured on a BYM2 `rho` posterior held past a fixed span, the
+# node count, so the threshold means the same thing wherever it is applied.
+# Measured on a BYM2 `rho` posterior held past a fixed span, the
 # lift of a railed fit is flat in the node count (2.70 / 2.81 / 2.87 / 2.94 /
 # 3.02 at m = 4 / 5 / 6 / 8 / 12) where its share collapses (0.68 / 0.56 / 0.48
 # / 0.37 / 0.25).
 .nl_axis_rail <- function(res, axis, edge_mult = .nl_recenter("edge_mass_mult")) {
-    mw <- .nl_axis_marginal_w(res, axis)
+    mw <- .nl_axis_marginal_w(res, axis, measure = "inner")
     if (is.null(mw)) return(NULL)
     m <- length(mw$w)
     k <- which.max(mw$w)
@@ -639,9 +862,24 @@ is_auto_grid <- function(x) isTRUE(attr(x, "tulpa_auto_grid", exact = TRUE))
 # on (fewer than two nodes, a node outside its own support), and the caller
 # treats that as unresolved too rather than silently reporting a grid it could
 # not score.
+#
+# It reads the "posterior" measure, and unlike the two labels above that is not
+# a close call: the denominator is a SPREAD, the spread of the distribution the
+# fit reports its intervals from, and that distribution is the one weighed by
+# the cells (gcol33/tulpa#660). The trigger's threshold
+# `.NL_RECENTER$resolve_mult` was nevertheless calibrated at cc9ef82
+# (2026-08-10), twenty days before `53a2ef9` folded those weights in, so what it
+# was sized against is the unweighted read. Re-measured across 240 axis-
+# configurations spanning both -- ICAR precision axes at eight node counts and
+# BYM2 (sigma, rho) grids at four ceilings x four node counts
+# (`dev_notes/issue660/probe660[bc].R`) -- the two reads flip the fire decision
+# on NONE of them, and on a single-axis log-spaced grid they are equal to the
+# bit, because a uniform coordinate spacing gives every cell the same width and
+# a constant shifts no softmax. The ratio spans 0.78 to 1.34 where they differ,
+# which is inside the 1.6 headroom the threshold was chosen with.
 .nl_axis_h_over_sd <- function(res, axis, tag) {
     if (length(tag) != 1L || is.na(tag)) return(NA_real_)
-    mw <- .nl_axis_marginal_w(res, axis)
+    mw <- .nl_axis_marginal_w(res, axis, measure = "posterior")
     if (is.null(mw) || length(mw$vals) < 2L) return(NA_real_)
     u <- as.numeric(.joint_pareto_fwd(tag, mw$vals))
     if (any(!is.finite(u))) return(NA_real_)
@@ -672,6 +910,82 @@ is_auto_grid <- function(x) isTRUE(attr(x, "tulpa_auto_grid", exact = TRUE))
 .nl_attach_railed_axes <- function(res) {
     res$outer_grid_railed_axes <- .nl_railed_axes(res)
     res
+}
+
+# --- boundary MASS ------------------------------------------------------------
+#
+# The rail above asks whether the span contains the axis's own MODE. An axis can
+# hold a large share of its marginal on a boundary node with the mode one node
+# in, and that is the same truncation: whatever the marginal does past the outer
+# node is unrepresented either way, and the mode's position does not say how much
+# of it there is. Read on its own, the rail reports such a grid clean
+# (gcol33/tulpa#622).
+#
+# So this is a SECOND label rather than a widening of the first: `railed` keeps
+# its stronger statement ("the span does not contain its own mode") and
+# `edge_mass` names an axis whose boundary node carries material weight whatever
+# the argmax does. Both ends are tested, since a marginal can press on either.
+#
+# The currency is the rail's own `lift = m * w_edge`, the boundary node's weight
+# against what a flat marginal would put there, for the reason the rail carries
+# it: a fixed share makes a longer axis a weaker detector of the same posterior.
+# `.nl_diag("edge_mass_lift")` carries the threshold and what it was read off.
+#
+# It reads the "span" measure, and which half of the measure that drops is the
+# whole of the choice (gcol33/tulpa#660). This is a MASS question, so the cell
+# widths belong in it: an outer node owning a wide cell holds mass its node
+# count does not see, and reading the bare node weights would delete that. What
+# does NOT belong is `.hyper_domain_clamp()`, which shortens the outermost cell
+# when the naive mirror would reach past the axis's declared support -- a
+# statement about where the parameter stops existing, applied to the one cell
+# the detector is asking about, and moved by a knob it is not asking about.
+#
+# Measured over 192 BYM2 (sigma, rho) axis-configurations, 6 data sets x 4 rho
+# ceilings x 4 node counts (`dev_notes/issue660/probe660d.R`), lift ratios to
+# the bare-node read:
+#
+#   with the clamp (as shipped 53a2ef9 .. 0.2.14)   median 0.7826   min 0.5100
+#   with the mirror left standing                   1.0000 on every row
+#
+# So on that family the clamp is the ENTIRE difference, and it is one-sided:
+# thirteen axes lost the label under it and none gained one. `1/0.51` is the
+# half-width an open domain's midpoint rule leaves the outermost cell, which is
+# the largest a single clamp can be.
+#
+# Returns a list of `list(side, mass, lift, node)`, empty when neither end
+# qualifies.
+.nl_axis_edge_mass <- function(res, axis,
+                               lift_mult = .nl_diag("edge_mass_lift")) {
+    mw <- .nl_axis_marginal_w(res, axis, measure = "span")
+    if (is.null(mw)) return(list())
+    m <- length(mw$w)
+    out <- list()
+    for (k in c(1L, m)) {
+        lift <- m * mw$w[k]
+        if (!is.finite(lift) || lift < lift_mult) next
+        out[[length(out) + 1L]] <- list(
+            side = if (k == 1L) "lower" else "upper",
+            mass = mw$w[k], lift = lift, node = mw$vals[k])
+    }
+    out
+}
+
+# Every axis of a fit holding material weight on one of its own boundary nodes,
+# as `axis:side`. Recorded on the fit (`$outer_grid_edge_mass_axes`) beside the
+# railed axes, so a span that truncates its own marginal is named whether or not
+# it also fails to contain its mode.
+.nl_edge_mass_axes <- function(res) {
+    tg <- res$theta_grid
+    if (is.null(tg) || is.null(res$log_marginal)) return(character(0))
+    cn <- if (is.matrix(tg)) colnames(tg) else (res$theta_names %||% "theta")
+    if (is.null(cn)) return(character(0))
+    hits <- character(0)
+    for (a in cn) {
+        for (e in .nl_axis_edge_mass(res, a)) {
+            hits <- c(hits, paste0(a, ":", e$side))
+        }
+    }
+    hits
 }
 
 # Why the registry rescue covers no axis of `type`. Two
@@ -705,7 +1019,9 @@ is_auto_grid <- function(x) isTRUE(attr(x, "tulpa_auto_grid", exact = TRUE))
 # --- decline reasons ---------------------------------------------------------
 #
 # `res$outer_grid_recenter_declined` records why an applicable auto-recenter did
-# not run: `"axis_pinned"` (the caller pinned the axis), `"grid_not_collapsed"`
+# not run: `"axis_pinned"` (the caller pinned the axis),
+# `"default_axis_pinned"` (a wrapper package declared the nodes and asked for
+# them as written, `auto_grid(place = FALSE)`), `"grid_not_collapsed"`
 # (the grid already brackets the mode, the common no-op, on the rescues whose
 # trigger is the whole grid's collapse), `"no_axis_railed"` (its per-axis
 # counterpart on the registry rescue under `control$auto_recenter = "rail"`: no
@@ -718,7 +1034,9 @@ is_auto_grid <- function(x) isTRUE(attr(x, "tulpa_auto_grid", exact = TRUE))
 # stencil returned a curvature past one of the mode-SD bounds, so an axis laid
 # from it would be laid from a substituted spread rather than a measured one;
 # only under the declining clamp policies),
-# `"auto_recenter_disabled"` (`control$auto_recenter = FALSE`,
+# `"attempts_exhausted"` (per axis only: the axis was still railed when
+# `max_attempts` ran out on a sibling), `"auto_recenter_disabled"`
+# (`control$auto_recenter = FALSE`,
 # the way to hold ANY grid -- the engine's own default axis included -- exactly
 # where it is), `"grid_knobs_overridden"` (the spatiotemporal driver's
 # grid-construction knobs were set explicitly), `"refit_failed"` (the recentred
@@ -726,11 +1044,56 @@ is_auto_grid <- function(x) isTRUE(attr(x, "tulpa_auto_grid", exact = TRUE))
 # (the registry rescue covers no axis of this family, which is what returning
 # UNSTAMPED used to look like). Absent on a fit that WAS
 # recentred, and never stamped by
-# a rescue whose prior shape it does not apply to -- a fit carries the reason
-# from the one rescue that could have run, not a tally of the others declining.
+# a rescue whose prior shape it does not apply to.
+#
+# SEVERAL rescues can speak on one fit -- a joint fit's field SD and its per-arm
+# dispersion are placed by different passes over the same grid -- so the slot is
+# a REDUCTION over what they said, not the last one to say it. The two
+# axis-scoped reasons are properties of ONE axis's declaration rather than of
+# the fit's grid, its curvature or a control knob, so a pass whose every axis
+# was declared has not answered the question the slot asks; it yields to any
+# pass that had an axis it could have moved and did not need to. Without that,
+# a fit whose defaulted field SD simply needed no placement reported
+# `"axis_pinned"` because a dispersion axis beside it was declared -- which
+# reads as the caller having pinned the axis they did not pin
+# (gcol33/tulpaObs#361). The per-axis record answers per axis either way.
+#
+# `outer_grid_recenter_declined_pruned` says whether the fit the decline was
+# read off had been cheap-pass screened. The two are different events with the
+# same reason string: `"no_usable_curvature"` on a full grid is a posterior the
+# stencil could not read, while the same reason on a screened grid can be the
+# screen having removed the cells the stencil reads -- pruning pays off exactly
+# when the posterior is concentrated, and concentration is what collapses the
+# kept set. Recorded on every decline, TRUE or FALSE, so a reader tells them
+# apart from the fit rather than from the absence of a field.
+.NL_AXIS_SCOPED_DECLINE <- c("axis_pinned", "default_axis_pinned")
+
+.nl_decline_is_axis_scoped <- function(reason)
+    length(reason) == 1L && !is.na(reason) &&
+        reason %in% .NL_AXIS_SCOPED_DECLINE
+
+# One reason for a set of per-axis holds. A user's own pin is the statement a
+# reader can act on, so it stands for the set whenever one is in it.
+.nl_reduce_decline <- function(held) {
+    held <- unlist(held, use.names = FALSE)
+    if (!length(held)) return("axis_pinned")
+    if ("axis_pinned" %in% held) "axis_pinned" else held[[1L]]
+}
+
 .nl_decline_recenter <- function(res, reason) {
     if (identical(res$outer_grid_placement, "auto_recentered")) return(res)
+    prev <- res$outer_grid_recenter_declined
+    if (!is.null(prev) && .nl_decline_is_axis_scoped(reason)) {
+        # A pass whose every axis was DECLARED has not answered the question
+        # the slot asks, so it yields to one that had an axis it could have
+        # moved; against another axis-scoped answer the two reduce by the same
+        # rule the per-pass one does.
+        if (!.nl_decline_is_axis_scoped(prev)) return(res)
+        reason <- .nl_reduce_decline(list(prev, reason))
+    }
     res$outer_grid_recenter_declined <- reason
+    res$outer_grid_recenter_declined_pruned <-
+        isTRUE(any(as.logical(res$prune_mask), na.rm = TRUE))
     res
 }
 
@@ -928,7 +1291,10 @@ is_auto_grid <- function(x) isTRUE(attr(x, "tulpa_auto_grid", exact = TRUE))
 # axis), or when the grid never collapsed onto the sigma axis in the first
 # place -- so this is a zero-cost, byte-stable no-op for every fit that did not
 # need it, and the reason is recorded in
-# `res$outer_grid_recenter_declined`.
+# `res$outer_grid_recenter_declined` and, per axis, in
+# `res$outer_grid_axis_declined[["sigma"]]`. The per-axis record is what
+# survives a later rescue placing a DIFFERENT axis (the dispersion rescue below),
+# which leaves the fit `auto_recentered` and the whole-fit slot empty.
 #
 # Two attempts, both reusing the mode/Hessian the outer Pareto-k diagnostic
 # already computed rather than a fresh optimization (see
@@ -956,13 +1322,20 @@ is_auto_grid <- function(x) isTRUE(attr(x, "tulpa_auto_grid", exact = TRUE))
     out <- list(res = res, prior = prior, prior_sigma = prior_sigma)
     type <- tolower(prior$type %||% "")
     if (!type %in% c("bym2", "icar", "car_proper")) return(out)
+    decline <- function(r, why) {
+        if (!identical(r$outer_grid_placement, "auto_recentered")) {
+            r <- .nl_decline_axis(r, "sigma", why)
+        }
+        .nl_decline_recenter(r, why)
+    }
     if (!isTRUE(enabled)) {
-        out$res <- .nl_decline_recenter(res, "auto_recenter_disabled")
+        out$res <- decline(res, "auto_recenter_disabled")
         return(out)
     }
-    if (.nl_axis_is_pinned(prior, "sigma_grid", .nl_auto_fields_at(auto),
-                           type = ".joint_areal")) {
-        out$res <- .nl_decline_recenter(res, "axis_pinned")
+    hold <- .nl_axis_hold(prior, "sigma_grid", .nl_auto_fields_at(auto),
+                          type = ".joint_areal")
+    if (!is.null(hold)) {
+        out$res <- decline(res, hold)
         return(out)
     }
 
@@ -990,6 +1363,7 @@ is_auto_grid <- function(x) isTRUE(attr(x, "tulpa_auto_grid", exact = TRUE))
         res <- refit(cur_prior, cur_prior_sigma)
         res$outer_grid_placement           <- "auto_recentered"
         res$outer_grid_recenter_attempts   <- attempt
+        res$outer_grid_recenter_axes       <- "sigma"
         res$outer_grid_recenter_sd_clamp   <- stats::setNames(rc$sd_clamp, "sigma")
         res$outer_grid_recenter_sd_used    <- stats::setNames(rc$sd_used, "sigma")
         res$outer_grid_recenter_sd_raw     <- stats::setNames(rc$sd_raw, "sigma")
@@ -998,7 +1372,7 @@ is_auto_grid <- function(x) isTRUE(attr(x, "tulpa_auto_grid", exact = TRUE))
             if (attempt >= 2L && prior_pinned) "prior_pinned" else NULL
         out <- list(res = res, prior = cur_prior, prior_sigma = cur_prior_sigma)
     }
-    out$res <- .nl_decline_recenter(out$res, reason)
+    out$res <- decline(out$res, reason)
     out
 }
 
@@ -1060,6 +1434,12 @@ is_auto_grid <- function(x) isTRUE(attr(x, "tulpa_auto_grid", exact = TRUE))
 # collapsed copy block per attempt (the documented case is a single copy block;
 # a fit with several SIMULTANEOUSLY collapsed copy blocks partially improves
 # within `max_attempts` rather than looping without bound).
+#
+# Every copy block's `sigma` axis the pass left where it was records why in
+# `outer_grid_axis_declined`, whether or not a sibling block moved:
+# `"axis_pinned"`, the stencil's own reason for the block it could not place,
+# `"attempts_exhausted"` for a block still railed when `max_attempts` ran out
+# on another, and `"grid_not_collapsed"` otherwise.
 .joint_multi_sigma_grid_rescue <- function(res, prior, copy, cp, prior_sigma,
                                            refit, auto = list(), enabled = TRUE,
                                            max_attempts = .nl_recenter("max_attempts_joint")) {
@@ -1067,26 +1447,33 @@ is_auto_grid <- function(x) isTRUE(attr(x, "tulpa_auto_grid", exact = TRUE))
     if (!.is_multi_block_prior(prior) || is.null(cp) || !isTRUE(cp$has_copy)) {
         return(out)
     }
+    copy_b  <- cp$copy_blocks_zero + 1L
+    axis_of <- function(b) .nl_axis_alias("sigma", b, .nl_fit_n_blocks(res))[1L]
     if (!isTRUE(enabled)) {
-        out$res <- .nl_decline_recenter(res, "auto_recenter_disabled")
+        r <- res
+        for (b in copy_b) r <- .nl_decline_axis(r, axis_of(b),
+                                                "auto_recenter_disabled")
+        out$res <- .nl_decline_recenter(r, "auto_recenter_disabled")
         return(out)
     }
 
     prior_pinned    <- .nl_prior_sigma_is_pinned(prior_sigma)
     cur_prior       <- prior
     cur_prior_sigma <- .nl_strip_auto(prior_sigma)
-    attempt <- 0L
-    reason  <- "grid_not_collapsed"
+    attempt  <- 0L
+    reason   <- "grid_not_collapsed"
+    moved_b  <- integer(0)
+    failed_b <- NA_integer_
     while (attempt < max_attempts &&
            identical(res$pareto_k_regime, "collapsed_edge")) {
         target_b <- NULL
         for (b0 in cp$copy_blocks_zero) {
             b <- b0 + 1L
             if (!.nl_edge_axis_hit(res, "sigma", b)) next
-            if (.nl_axis_is_pinned(cur_prior[[b]], "sigma_grid",
-                                   .nl_auto_fields_at(auto, b),
-                                   type = ".copy")) {
-                reason <- "axis_pinned"
+            hold <- .nl_axis_hold(cur_prior[[b]], "sigma_grid",
+                                  .nl_auto_fields_at(auto, b), type = ".copy")
+            if (!is.null(hold)) {
+                reason <- hold
                 next
             }
             target_b <- b
@@ -1101,16 +1488,20 @@ is_auto_grid <- function(x) isTRUE(attr(x, "tulpa_auto_grid", exact = TRUE))
             block_index = target_b, n_blocks = n_b,
             ref_nodes = .nl_axis_ref_nodes(res, "sigma", target_b, n_b))
         if (is.null(rc$nodes)) {
-            reason <- rc$reason
+            reason   <- rc$reason
+            failed_b <- target_b
             break
         }
         cur_prior[[target_b]]$sigma_grid <- rc$nodes
+        moved_b <- union(moved_b, target_b)
         if (attempt >= 2L && !prior_pinned) {
             cur_prior_sigma <- .nl_recenter("sigma_pc_prior")
         }
         res <- refit(cur_prior, cur_prior_sigma)
         res$outer_grid_placement           <- "auto_recentered"
         res$outer_grid_recenter_attempts   <- attempt
+        res$outer_grid_recenter_axes       <- vapply(moved_b, axis_of,
+                                                     character(1))
         res$outer_grid_recenter_sd_clamp   <- stats::setNames(
             rc$sd_clamp, .nl_axis_alias("sigma", target_b, n_b)[1L])
         res$outer_grid_recenter_sd_used    <- stats::setNames(
@@ -1121,6 +1512,284 @@ is_auto_grid <- function(x) isTRUE(attr(x, "tulpa_auto_grid", exact = TRUE))
         res$outer_grid_prior_declined      <-
             if (attempt >= 2L && prior_pinned) "prior_pinned" else NULL
         out <- list(res = res, prior = cur_prior, prior_sigma = cur_prior_sigma)
+    }
+    for (b in setdiff(copy_b, moved_b)) {
+        held <- .nl_axis_hold(prior[[b]], "sigma_grid",
+                              .nl_auto_fields_at(auto, b), type = ".copy")
+        why <- if (!is.null(held)) {
+            held
+        } else if (isTRUE(b == failed_b)) {
+            reason
+        } else if (attempt >= max_attempts &&
+                   identical(out$res$pareto_k_regime, "collapsed_edge") &&
+                   .nl_edge_axis_hit(out$res, "sigma", b)) {
+            "attempts_exhausted"
+        } else {
+            "grid_not_collapsed"
+        }
+        out$res <- .nl_decline_axis(out$res, axis_of(b), why)
+    }
+    out$res <- .nl_decline_recenter(out$res, reason)
+    out
+}
+
+# --- per-arm dispersion axes -------------------------------------------------
+#
+# A `phi_grid` axis is a hyperparameter of an ARM, not of a prior block, so it
+# is in no entry of `.NL_REGISTRY_AXIS_FIELD` and the two sigma rescues above
+# walk past it. Everything else it needs is already here: the transform registry
+# tags a `phi_<arm>` column `"log"` (`.joint_pareto_block_tags()`), the outer
+# mode/Hessian stencil varies it like any other column (`.joint_grids_from_cells()`
+# hands `grids$phi_<arm>` straight back to `.joint_phi_grid_per_arm()`), and the
+# node layout, clamp policy and decline vocabulary are the shared helpers above.
+# So what this adds is a slot source and a write target, not a second placement
+# machine (gcol33/tulpa#663).
+#
+# The axes are read off the FIT rather than off the argument: `phi_grid` accepts
+# a named or a positional list and treats a length-1 entry as no axis at all, so
+# the `phi_<arm>` columns the grid actually carries are the authority on which
+# arms have one. The driver normalises the argument to the named form before the
+# first fit, which is what lets the write target be `phi_grid[[arm]]`.
+.nl_phi_axis_slots <- function(res, phi_grid) {
+    cn <- colnames(res$theta_grid) %||% character(0)
+    nm <- cn[startsWith(cn, "phi_")]
+    if (!length(nm) || !is.list(phi_grid)) return(list())
+    arms <- sub("^phi_", "", nm)
+    keep <- arms %in% (names(phi_grid) %||% character(0))
+    lapply(which(keep), function(i)
+        list(arm = arms[i], axis = nm[i]))
+}
+
+# The provenance predicate for a dispersion axis, in the vocabulary
+# `.nl_axis_hold()` answers in. That helper's third branch -- nodes equal to the
+# engine's own default read as a default -- has no counterpart here ON PURPOSE:
+# the engine has no default dispersion axis. An arm with no `phi_grid` entry
+# carries the parse-time scalar `phi` and no axis at all, so every axis that
+# exists was written by a caller, and the ONLY thing separating a wrapper's
+# computed default from a user's pin is whether that caller said so with
+# `auto_grid()`.
+.nl_phi_axis_hold <- function(arm, auto_arms) {
+    auto_arms <- .nl_auto_fields_at(auto_arms)
+    i <- match(arm, names(auto_arms) %||% character(0))
+    if (is.na(i)) return("axis_pinned")
+    if (isTRUE(auto_arms[[i]])) return(NULL)
+    "default_axis_pinned"
+}
+
+# Which arms of a `phi_grid` argument carry the `auto_grid()` marker and whether
+# each let the pass place its axis, plus the argument with the markers removed.
+# Read at the front door, BEFORE `.normalise_phi_grid()` -- that helper coerces
+# each entry with `as.numeric()`, which drops the attributes the marker lives
+# in. A positional list is keyed through `arm_names` so the record is by arm
+# either way.
+.nl_phi_provenance <- function(phi_grid, arm_names) {
+    if (!is.list(phi_grid) || !length(phi_grid)) {
+        return(list(phi_grid = phi_grid, auto = logical(0)))
+    }
+    nm <- names(phi_grid)
+    keys <- if (!is.null(nm)) nm else
+        arm_names[seq_len(min(length(phi_grid), length(arm_names)))]
+    auto <- logical(0)
+    for (k in seq_along(phi_grid)) {
+        v <- phi_grid[[k]]
+        if (is.null(v)) next            # `attr<-`(NULL, ...) DELETES the element
+        if (k <= length(keys) && is_auto_grid(v)) {
+            auto[keys[k]] <- auto_grid_place(v)
+        }
+        phi_grid[[k]] <- .nl_strip_auto(v)
+    }
+    list(phi_grid = phi_grid, auto = auto)
+}
+
+# Would a placement pass on `axes` fire on this fit? The `"resolve"` trigger,
+# read off the weights the fit already stored, so asking costs nothing.
+#
+# The diagnose_k-independent placement stencil
+# (`.joint_attach_pareto_k_placement()`) exists for the two sigma rescues, whose
+# own trigger is the whole grid's `collapsed_edge` regime -- so it only computes
+# a mode and Hessian on such a grid. A dispersion axis is crossed onto the
+# tensor independently of the field's geometry and fires on its OWN sizing, and
+# `collapsed_interior` (weight concentrated, but the modal cell interior on every
+# axis) is precisely the regime the reported case sat in: the field SD axis had
+# been placed, the dispersion axis was 55 posterior SDs per cell, and no
+# curvature had been computed for either. This is what the placement path asks
+# to decide whether to compute one anyway.
+.nl_placement_axis_wanted <- function(res, axes) {
+    if (!length(axes)) return(FALSE)
+    cn <- colnames(res$theta_grid) %||% character(0)
+    for (a in intersect(axes, cn)) {
+        if (.nl_edge_axis_hit(res, a)) return(TRUE)
+        if (!is.null(.nl_axis_rail(res, a))) return(TRUE)
+        hs <- .nl_axis_h_over_sd(res, a, "log")
+        if (!is.finite(hs) || hs > .nl_recenter("resolve_mult")) return(TRUE)
+    }
+    FALSE
+}
+
+# A rescue refits through the ordinary driver, so the fit it hands back carries
+# no placement record at all. When two rescues fire on one fit the later one
+# would therefore report itself as the only axis placed. Carry the earlier
+# record forward and append: the per-axis vectors merge by name, the attempt
+# counter sums (it counts extra fits), and the prior-escalation flags stay with
+# whichever rescue set them.
+#
+# The per-axis decline record is carried whatever the predecessor's placement:
+# a field-SD rescue that declined leaves an UNPLACED fit, and its reason for
+# that axis is exactly what a dispersion placement must not erase. An axis the
+# new fit moved drops its old decline.
+.nl_carry_recenter_stamps <- function(new_res, prev_res) {
+    merge_named <- function(old, new) {
+        if (is.null(old)) return(new)
+        keep <- setdiff(names(old), names(new))
+        c(old[keep], new)
+    }
+    dec <- prev_res$outer_grid_axis_declined
+    if (length(dec)) {
+        dec <- dec[!names(dec) %in% new_res$outer_grid_recenter_axes]
+        dec <- merge_named(dec, new_res$outer_grid_axis_declined)
+        if (length(dec)) new_res$outer_grid_axis_declined <- dec
+    }
+    if (!identical(prev_res$outer_grid_placement, "auto_recentered")) return(new_res)
+    for (f in c("outer_grid_recenter_sd_clamp", "outer_grid_recenter_sd_used",
+                "outer_grid_recenter_sd_raw")) {
+        new_res[[f]] <- merge_named(prev_res[[f]], new_res[[f]])
+    }
+    new_res$outer_grid_recenter_axes <- unique(c(
+        prev_res$outer_grid_recenter_axes, new_res$outer_grid_recenter_axes))
+    new_res$outer_grid_recenter_attempts <-
+        (prev_res$outer_grid_recenter_attempts %||% 0L) +
+        (new_res$outer_grid_recenter_attempts %||% 0L)
+    if (is.null(new_res$outer_grid_prior_added)) {
+        new_res$outer_grid_prior_added <- prev_res$outer_grid_prior_added
+    }
+    if (is.null(new_res$outer_grid_prior_declined)) {
+        new_res$outer_grid_prior_declined <- prev_res$outer_grid_prior_declined
+    }
+    new_res
+}
+
+# PER-AXIS decline record, beside the whole-fit `outer_grid_recenter_declined`.
+# The whole-fit slot holds the reason from the ONE rescue that could have run
+# and is written only while the fit is unplaced, so on a fit where the field SD
+# axis moved and a dispersion axis did not it says `auto_recentered` and nothing
+# about the axis that stayed. That is the fit whose own `grid_coarsest_axis`
+# names the unmoved axis, so the reason it did not move has to survive the
+# placement of a different one.
+.nl_decline_axis <- function(res, axis, reason) {
+    rec <- res$outer_grid_axis_declined %||% character(0)
+    rec[axis] <- reason
+    res$outer_grid_axis_declined <- rec
+    res
+}
+
+# Per-arm dispersion auto-recenter rescue. `res` is the just-completed fit;
+# `phi_grid` the NORMALISED (named-by-arm, markers stripped) argument that
+# produced it; `refit(phi_grid_i)` reruns the fit at a modified one. `auto` is
+# the arm-name record `.nl_phi_provenance()` took at the front door.
+#
+# Trigger is per axis and matches the registry path's `"resolve"` policy rather
+# than the two sigma rescues' whole-grid `collapsed_edge` regime: a dispersion
+# axis is crossed onto the tensor independently of the field's own geometry, so
+# whether the field's grid collapsed says nothing about whether this axis is
+# sized to its own posterior. It fires on an axis that RAILS (its own marginal
+# maximal at one of its own endpoints) or that does not RESOLVE its own
+# posterior (`h / sd` past `.NL_RECENTER$resolve_mult`), and moves every
+# unpinned dispersion axis when either does -- the mode/Hessian stencil and the
+# refit are paid once per fit, not once per axis.
+#
+# Declines leave `res` and `phi_grid` untouched and record the reason per axis
+# (`.nl_decline_axis()`) as well as on the fit.
+.joint_phi_grid_rescue <- function(res, phi_grid, refit,
+                                   auto = character(0), enabled = TRUE,
+                                   max_attempts = .nl_recenter("max_attempts_joint")) {
+    out <- list(res = res, phi_grid = phi_grid)
+    slots <- .nl_phi_axis_slots(res, phi_grid)
+    if (!length(slots)) return(out)
+    axis_of <- function(s) s$axis
+    mark <- function(r, reason) {
+        for (s in slots) r <- .nl_decline_axis(r, axis_of(s), reason)
+        .nl_decline_recenter(r, reason)
+    }
+    if (!isTRUE(enabled)) {
+        out$res <- mark(res, "auto_recenter_disabled")
+        return(out)
+    }
+    held <- lapply(slots, function(s) .nl_phi_axis_hold(s$arm, auto))
+    pinned <- !vapply(held, is.null, logical(1))
+    if (all(pinned)) {
+        for (i in seq_along(slots)) out$res <- .nl_decline_axis(
+            out$res, axis_of(slots[[i]]), held[[i]])
+        out$res <- .nl_decline_recenter(out$res, .nl_reduce_decline(held))
+        return(out)
+    }
+
+    cur     <- phi_grid
+    attempt <- 0L
+    placed  <- character(0)
+    reason  <- "grid_resolves_posterior"
+    while (attempt < max_attempts) {
+        fire <- vapply(slots, function(s) {
+            if (.nl_edge_axis_hit(res, s$axis)) return(TRUE)
+            if (!is.null(.nl_axis_rail(res, s$axis))) return(TRUE)
+            hs <- .nl_axis_h_over_sd(res, s$axis, "log")
+            !is.finite(hs) || hs > .nl_recenter("resolve_mult")
+        }, logical(1))
+        if (!any(fire)) break
+
+        moved   <- list()
+        moved_axes <- character(0)
+        clamps  <- character(0)
+        sd_used <- numeric(0)
+        sd_raw  <- numeric(0)
+        declines <- character(0)
+        for (i in which(!pinned)) {
+            s  <- slots[[i]]
+            rc <- .nl_axis_recenter_from_fit_full(
+                res$pareto_k_mode_u, res$pareto_k_cov_u,
+                res$pareto_k_axis_tags, res$pareto_k_axis_names, s$axis,
+                ref_nodes = .nl_rescue_axis_nodes(res, s$axis))
+            # The RAW SD is recorded even for an axis this attempt could not
+            # place -- that reading is what says whether declining was right.
+            sd_raw[s$axis] <- rc$sd_raw
+            if (is.null(rc$nodes)) {
+                clamps[s$axis] <- rc$sd_clamp
+                declines <- c(declines, rc$reason)
+                next
+            }
+            clamps[s$axis]  <- rc$sd_clamp
+            sd_used[s$axis] <- rc$sd_used
+            moved_axes      <- c(moved_axes, s$axis)
+            moved[[s$arm]]  <- rc$nodes
+        }
+        if (!length(moved)) {
+            reason <- if (length(unique(declines)) == 1L) unique(declines) else
+                "no_usable_curvature"
+            break
+        }
+
+        for (arm in names(moved)) cur[[arm]] <- moved[[arm]]
+        attempt <- attempt + 1L
+        prev <- res
+        res  <- refit(cur)
+        res$outer_grid_placement         <- "auto_recentered"
+        res$outer_grid_recenter_attempts <- attempt
+        # The axes this attempt actually LAID, not the ones it targeted: a
+        # movable axis whose curvature came back unusable is reported as
+        # declined below, and listing it here would silence that.
+        res$outer_grid_recenter_axes     <- moved_axes
+        res$outer_grid_recenter_sd_clamp <- clamps
+        res$outer_grid_recenter_sd_used  <- sd_used
+        res$outer_grid_recenter_sd_raw   <- sd_raw
+        res  <- .nl_carry_recenter_stamps(res, prev)
+        placed <- moved_axes
+        out  <- list(res = res, phi_grid = cur)
+    }
+    # An axis the pass left alone says why, whether or not a sibling moved.
+    for (i in seq_along(slots)) {
+        if (axis_of(slots[[i]]) %in% placed) next
+        out$res <- .nl_decline_axis(
+            out$res, axis_of(slots[[i]]),
+            if (pinned[i]) held[[i]] else reason)
     }
     out$res <- .nl_decline_recenter(out$res, reason)
     out
@@ -1342,11 +2011,12 @@ is_auto_grid <- function(x) isTRUE(attr(x, "tulpa_auto_grid", exact = TRUE))
     # A prior that pins EVERY axis the table lists leaves the rescue nothing to
     # move whatever the fit did, which is the answer the joint path gives and
     # the one a caller holding their own grid expects.
-    pinned <- vapply(slots, function(s) .nl_axis_is_pinned(
+    held <- lapply(slots, function(s) .nl_axis_hold(
         blocks[[s$block]], s$field, .nl_auto_fields_at(auto, bidx(s)),
-        type = s$type), logical(1))
+        type = s$type))
+    pinned <- !vapply(held, is.null, logical(1))
     if (all(pinned)) {
-        out$res <- .nl_decline_recenter(out$res, "axis_pinned")
+        out$res <- .nl_decline_recenter(out$res, .nl_reduce_decline(held))
         return(out)
     }
 
@@ -1387,7 +2057,7 @@ is_auto_grid <- function(x) isTRUE(attr(x, "tulpa_auto_grid", exact = TRUE))
         sel <- if (identical(policy, "rail")) which(railed) else seq_along(slots)
         movable <- sel[!pinned[sel]]
         if (!length(movable)) {
-            reason <- "axis_pinned"
+            reason <- .nl_reduce_decline(held[sel])
             break
         }
 

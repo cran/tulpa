@@ -10,7 +10,11 @@ hyper_axis_spec(
   log_prior = NULL,
   log_scale = FALSE,
   bounds = NULL,
-  refinable = FALSE
+  refinable = FALSE,
+  atom_mass = NULL,
+  slab_bounds = NULL,
+  log_prior_coord = c("integration", "natural"),
+  extend = TRUE
 )
 }
 \arguments{
@@ -23,7 +27,8 @@ Cartesian product across axes.}
 
 \item{log_prior}{Optional \verb{function(x)} returning the scalar log prior
 density at axis value \code{x}. \code{NULL} (default) is a flat / improper prior
-(zero log-prior contribution).}
+(zero log-prior contribution). \code{log_prior_coord} says which coordinate the
+function is a density on.}
 
 \item{log_scale}{Logical. Does the axis live naturally on a log scale
 (\code{sigma}, \code{tau}, \code{lengthscale}, ...)? Drives geometric vs arithmetic
@@ -31,7 +36,11 @@ spacing in refinement and log-axis quantile fits. Default \code{FALSE}.}
 
 \item{bounds}{Numeric vector of length 2 giving the natural support
 \verb{(lower, upper)} of the axis, e.g. \code{c(0, Inf)} for \code{sigma}, \code{c(0, 1)}
-for a BYM2 mixing coefficient. \code{NULL} (default) is unbounded.}
+for a BYM2 mixing coefficient. \code{NULL} (default) is unbounded. A finite
+endpoint is treated as OPEN: it is the value the parameterisation
+degenerates at, so refinement clamps new points to the interior and the
+axis's quadrature cells and reported support are closed strictly inside
+it rather than half a node step past the outermost node.}
 
 \item{refinable}{Logical. When \code{TRUE}, the axis participates in the
 adaptive-grid and var-of-means consistency passes (when those are
@@ -39,10 +48,49 @@ enabled at the driver level). Spatial prior amplitudes (\code{sigma}) are
 typically left at the user-specified grid (\code{refinable = FALSE}); the
 copy coefficient \code{alpha} and per-arm dispersion \code{phi} typically opt in.
 Default \code{FALSE}.}
+
+\item{atom_mass}{Numeric in \verb{[0, 1)}, or \code{NULL} (default). Prior probability
+of the zero level on a log-scale axis. A \code{0} is a point mass, not a point
+of the log continuum, so its prior share has to be declared rather than
+inherited from the node count; the continuum nodes then share
+\code{1 - atom_mass} by quadrature weight. Required when \code{grid} contains a \code{0}
+on a \code{log_scale} axis. A \code{log_prior} on such an axis is a density on the
+continuum: it is not evaluated at the zero level and it shapes the
+continuum's share without moving the declared split, so \code{atom_mass} is
+the prior probability the fit integrates whatever the density is
+(gcol33/tulpa#624, gcol33/tulpa#626).}
+
+\item{slab_bounds}{Numeric \code{c(lower, upper)}, or \code{NULL} (default). Fixed
+support of the continuum part of the prior. A flat measure on a log axis is
+improper, so the truncation bounds are what make it a proper density and
+they are therefore a prior choice: the weights normalise over \code{slab_bounds}
+and refinement is not allowed to move outside it. \code{NULL} leaves the node
+span acting as the support, which makes the prior depend on where
+refinement put the outermost node.}
+
+\item{log_prior_coord}{One of \code{"integration"} (default) or \code{"natural"},
+naming the coordinate \code{log_prior} is a density on. The contribution is
+added to the cell's \code{log_marginal}, which the integrator weights by cell
+widths measured on the axis's INTEGRATION coordinate (\verb{log x} on a
+\code{log_scale} axis), so \code{"integration"} is carried through as written and is
+what the flat default's zero contribution is flat on. \code{"natural"} declares
+a density on \code{x} itself -- a PC prior, \code{dexp}, \code{dgamma} -- and the engine
+adds the change of variables \code{log(x)} on a \code{log_scale} axis. Every path
+that meets a declared density carries it across in one place
+(\code{.hyper_prior_carry()}). Inert on a linear axis, where the two
+coordinates coincide (gcol33/tulpa#623).}
+
+\item{extend}{Logical. On a refinable axis, may the passes place a node
+beyond the outermost value in \code{grid}? \code{TRUE} (default) lets refinement
+follow the posterior out past the declared span, which is what an axis the
+engine placed wants. \code{FALSE} confines every new node to the interior of the
+declared span: the axis is integrated more finely over exactly the range
+given, and a mode outside it shows up as mass at the edge instead of moving
+the range. Inert when \code{refinable = FALSE}.}
 }
 \value{
 An object of class \code{tulpa_hyper_axis_spec} (a validated list with
-the six fields above).
+the fields listed above).
 }
 \description{
 Builds a single axis spec for \code{\link[=tulpa_hyper_grid]{tulpa_hyper_grid()}}. Carries the candidate

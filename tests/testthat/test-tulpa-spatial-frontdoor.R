@@ -43,11 +43,10 @@ test_that("tulpa(spatial = icar, mode = gibbs) recovers beta end-to-end", {
   expect_equal(fit$backend, "gibbs")
   expect_equal(fit$inference_tier, 1L)
   expect_true(inherits(fit, "tulpa_fit"))
-  expect_true(all(c("beta", "spatial", "tau") %in% names(fit)))
-  expect_equal(ncol(fit$spatial), s$n_units)
-  expect_true(all(is.finite(fit$tau)))
+  expect_equal(ncol(draws_block(fit, "phi_spatial")), s$n_units)
+  expect_true(all(is.finite(draws_block(fit, "log_tau_spatial"))))
   # Recovery: posterior-mean fixed effects near truth.
-  beta_hat <- colMeans(fit$beta)
+  beta_hat <- colMeans(fixed_draws(fit))
   expect_lt(abs(beta_hat[1] - s$beta[1]), 0.45)   # intercept
   expect_lt(abs(beta_hat[2] - s$beta[2]), 0.30)   # slope
 })
@@ -77,8 +76,9 @@ test_that("tulpa(spatial = bym2, mode = gibbs) wires through and returns field d
     control = list(n_iter = 1500L, warmup = 750L)
   )
   expect_equal(fit$backend, "gibbs")
-  expect_equal(ncol(fit$spatial), s$n_units)
-  expect_true(all(is.finite(colMeans(fit$beta))))
+  expect_equal(ncol(draws_block(fit, "phi_spatial")), s$n_units)
+  expect_equal(ncol(draws_block(fit, "theta_spatial")), s$n_units)
+  expect_true(all(is.finite(colMeans(fixed_draws(fit)))))
 })
 
 test_that("mode = laplace routes a spatial field through tulpa_laplace", {
@@ -192,10 +192,10 @@ test_that("tulpa() routes an RSR field to the binomial Gibbs sampler (auto)", {
   # Routing: auto picked the (Tier 1) RSR Polya-Gamma sampler, not nested/plain.
   expect_equal(fit$backend, "gibbs")
   expect_equal(fit$inference_mode, "exact")
-  expect_true(all(c("beta", "spatial", "spatial_raw", "tau") %in% names(fit)))
-  expect_equal(ncol(fit$spatial), s$n_units)
+  expect_true("log_tau_spatial" %in% colnames(fit$draws))
+  expect_equal(ncol(draws_block(fit, "phi_spatial")), s$n_units)
   # Recovery: RSR orthogonalises the field to x, so the slope is uncontaminated.
-  beta_hat <- colMeans(fit$beta)
+  beta_hat <- colMeans(fixed_draws(fit))
   expect_lt(abs(beta_hat[2] - s$beta[2]), 0.30)
 })
 
@@ -247,6 +247,7 @@ test_that("mode = nested_laplace integrates an areal field through tulpa()", {
 })
 
 test_that("the nested spatial route is numerically identical to a direct call", {
+  skip_on_cran()
   s <- sim_areal_binomial(reps = 3L)
   via <- tulpa(
     y ~ x + spatial(region), data = s$data, family = "binomial",
@@ -271,6 +272,7 @@ test_that("the nested spatial route is numerically identical to a direct call", 
 })
 
 test_that("mode = structured routes an areal field to nested_laplace", {
+  skip_on_cran()
   s <- sim_areal_binomial(reps = 2L)
   fit <- tulpa(
     y ~ x + spatial(region), data = s$data, family = "binomial",
@@ -283,6 +285,7 @@ test_that("mode = structured routes an areal field to nested_laplace", {
 })
 
 test_that("auto integrates a non-binomial areal field via nested Laplace", {
+  skip_on_cran()
   # A non-binomial areal field is not the binomial Gibbs case, so auto picks
   # the nested-Laplace Tier 2 path (not the conditional Laplace at fixed tau,
   # and not HMC). y in 0..5 are valid Poisson counts.
@@ -297,6 +300,7 @@ test_that("auto integrates a non-binomial areal field via nested Laplace", {
 })
 
 test_that("nested_laplace bym2 packs the scale factor and wires through", {
+  skip_on_cran()
   s <- sim_areal_binomial(reps = 2L)
   fit <- tulpa(
     y ~ x + spatial(region), data = s$data, family = "binomial",

@@ -29,10 +29,7 @@
 #' @param family Character family name (see [family_names()]).
 #' @param backend One of `"hmc"`, `"ess"`, `"sghmc"`, `"sgld"`, `"mclmc"`,
 #'   `"smc"`, `"vi"`.
-#' @param phi Dispersion/precision passed to the family (held fixed). The
-#'   kernel parameterization: for `gaussian` / `lognormal` this is the residual
-#'   SD (the [tulpa()] front door passes `sqrt(phi)`, its `phi` being the
-#'   variance); for `t` the scale.
+#' @template phi
 #' @param phi2 Optional second dispersion: the Student-t degrees of freedom
 #'   (`family = "t"`; default 4 when `NULL`).
 #' @param offset Optional fixed additive term on the linear predictor
@@ -61,7 +58,17 @@
 #'   `sigma_beta`, `n_chains`, `max_treedepth`, `adapt_delta`, `epsilon`, `L`,
 #'   `batch_size`, `alpha`, `n_particles`, `n_mcmc_steps`, `ess_threshold`,
 #'   `vi_variant`, `vi_mc_samples`, `vi_max_iter`, `vi_max_grad_norm`,
-#'   `n_draws`, `verbose`, `mass_matrix`).
+#'   `vi_tol_grad`, `vi_tol_rel_elbo`, `vi_patience`,
+#'   `n_draws`, `verbose`, `mass_matrix`, `checkpoint`).
+#'
+#'   `checkpoint = list(path =, resume =)` is per-chain checkpoint/resume on
+#'   the NUTS/HMC kernel only (a chain is the checkpoint unit, deterministic
+#'   in seed + chain id + data + settings, so a resumed chain is bit-for-bit
+#'   identical to the uninterrupted one): every chain appends its finished
+#'   result to `path`, and `resume = TRUE` (the default) loads any finished
+#'   chains from a prior run and fits only the rest; `resume = FALSE` starts
+#'   over, removing any stale file first. Other backends refuse this key
+#'   rather than silently drop it.
 #'
 #'   `mass_matrix` selects the NUTS/HMC metric: `"diag"` (the default),
 #'   `"dense"`, `"block_diag"`, or `"auto"`. Under `"auto"` the kernel reads the
@@ -79,6 +86,19 @@
 #'   record, and the reparameterisation average every gradient divides by -- so
 #'   values below 1 are rejected. `vi_max_grad_norm` (default 10) is the
 #'   gradient-norm clip applied before every Adam step.
+#'
+#'   `vi_max_iter` is a ceiling; what ends a VI run is usually the stopping
+#'   rule, which `vi_patience` (default 50), `vi_tol_rel_elbo` (default 0.01)
+#'   and `vi_tol_grad` (default 1e-4) control. The loop stops when the ELBO
+#'   gain across the last `vi_patience` iterations -- the mean of the window's
+#'   second half minus the mean of its first -- falls to `vi_tol_rel_elbo`
+#'   times the ELBO span the run has covered, or when the gradient norm falls
+#'   below `vi_tol_grad`. Both the gain and its threshold are ELBO
+#'   DIFFERENCES, so the arbitrary additive constant in an ELBO cancels.
+#'   Setting `vi_tol_rel_elbo = 0` stops only on a window that is flat or
+#'   falling. The fit reports `vi_iterations` and `converged_reason`
+#'   (`"patience"`, `"gradient_norm"` or `"max_iter"`) so a run that stopped
+#'   short of its budget can be told from one that used it.
 #'
 #'   `epsilon` pins the step size on the stochastic-gradient backends: `"sghmc"`
 #'   runs its warmup step-size adapter only when no `epsilon` is supplied, and
@@ -137,6 +157,31 @@ tulpa_sample_glmm <- function(y, n_trials, X, family, backend, phi = 1.0,
                    length(offset), N), call. = FALSE)
     }
   }
+  # Only the NUTS branch reads n_chains; every other kernel returns one set of
+  # draws with no chain_id. The same function already hard-refuses mass_matrix
+  # and a warm start on those backends, so silence on n_chains was an omission
+  # (gcol33/tulpa#704): a caller asking for four chains got one particle set and
+  # no signal. Refuse it here, where a default is still distinguishable from a
+  # request.
+  if (!is.null(control$n_chains) && !backend %in% c("nuts", "hmc")) {
+    stop("`control$n_chains` is only read by the NUTS/HMC kernel; backend '",
+         backend, "' returns a single set of draws. Drop it, or use ",
+         "backend = 'hmc'.", call. = FALSE)
+  }
+  # Per-chain checkpoint/resume: NUTS/HMC only (a chain is the checkpoint unit),
+  # same shape and helper the nested-Laplace fitters use (gcol33/tulpa#808). A
+  # fresh (resume = FALSE) run removes any stale file once here, before the
+  # C++ kernel opens it.
+  if (!is.null(control$checkpoint) && !backend %in% c("nuts", "hmc")) {
+    stop("`control$checkpoint` is only read by the NUTS/HMC kernel; backend '",
+         backend, "' has no per-chain state to checkpoint. Drop it, or use ",
+         "backend = 'hmc'.", call. = FALSE)
+  }
+  .ckpt <- .nl_checkpoint_args(control, use_option = FALSE)
+  if (nzchar(.ckpt$path) && !isTRUE(.ckpt$resume) && file.exists(.ckpt$path)) {
+    file.remove(.ckpt$path)
+  }
+
   n_iter  <- control$n_iter %||% 2000L
   warmup  <- control$warmup %||% (n_iter %/% 2L)
   vi_max_iter   <- as.integer(control$vi_max_iter %||% 10000L)
@@ -149,6 +194,26 @@ tulpa_sample_glmm <- function(y, n_trials, X, family, backend, phi = 1.0,
     stop("`control$vi_mc_samples` must be at least 1; got ",
          format(control$vi_mc_samples), ".", call. = FALSE)
   }
+  # The stopping rule, not the budget, is what usually ends a VI run, so its
+  # three knobs are reachable from `control` (gcol33/tulpa#821). `vi_patience`
+  # is the width of the window the ELBO gain is measured over and needs two
+  # halves to compare; `vi_tol_rel_elbo` is that gain as a fraction of the
+  # run's own ELBO span, so 0 stops only on a flat or falling window.
+  vi_patience     <- as.integer(control$vi_patience %||% 50L)
+  vi_tol_rel_elbo <- as.numeric(control$vi_tol_rel_elbo %||% 0.01)
+  vi_tol_grad     <- as.numeric(control$vi_tol_grad %||% 1e-4)
+  if (is.na(vi_patience) || vi_patience < 2L) {
+    stop("`control$vi_patience` must be at least 2; got ",
+         format(control$vi_patience), ".", call. = FALSE)
+  }
+  if (is.na(vi_tol_rel_elbo) || vi_tol_rel_elbo < 0) {
+    stop("`control$vi_tol_rel_elbo` must be non-negative; got ",
+         format(control$vi_tol_rel_elbo), ".", call. = FALSE)
+  }
+  if (is.na(vi_tol_grad) || vi_tol_grad < 0) {
+    stop("`control$vi_tol_grad` must be non-negative; got ",
+         format(control$vi_tol_grad), ".", call. = FALSE)
+  }
 
   res <- cpp_tulpa_sample_glmm(
     y          = as.numeric(y),
@@ -156,7 +221,7 @@ tulpa_sample_glmm <- function(y, n_trials, X, family, backend, phi = 1.0,
     X          = X,
     family     = family,
     backend    = backend,
-    phi        = as.numeric(phi),
+    phi        = .phi_to_kernel(family, as.numeric(phi)),
     sigma_beta = as.numeric(sigma_beta),
     n_iter     = as.integer(n_iter),
     n_warmup   = as.integer(warmup),
@@ -178,6 +243,9 @@ tulpa_sample_glmm <- function(y, n_trials, X, family, backend, phi = 1.0,
     vi_max_iter   = vi_max_iter,
     vi_n_draws    = as.integer(control$n_draws %||% 2000L),
     vi_max_grad_norm = as.numeric(control$vi_max_grad_norm %||% 10.0),
+    vi_tol_grad     = vi_tol_grad,
+    vi_tol_rel_elbo = vi_tol_rel_elbo,
+    vi_patience     = vi_patience,
     offset_nullable = offset,
     re_spec       = re_spec,
     spatial_spec  = spatial_spec,
@@ -204,7 +272,8 @@ tulpa_sample_glmm <- function(y, n_trials, X, family, backend, phi = 1.0,
     # -1 keeps the layout-driven rule (on whenever an RE term is present).
     ess_joint_sigma_re = if (is.null(control$ess_joint_sigma_re)) -1L
                          else as.integer(isTRUE(control$ess_joint_sigma_re)),
-    ess_joint_proposal_sd = as.numeric(control$ess_joint_proposal_sd %||% 0.1)
+    ess_joint_proposal_sd = as.numeric(control$ess_joint_proposal_sd %||% 0.1),
+    checkpoint_path = .ckpt$path
   )
 
   # The C++ kernel names every column of the full parameter vector (fixed effects
@@ -216,6 +285,25 @@ tulpa_sample_glmm <- function(y, n_trials, X, family, backend, phi = 1.0,
     nm <- fixed_names %||% colnames(X) %||% paste0("beta", seq_len(ncol(X)))
   }
   res$param_names <- nm
-  class(res) <- c("tulpa_sample_fit", "tulpa_fit")
-  res
+  # The model the draws were laid out on, as the kernel received it. A draw row
+  # is the full parameter vector of that model, so the in-sample linear
+  # predictor at a draw is read back through the same ModelData assembly
+  # (`.tulpa_eta_draws()` -> `cpp_tulpa_glmm_eta_draws()`), fields included.
+  res$model_inputs <- list(
+    y = as.numeric(y),
+    n_trials = if (is.null(n_trials)) rep(1L, N) else as.integer(n_trials),
+    X = X, family = family,
+    phi = .phi_to_kernel(family, as.numeric(phi)),
+    phi2 = phi2 %||% NA_real_,
+    sigma_beta = as.numeric(sigma_beta),
+    offset = offset, re_spec = re_spec, spatial_spec = spatial_spec,
+    temporal_spec = temporal_spec, sigma_re_scale = as.numeric(sigma_re_scale),
+    svc_spec = svc_spec, tvc_spec = tvc_spec, zi_spec = zi_spec)
+  # The draws-provenance gate reads fit$backend to learn whether these draws are
+  # an MCMC chain, and treats an untagged fit as one. Closing without the stamp
+  # had diagnostics() computing Rhat and ESS on SMC particles and VI draws
+  # (gcol33/tulpa#693) -- the quantities the gate exists to withhold.
+  .finalize_fit(res, backend = backend,
+                param_names = nm,
+                extra_class = "tulpa_sample_fit")
 }

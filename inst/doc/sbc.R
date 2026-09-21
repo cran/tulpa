@@ -34,14 +34,15 @@ knitr::opts_chunk$set(eval = EVAL_FITS)
 #        theta  = c(beta1 = BETA[1], beta2 = BETA[2], sigma = sigma))
 # }
 # 
-# fit_one <- function(d) {
+# fit_one <- function(d, diagnose = FALSE) {
 #   tulpa_nested_laplace(
 #     y = d$y, n_trials = rep(1L, length(d$y)), X = d$X,
 #     prior = list(list(type = "iid", obs_idx = d$region,
 #                       n_units = max(d$region), sigma_grid = GRID)),
 #     family = "gaussian", phi = PHI,
 #     control = list(n_threads = 1L, keep_grid_hessians = TRUE,
-#                    auto_recenter = FALSE, progress = FALSE))
+#                    auto_recenter = FALSE, progress = FALSE,
+#                    diagnose_k = diagnose, diagnose_skew = diagnose))
 # }
 
 ## ----arms---------------------------------------------------------------------
@@ -138,6 +139,6 @@ knitr::opts_chunk$set(eval = EVAL_FITS)
 # str(pres$premises)
 
 ## ----combined-----------------------------------------------------------------
-# fit <- fit_one(d_obs)
+# fit <- fit_one(d_obs, diagnose = TRUE)
 # diagnostics(fit, sbc = res)
 

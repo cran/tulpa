@@ -1,6 +1,2947 @@
-# tulpa NEWS
+# tulpa 0.5.0
 
-## 0.2.0
+## A copy amplitude was reported, and drawn, below zero
+
+* **The copy scale's "no coupling" level keeps its own coordinate**
+  (gcol33/tulpa#854). `alpha = 0` is not a point of the copy scale's continuum;
+  it is a model in its own right, carrying a declared prior probability that
+  the grid's node count cannot move. Three readers already split the axis
+  there, all on the one rule `.hyper_axis_scale()` states -- a zero level on a
+  log-scale axis: the measure that integrates the axis weighs the level at its
+  declared probability and lays its cell widths over the continuum in log, the
+  support the fit reports covers the continuum alone, and the hyperprior folds
+  against the same predicate. The reporting geometry was the fourth reader and
+  the only one that did not split, because it took the axis's support from the
+  outer Pareto-k PROPOSAL's coordinate -- `identity`, which a proposal needs in
+  order to reach zero at all, and which says the axis is unbounded.
+
+  So the level was given a cell, half a node spacing wide, reaching below the
+  axis's own support, and two things followed from that one geometry: the
+  level's posterior mass was reproduced by no draw, and draws left the support.
+  On a 25-cell ICAR joint fit whose `alpha` nodes are 0, 0.25, 0.5 and 1, with
+  0.460 of the posterior on the level, `tulpa_hyper_draws()` put 0.000 of
+  50000 draws on it and 22.8% of them below zero, down to -0.125; the fit's own
+  reported 2.5% bound for the amplitude was -0.111. Each now reads 0.461, 0,
+  and 0.
+
+  The split is one declaration, so every read takes it: the reported interval
+  (`theta_ci_lo` / `theta_median` / `theta_ci_hi`) under either within-cell
+  construction, the moment-matched interval a CCD design is summarized with,
+  `tulpa_hyper_draws()` and the `"theta"` attribute of
+  `tulpa_posterior_draws()`, and the per-axis hyperparameter summaries. The
+  copy axis's reported resolution (`outer_grid_cell_width` /
+  `outer_grid_h_over_sd`) is now its continuum's, measured in the coordinate
+  the continuum is laid out in; the level owns no cell and so contributes no
+  width. Downstream, a consumer deriving a field SD as `alpha * sigma` no
+  longer receives a negative one.
+
+  A copy fit whose `alpha` grid carries no zero node also moves, by the same
+  correction and in the third decimal: its outermost cells are now closed half
+  a node step out in log, the coordinate the axis is spaced and integrated in,
+  rather than in the value. Nothing inside the outermost nodes changes, and no
+  axis that was already reported on its own coordinate moves at all.
+
+## The batched joint driver returned 15 of the 17 fields it promises
+
+* **A batched species carries the per-cell predictor again**
+  (gcol33/tulpa#852). `cpp_nested_laplace_joint_multi_batch()` documents each
+  element of its result as what `cpp_nested_laplace_joint_multi()` returns for
+  that species on the same grid, and since 0.4.12 it returned neither
+  `fitted_eta` nor `fitted_eta_var`: the single-species entry attached the
+  predictor and asked the inner solve for its variance, and the batch loop did
+  neither. The solve itself was never wrong -- log-marginal, mode shape and
+  modes agreed species for species -- so what was missing was the result, which
+  is what a grid-mixture predictive read draws from. Both are attached per
+  species now, under the same one-arm gate the single entry uses, and the
+  switch `control$fitted_var` sets is read in ONE place
+  (`.nl_want_fitted_var()`) so a fused species cannot integrate under a
+  different answer from the fit it reproduces.
+
+## A default axis had only the user's pin to declare itself with
+
+* **`auto_grid(x, place = FALSE)` declares a default the engine must integrate
+  as written** (gcol33/tulpaObs#361). Provenance -- whose nodes these are --
+  and placement policy -- whether the auto-placement pass may move them -- are
+  different questions, and the marker answered both at once: a wrapper package
+  that had MEASURED its own default as the one to integrate could only get that
+  by leaving the mark off, which says the user pinned the axis. The engine then
+  reported exactly that back to a user who had pinned nothing. Such an axis is
+  now treated as a pin everywhere the engine acts on it (the pass leaves it, no
+  curvature is computed for it, and refinement densifies within its span rather
+  than following the posterior past the end nodes) and reported as
+  `"default_axis_pinned"`, with `?tulpa_nested_laplace_joint`'s own lever
+  advice pointing at the package's argument rather than at a pin the reader did
+  not write. `auto_grid_place()` reads the declaration back, for a wrapper
+  rebuilding a value that `as.numeric()` stripped.
+
+* **`outer_grid_recenter_declined` reduces over the passes that wrote it.** A
+  joint fit's field SD and its per-arm dispersion are placed by two passes over
+  one grid, and the slot held whichever spoke last. An axis-scoped reason --
+  one that is a property of a single axis's declaration rather than of the
+  fit's grid, its curvature or a control knob -- no longer stands as the fit's
+  answer while a pass that had a movable axis has one. The measured case:
+  `occu_cover()` fits whose sigma axis was defaulted and simply needed no
+  placement came back `"axis_pinned"`, from the dispersion axis beside it. The
+  per-axis `outer_grid_axis_declined` record is unchanged and still answers per
+  axis.
+
+* **A dispersion axis's refinement rung follows its provenance again.** The
+  joint front door strips the `auto_grid()` markers before the first fit, so
+  nothing downstream sees an attributed numeric -- and `phi_<arm>`'s refinement
+  mode was read off that stripped grid, which made every dispersion axis read
+  as stated whoever wrote it. It now travels as the front door's own record, so
+  a marked axis is refined as placed (`"extend"`) and a pinned or held one as
+  stated (`"densify"`).
+
+## Documentation and packaging
+
+* **`pointwise_loglik()`'s `ndraws` is documented.** Its `tulpa_fit` method
+  takes the argument and the shared Rd page did not describe it, which is an
+  `R CMD check` WARNING ("Undocumented arguments in Rd file
+  'criteria_doors.Rd'") raised only when the reference manual is built.
+
+* **`ENGINEERING_HISTORY.md` is excluded from the build.** The closed-issue
+  write-ups are a repository file, not package material, and at the top level
+  of a tarball they are a non-standard file.
+
+# tulpa 0.4.12
+
+## A GP lengthscale started five times the spread of its own data
+
+* **Both continuous-time GP doors start their lengthscale at
+  `0.2 * sd(time)`** (gcol33/tulpa#851). It started at the midpoint of the
+  `(0.01, 10)` support, and both doors standardize their time values, so that
+  is a lengthscale five times the data's own spread: every pair of instants is
+  correlated to within rounding, the dense `T x T` covariance is numerically
+  rank-one, and its Cholesky jitter binds at the starting point. The runtime
+  gradient check then deviated on the LENGTHSCALE by an amount ordered by
+  kernel smoothness, and `temporal_gp(parameterization = "centered")` **fell
+  back to numerical gradients for the whole run**. Measured deviation against
+  the starting ratio lengthscale / sd(time): Matern 5/2 clean to 1.0 then
+  9.3e-04 at 2.0 and 2.4e-03 at 5.0; Gaussian clean to 0.25 then 1.2e-03 at
+  0.5, 6.5e-03 at 2.0 and 8.3e-03 at 5.0. That ladder is a floor binding, not
+  a wrong derivative -- the jitter is protecting a genuinely singular
+  factorization and is untouched.
+
+  Only the centered parameterization evaluates that log-determinant in the
+  target, which is why the non-centered default never showed it: there the
+  Cholesky enters only through `f = L z`. Both arms of both doors now pass the
+  check. `init_gp_lengthscales()` is the one starter, shared with the GP TVC
+  gcol33/tulpa#847 added it for.
+
+## Restricted spatial regression on a continuous field
+
+* **`spatial_rsr(spatial_gp(...))` is fitted** (gcol33/tulpa#848). RSR exists
+  for spatially smooth covariates -- a climate surface, elevation -- and those
+  are exactly where a continuous field is the natural prior and an areal one a
+  discretisation of convenience, so the mitigation was available only on the
+  field shape that needs it least. `cpp_pg_binomial_gibbs_gp_rsr()` is the
+  counterpart of the areal kernel: the same projection, applied each sweep to
+  an NNGP field whose prior precision is assembled from its Vecchia factors at
+  the current range rather than read off a fixed adjacency.
+
+  Measured on a confounded fixture (150 points, binomial, 5 seeds): the
+  reported field is orthogonal to the restricted design to `6.2e-15` of its own
+  scale, where an unrestricted fit's is `14.3`.
+
+* **One projector, over the observation -> field map.**
+  `.rsr_unit_projection()` was already almost map-agnostic; it now takes that
+  map by name, so the areal route passes `spatial_idx` and the continuous one
+  `obs_to_loc` and the two differ in nothing else. `tulpa()` no longer re-types
+  every `$rsr` spec as areal: the modifier keeps the field's own `$type` for
+  validation -- which is what made a continuous RSR spec demand a
+  `spatial(col)` term it has no use for -- and only the backend selector sees
+  `"rsr"`. `pg_nngp_scale_update()` is split into the sparse field sweep and
+  the hyperparameter update, so the projected kernel reuses the second without
+  the first, which its dense conditional replaces.
+
+* **What the restriction buys is the MARGINAL association**, not a less biased
+  version of the slope conditional on the field. `?spatial_rsr` now says so,
+  with the measurement (5 seeds, conditional slope 1.0, marginal 1.71:
+  restricted fit 0.06 from the marginal value and 0.74 from the conditional,
+  unrestricted 0.10 and 0.63) and with the coverage caveat the method carries:
+  Hanks et al. (2015) measured poorer coverage under RSR than under the
+  unrestricted spatial model in the geostatistical setting, and Khan and Calder
+  (2022) report the same areally. Those references are on the page now; the
+  capability is offered with them rather than without.
+
+# tulpa 0.4.11
+
+## A coefficient can evolve as a continuous-time GP
+
+* **`temporal_tvc(structure = "gp")` is fitted** (gcol33/tulpa#847). `rw1`,
+  `rw2` and `ar1` read the time index as a position on a grid, so a ten-fold
+  gap and a unit gap are penalised alike; `gp` is the continuous-time
+  structure, a Gaussian process over the distinct time VALUES. It is not a
+  second spelling of [temporal_gp()]: that is a GP over time entering the
+  linear predictor additively (`eta_i += f(t_i)`), where this one IS the
+  coefficient (`eta_i += x_i w(t_i)`).
+
+  Measured on 24 irregularly-spaced instants (exponential gaps, poisson,
+  n = 288) against a smooth true trajectory: the GP recovers it at
+  **cor 0.999 / RMSE 0.042**, the `rw1` that assumes the spacing away at
+  **0.989 / 0.114**. `temporal_tvc()` gains `cov` / `nu` / `period` /
+  `scale_coords`, and `sigma_prior_U` / `sigma_prior_alpha` are read on this
+  structure too -- the same anchor pair, whether the field samples a
+  log-precision or a log-variance.
+
+* **One kernel, read by both doors.** The Ornstein-Uhlenbeck chain that makes
+  the exponential kernel `O(T)` was written inline in
+  `compute_temporal_prior()`; it is now `ou_chain()` / `ou_log_density()` /
+  `ou_forward()` in `src/temporal_gp_kernel.h`, which both densities call, so
+  the transform's scale and the centered conditional variance stay one number
+  and the correlation floor binds at one place. The kernel's own validation is
+  likewise one `read_temporal_gp_kernel()` at the C++ spec boundary and one
+  `.check_temporal_gp_kernel()` in R.
+
+* `TULPA_ABI_VERSION` 43 -> 44. `TVCData` gained the distinct `time_values`
+  and the kernel fields the GP structure reads, `ModelData` the lengthscale
+  bounds, and `ParamLayout` the per-coefficient `log_sigma2_tvc_gp` /
+  `logit_phi_tvc_gp` spans. A model package linking against tulpa rebuilds.
+
+## A GP lengthscale started five times the spread of its own data
+
+* **A bounded lengthscale started at the midpoint of its support, which is not
+  a place any fit wants to begin.** The support defaults to `(0.01, 10)` and
+  the time values are standardized, so the start is a lengthscale five times
+  the data's own spread: every pair of instants is correlated to within
+  rounding, the dense `T x T` covariance is numerically rank-one, and its
+  Cholesky jitter binds. The runtime gradient check then deviates on the
+  LENGTHSCALE, ordered by kernel smoothness -- Matern 5/2 clean up to a ratio
+  of 1.0 then 9.3e-04 at 2.0; Gaussian clean up to 0.25 then 1.2e-03 at 0.5
+  and 8.3e-03 at 5.0. That ladder is a floor binding, not a wrong derivative.
+
+  A GP TVC now starts at `0.2 * sd(time)` (`init_tvc_gp_lengthscale()`), and
+  all four kernels pass the check. `temporal_gp(parameterization =
+  "centered")` starts at the midpoint still and reproduces those deviations to
+  the last digit, which is what attributes them; it is gcol33/tulpa#851.
+
+* `temporal_corr()` reported a GP lengthscale as the logit's position in the
+  unit interval rather than as the lengthscale it maps to, and now reports the
+  lengthscale. It also reports a GP TVC's own amplitude and lengthscale, which
+  it carried no pattern for.
+
+# tulpa 0.4.10
+
+## A joint fit integrated a dispersion it could not predict with
+
+* **A `tulpa_nested_laplace_joint()` fit stored no linear predictor, so the
+  dispersion axis it had paid to integrate reached no predictive read**
+  (gcol33/tulpa#850). gcol33/tulpa#825 taught `posterior_predict()`,
+  `bayes_R2()` and the pointwise log-likelihood to sample at the cell's own
+  `phi_<arm>` value, and the two halves never met: a fit that CARRIES such an
+  axis comes from the joint driver, which left `modes` behind and no per-cell
+  eta, while a fit that REACHES the grid-mixture draw comes from the `tulpa()`
+  front door, where `phi_grid` is not an argument. The contract was implemented
+  and untestable on a real fit.
+
+  `cpp_nested_laplace_joint_multi()` now attaches `fitted_eta` by replaying the
+  driver's own eta accumulator at each cell's stored mode, so the arm's offset,
+  every block kind and each cell's block scaling are the ones the inner solve
+  used. A cell the cheap screen pruned reads `NA` rather than a predictor
+  evaluated at the zero row the grid runner left it -- the predicate is the
+  cell's own `log_marginal`, not the mode row's contents. `fitted_eta_var`, the
+  within-cell spread a replicate is drawn with, follows `control$fitted_var`
+  (new on this front door, `TRUE` by default) rather than being pinned off, and
+  is requested only at one arm, where the mean it belongs to is stored.
+
+* **The per-cell side data now travels through refinement from one table.**
+  Three sites listed which fields a refinement pass carries cell for cell --
+  slice the initial result, slice a pass's result, glue the merged list back --
+  and a field added to one and not the others indexes the grid the fit had
+  BEFORE refinement. They read one `.JOINT_CELL_FIELDS` table. Local-CCD
+  refinement rebuilds the grid from its own node solves and carries neither, so
+  it drops the predictor rather than leaving it to be read against cells that
+  are no longer the fit's.
+
+* **A one-arm joint fit resolves its response, design and offset off the arm.**
+  A joint fit carries a family, a dispersion, a response and a design PER ARM,
+  and `$y` is a per-arm list, so `fitted()`, `residuals()`, the criteria layer
+  and `.resolve_obs()` were reading flat fields a joint fit does not have --
+  `fitted()` failed on the missing `$model_matrix` and the criteria read
+  refused for a missing family. One predicate, `.tulpa_single_arm()`, answers
+  it for all of them, and the resolved design carries the fit's own
+  `$fixed_names`, which is that arm's column naming by construction.
+
+* `test-posterior-predict-phi-axis.R`'s third claim runs on a real fit instead
+  of a hand-built grid standing in for one: the dispersion contrast is the same
+  fit with one grid column pinned, so the per-cell predictor, the within-cell
+  variance, the weights and the cells each replicate is drawn in are identical
+  and only the dispersion moves.
+
+# tulpa 0.4.9
+
+## An SPDE field beside a random intercept pinned the RE SD at 1
+
+* **`tulpa(y ~ x + (1 | g), spatial = spatial_spde(...))` conditioned the
+  random-effect SD instead of integrating it**, under `mode = "auto"`,
+  `"structured"` and an explicit `"nested_laplace"` alike
+  (gcol33/tulpa#817). All three resolve to the `spde` backend, whose outer
+  grid is `(range, sigma)` and whose `sigma_re` is a scalar it conditions on,
+  so on the path whose whole point is integrating the hyperparameters the RE
+  was the one variance component never estimated -- held at the default of 1,
+  a number the data never produced.
+
+  The generic nested driver already carries an `spde` block type, so the field
+  now goes there as a block beside the RE term's own `iid` block and both SDs
+  sit on one outer grid. `theta_grid` gains a third axis, and
+  `tulpa_hyper_draws()` reports a posterior for it. Measured over
+  `sd_re` in {0.2, 0.8, 2.0} x 8 seeds, the integrated posterior mean comes out
+  **0.268 / 1.175 / 2.727** -- monotone in the truth and the right order of
+  magnitude, against the flat 1 the conditioned path used whatever the data
+  said. The fixed-effect slope barely moves (mean |error| 0.063 vs 0.076 at
+  `sd_re = 0.2`, 0.072 vs 0.092 at 2.0, inside a seed-to-seed spread of ~0.07),
+  so this is about the variance component being estimated at all.
+
+* Supplying `sigma_re` still conditions, as the degenerate one-node case of
+  the same axis rather than a second route. An SPDE field with no RE term
+  still reaches `fit_spde()` -- the redirect is narrowed, not removed. Integer
+  `nu` only: fractional `nu` is the operator-based rational construction
+  `fit_spde()` owns, and it refuses a random effect regardless.
+
+## Two constructors took arguments that no backend could fit
+
+* **`temporal_tvc(structure = "gp")` was documented and accepted, and refused
+  by every mode** (gcol33/tulpa#814): the sampler entry has no GP branch and
+  the Laplace-family modes carry no TVC field at all. Worse, the Laplace-mode
+  refusal recommended `mode = "exact"` without checking the structure, so for
+  `"gp"` it pointed at a mode that also refuses. `structure` now takes the
+  three the TVC block's density has a branch for, `"gp"` is named explicitly
+  with a pointer to the wiring issue (gcol33/tulpa#847), and the wrong-mode
+  message only recommends `mode = "exact"` when that mode would in fact take
+  the spec -- one predicate, `.tvc_structure_or_stop()`, asked by both.
+
+* **`spatial_rsr(spatial_gp(...))`, the `?spatial_rsr` example, could not be
+  fitted by any mode** (gcol33/tulpa#815). The projection is applied by one
+  kernel, `cpp_pg_binomial_gibbs_rsr()`, which conditions on an areal
+  neighbour list; `tulpa()` re-typed every `$rsr` spec as areal, then demanded
+  a `spatial(col)` term and failed on the missing adjacency with "non-numeric
+  matrix extent" -- a message about neither the spec nor the argument. A
+  non-areal spec is now refused at construction, where the argument that
+  caused it is still in hand, and the `@param` and the opening example use an
+  areal field. The capability for continuous fields is gcol33/tulpa#848.
+
+# tulpa 0.4.8
+
+## Fractional-nu SPDE took minutes where integer nu takes seconds
+
+* **The BRASIL rational-approximation search ran once per outer grid cell, in
+  R** (gcol33/tulpa#818). The fractional path assembles its own rational
+  operator per `(range, sigma)` cell, and each assembly ran
+  `.spde_rational_roots()` from scratch on that cell's own spectrum interval.
+  Measured on the issue's fixture: **1102 calls for a single n = 40 fit, 1049
+  of them at distinct spectrum ratios**, at ~0.55 s apiece -- 606 s of the
+  616 s the fit took. Caching cannot help (the ratios are distinct), and
+  sharing one wide interval across the grid is not free either: at order 2 the
+  minimax error of `x^{-beta}` is 7.2e-07 on `[0.5, 1]` but 1.6e-02 on
+  `[0.01, 1]`, and the fit visits ratios down to 2.9e-06.
+
+  The search is now compiled (`src/brasil.h`), 49x faster per call, with
+  `R/brasil.R` kept as the reference oracle and pinned to it by
+  `test-brasil-cpp-oracle.R`. **n = 120, the issue's headline case: `nu = 1.5`
+  647 s -> 45.9 s, `nu = 0.5` 600 s -> 51.0 s; n = 40 `nu = 1.5` 321 s ->
+  32.2 s.** The fitted coefficients are unchanged (n = 40, `nu = 1.5`: 0.313,
+  0.630, the values the issue logged), and the two implementations agree on
+  the roots to 1.5e-07 relative across orders 1-4, five `beta`, four spectrum
+  ratios.
+
+## The VI stopping rule was scaled by a quantity with no scale
+
+* **`vi_max_iter` was almost never what ended a VI run** (gcol33/tulpa#821).
+  The loop stopped on a patience rule that counted an iteration as "no
+  improvement" when its ELBO gain was below `tol_rel_elbo * |ELBO|`. An ELBO
+  carries an arbitrary additive constant -- the normalizing terms of the
+  likelihood and the prior -- so `|ELBO|` is not the scale of anything, and at
+  ELBO ~ -742 the 1% default made any gain under **7.4 nats per iteration**
+  count as no progress. Fifty of those stopped the run. Testing each iteration
+  separately also let the rule discard up to `patience` times its own
+  tolerance.
+
+  The rule now compares the ELBO gain ACROSS the patience window -- the mean
+  of its second half minus the mean of its first -- against
+  `tol_rel_elbo * (best - worst)`, the span the run has covered. Both sides
+  are differences, so the additive constant cancels;
+  `test-vi-stopping-rule.R` pins that the stop does not move when a whole run
+  is shifted by up to 1e5 or rescaled by 100x.
+
+* **The three tolerances are now `control` knobs** -- `vi_tol_grad`,
+  `vi_tol_rel_elbo`, `vi_patience` -- and a VI fit reports `vi_iterations` and
+  `converged_reason` (`"patience"`, `"gradient_norm"` or `"max_iter"`), so a
+  run that stopped far short of its budget can be told from one that used it.
+  `converged = TRUE` alone could not express the difference.
+
+## A tier-2 test read a draw column by a name the fit stopped using
+
+* **`test-spde-re.R:68` errored on `fit$draws[, "beta[2]"]`** and had been
+  erroring since the fixed-effect names became the resolved ones
+  (gcol33/tulpa#846). The assertion that subscript guards is the slope
+  recovery for the exact SPDE sampler, so it had not run at all. Read by the
+  name the fit carries it passes: `mean(draws[, "x"]) = 0.9467` against a
+  truth of 0.8, well inside the 0.3 gate.
+
+## The R family registry had no test tying it to the compiled kernels
+
+* **Added `test-family-registry-compiled.R`, covering every entry of
+  `family_names()`** (gcol33/tulpa#824). `mala()` / `pathfinder()` /
+  `imh_laplace()` build their target from the R registry through
+  `build_glmm_logpost()`, and `glmm_weights()` rebuilds the Laplace Hessian
+  from it for the post-fit marginal SEs on GP / NNGP / HSGP / SPDE fits, while
+  every other backend runs the compiled kernels. The existing cross-checks
+  reached 7 non-canonical families; plain gaussian, poisson, binomial,
+  neg_binomial_2, gamma and beta had none. The log-likelihood and score agree
+  across all 14 to machine precision. The curvature did not:
+
+* **`glmm_weights()` returned the expected weight where the engine's Laplace
+  Hessian carries the observed one.** The compiled `neg_binomial_2` branch
+  deliberately returns `(y + phi) phi mu / (mu + phi)^2` -- and
+  `working_weight_is_observed()` names it -- while the registry's y-free
+  `weight` is the expected `mu phi / (mu + phi)`. At `phi = 1.7`, `eta = 1.3`,
+  `y = 9` those are 2.315 and 1.162. Every `vcov()` / `confint()` that
+  reconstructs `H = D'WD + Q` on a neg_binomial_2 spatial fit used a different
+  curvature from the fit. `glmm_weights()` now takes `y` and routes through
+  the compiled predicate, so the weight it returns is the one the fit used for
+  every family; `y` is required exactly where it changes the answer.
+
+* **`.family_obs_weight()` substituted the expected weight for six
+  families.** It answered from the registry's `obs_weight` closure where one
+  was registered and fell back to the y-free `weight` where none was -- exact
+  only where the response enters the log-likelihood linearly in `eta`. For
+  beta, gamma, inverse_gaussian, beta_binomial, tweedie and t it is a
+  different function and can carry the **opposite sign**: at `y = 12`,
+  `eta = -0.9` the beta_binomial observed curvature is -0.125 against an
+  expected weight of +0.658. `beta_binomial` is in `.ZI_FAMILIES`, so the
+  zero-inflation mixture in `R/family_zi.R` differentiated through the wrong
+  one. It is now one compiled path (`cpp_family_obs_weight()`) for every
+  family, with the three registry closures kept as the R oracle it is pinned
+  against.
+
+# tulpa 0.4.7
+
+## `tulpa_posterior_draws()` sampled hyperparameters as bare grid-node atoms
+
+* **A draw's hyperparameter value was the chosen cell's grid coordinate, with
+  no within-cell spread at all** (gcol33/tulpa#823). The latent half of a draw
+  gets a genuine within-cell Gaussian (`.nl_mixture_draw()`'s `draw_cell()`);
+  the hyperparameter half had nothing, so every consumer read
+  `theta_grid[attr(draws, "cells"), col]` and a fit integrating a 5-node
+  `sigma` axis produced draws taking 5 distinct values on it whatever the
+  sample size. That is the object gcol33/tulpa#337 described -- "the read
+  collapses each box to its midpoint" -- which #337 and #353 fixed for the
+  reported interval (`.nl_summary_quantile()`) and nowhere else.
+
+  `tulpa_hyper_draws(fit, cells)` is the new door, and
+  `tulpa_posterior_draws()` attaches it as `attr(., "theta")` so a consumer
+  reading the attribute is correct by default. **It is not a new
+  construction.** Each within-cell read the engine ships already defines a
+  density on an axis and each is a per-cell mixture with a closed-form
+  component, so what a draw samples is that component conditional on its own
+  cell: `Uniform(e_c, e_{c+1})` over the cell's own box under `box_uniform`,
+  and an equal mixture of `Uniform(v_{c-1}, v_c)` / `Uniform(v_c, v_{c+1})`
+  under `chord`. Summed over cells each reproduces the read it came from
+  exactly, so the draws' own quantiles reproduce the fit's `theta_ci_lo` /
+  `theta_median` / `theta_ci_hi` -- measured to 5e-3 at 4e5 draws on a two-axis
+  fixture and to 2e-3 on an end-to-end BYM2 fit, against numbers produced by
+  CDF inversion in a separate code path. Neither conditional reads the
+  weights, so the continuization cannot disagree with the sampler that chose
+  the cell.
+
+  The attachment runs with the RNG restored: the latent draws are formed
+  before it and are bit-for-bit what they were, and an existing `set.seed()`
+  script's downstream numbers do not shift because an extra attribute appeared.
+  An explicit `tulpa_hyper_draws()` call consumes the stream, as a draw should.
+
+  An axis whose support does not admit the box read falls back to `chord` and
+  one that reaches no CDF at all (a CCD moment rule) keeps its node value, both
+  recorded per axis in `attr(., "within_cell")` /
+  `attr(., "within_cell_declined")` from the vocabulary
+  `.nl_summary_quantile_read()` already uses.
+
+* **What the atom actually costs, measured against an exact posterior.** On a
+  scalar-hyperparameter fixture whose grid `log_marginal` is the analytic
+  log-likelihood plus prior -- so the outer read is the only thing under test
+  and the exact posterior CDF is available as a reference arm -- 400
+  prior-predictive replicates at 5 nodes: the node-atom PIT takes 185 distinct
+  values against 400 for the exact posterior, and its uniformity test is
+  rejected outright (KS p = 0.0000 against 0.92 exact); the continuized PIT
+  takes 357 and reads 0.34. The rate at which the atom pins the PIT to exactly
+  0 or 1 EQUALS the rate at which the truth falls outside the node range
+  (0.015 / 0.035 / 0.022 over three configurations, to the digit); the box
+  read's outer half-cell takes it to 0.005 / 0.000 / 0.007 against the exact
+  arm's 0.005 / 0.002 / 0.000. At 15 nodes the atom is nearly harmless
+  (KS p 0.092), which is the sense in which this is a coarse-grid defect.
+
+  **A truth-correlated PIT is not on its own evidence of this defect**, which
+  #823's own reading assumed. The same measurement with an exact-posterior arm
+  gives Spearman `cor(truth, pit)` of +0.490 exact against +0.472 atom at
+  n = 5, +0.281 against +0.286 at n = 20, and -0.029 against -0.036 at
+  n = 200: the correlation is a property of how informative the data are about
+  the hyperparameter, and a weakly identified one produces it under the EXACT
+  posterior too. What the atom provably breaks is uniformity. Any re-read of
+  the occu_cover SBC evidence needs a reference arm before a quartile-bucketed
+  rate is scored against a flat 0.10.
+
+# tulpa 0.4.6
+
+## Four audit findings: a continuous field + RE combination auto could not carry, the field missing from every non-nested spatial fit's linear predictor, an inline field fit's response stored as a list, and a singular MCAR fixed-effect covariance
+
+* **`spatial_gp()` (nngp / hsgp) with a `(1 | g)` term could not be fitted by
+  `mode = "auto"` or `mode = "nested_laplace"`** (gcol33/tulpa#794): the RE term
+  turns the fit into a multi-block prior, and the multi-block converter behind
+  `nested_laplace` (`.nl_block_spec_for_cpp()`) has no `gp` / `nngp` / `hsgp`
+  arm, so both errored ("Block type '...' is not supported in multi-block
+  priors") after building the full outer grid. `auto_select_mode()` now
+  refuses `nested_laplace` for this combination and falls back to the exact
+  ModelData NUTS sampler (`hmc`), which threads the field directly; an
+  explicit `mode = "nested_laplace"` now refuses up front with a message
+  naming `mode = "laplace"` / `mode = "exact"` instead of reaching the deep
+  C++ error. An areal field (icar / bym2 / car_proper) + RE is unaffected.
+* **`posterior_predict()`, `simulate()`, WAIC and LOO omitted the field**
+  on conditional-Laplace spatial fits (icar / car / car_proper / bym2),
+  Polya-Gamma Gibbs fits, and inline `spatial()` / `temporal()` field fits
+  (gcol33/tulpa#795): the in-sample linear predictor fell back to a
+  fixed-effects-only assembly, so replicates and pointwise log-likelihoods
+  understated the model by its whole spatial/temporal structure --
+  `compare_models()` ranked the same model fitted two ways 153 elpd units
+  apart. `.tulpa_eta_draws()` now reads the field's posterior-mean
+  contribution off a conditional-Laplace fit's own mode (the same
+  `(n_field, Z_field)` design each `.marginal_H_beta_*` areal helper already
+  builds), the field's own sampled `phi_spatial[k]` / `theta_spatial[k]`
+  draws off a Gibbs fit, and the field's weighted-mode posterior mean
+  (computed at fit time) off an inline joint field fit.
+* **An inline `spatial()` / `temporal()` field fit's `$y` was the joint
+  driver's per-arm response LIST, not the response vector** (gcol33/tulpa#796):
+  every diagnostic reading `fit$y` (`residuals()`, `pit_residuals()`,
+  `moran_i()`, `test_dispersion()`, `check_model()`, `pp_check()`, ...) errored
+  with a coercion failure, and `fit$n_trials` was always `NULL`. Both
+  constructors now overwrite `$y` / `$n_trials` / `$phi` from the bundle the
+  fit was actually built from, in one shared finalizer the two share.
+* **An inline correlated (MCAR) field's fixed-effect standard errors read
+  ~75** where the uncorrelated (`||`) fit of the same data read 0.08, and
+  `coef()` moved between identical calls (gcol33/tulpa#797): the sum-to-zero
+  constraint treated a `p`-field MCAR block's `p * n_units` latent as ONE
+  group instead of `p` groups of `n_units`, leaving one of the block's `p`
+  near-null constant directions unconstrained. `.joint_constraint_cols()` now
+  emits one group per field for an `mcar` block.
+
+* **`mode = "auto"` still selected backends that refused the very call that
+  selected them** (gcol33/tulpa#769): a `ziformula` sent the default MALA arm,
+  the latent/spatial nested arm, and a temporal-only model (no arm existed for
+  one at all) to a backend without a zero-inflation channel, and the slope
+  redirect applied after selection ignored the call's features entirely (a
+  `(1 + x | g)` model with `weights` picked MALA, then was force-redirected to
+  `re_cov_gibbs`, which also refuses weights). Every arm in `auto_select_mode()`
+  now consults `.auto_backend_ok()` and falls back to the exact ModelData NUTS
+  sampler (`hmc`) where it carries the call and nested Laplace does not (areal
+  icar/bym2/car_proper and continuous gp/nngp/hsgp fields; not SPDE or plain
+  intrinsic `car`, which `hmc` does not thread); the slope redirect re-checks
+  both RE-covariance integrators before redirecting and refuses, naming the
+  conflicting feature, when neither carries the call. The `spatial_multiscale
+  (approx = "hsgp")` advice text no longer recommends a nested-Laplace mode,
+  which refuses multi-scale fields entirely.
+* **A `control` knob only some OTHER backend reads passed `tulpa()`'s union
+  check and was then silently ignored** (gcol33/tulpa#770): `control$seed` on
+  `mode = "mala"` / `"imh_laplace"` / `"pathfinder"` did nothing (two runs with
+  the same seed gave different draws), `mala`'s `n_chains` / `thin` were
+  dropped, and `mode = "agq"` accepted `n_iter` / `seed` / `n_chains` / `thin`
+  with no effect (`agq_fit()` is a marginal-likelihood maximizer with no
+  sampler knobs at all). `mala()`, `imh_laplace()` and `pathfinder()` now take
+  a scoped `seed` argument; `tulpa()` re-validates `control` against the
+  selected backend's own key set once the backend is fixed, so an unread knob
+  now errors naming what is actually allowed instead of doing nothing.
+* **`mode = "re_cov_gibbs"` on a model with no random-effect term failed with
+  the internal C++ message `` `blocks` must hold at least one block ``**
+  instead of the plain refusal `re_cov_nested` already gives for the same call
+  (gcol33/tulpa#771). `tulpa_re_cov_gibbs()` now refuses before the pilot solve.
+* **`plot_diagnostics()` errored `argument is of length zero` on any fit with
+  no posterior draws** (`mode = "laplace"`, `fit_spde()`, `tulpa_eb()`, ...)
+  instead of the same draws-provenance message `plot_rhat()` / `plot_ess()`
+  give (gcol33/tulpa#772). It now gates on `.tulpa_is_chain()` like its
+  siblings.
+
+# tulpa 0.4.4
+
+## Five audit findings: dropped offsets, EP quadrature, tweedie accessors, SPDE NUTS
+
+* **`offset()` was silently dropped by `agq`, `ep` and `gibbs`, including when
+  `mode = "auto"` routed a binomial areal model to `gibbs`** (gcol33/tulpa#764).
+  `agq_fit()` now threads the offset into the shared compiled GLMM oracle
+  (`cpp_glmm_oracle_make()` takes an `offset` argument); `ep_fit()` /
+  `tulpa_ep()` fold it into each site's cavity before matching tilted moments
+  and un-fold it from the site update, so the fitted posterior is over the
+  fixed effects alone. The Polya-Gamma kernels behind `gibbs` carry no offset
+  term at all, so it is refused there (as `re_cov_gibbs` already did) rather
+  than dropped, and `carries_offset` is now declared on `agq` (`TRUE`), `ep`
+  (`TRUE`) and `gibbs` (`FALSE`) so `mode = "auto"` steers away from `gibbs`
+  under an offset instead of silently fitting the wrong model.
+* **`mode = "ep"` returned wrong coefficients with `converged = TRUE` on
+  inverse_gaussian, neg_binomial_1 and large-count poisson** (gcol33/tulpa#765).
+  The per-site tilted moments were Gauss-Hermite quadrature with the nodes
+  placed on the cavity; when the likelihood in eta is much narrower than the
+  cavity (a large count) or flat over part of it (inverse_gaussian, log link),
+  the fixed cavity-centred rule misplaces or misses the mass and a site's
+  variance can collapse to its numerical floor. `.ep_tilted_moments()` now
+  finds each site's own tilted mode and curvature and lays the quadrature
+  there instead (self-normalized importance reweighting against that Gaussian
+  proposal, exact for any placement -- the old cavity-centred rule is the
+  special case where the proposal equals the cavity). A site whose mode search
+  ran into its bracket, or whose variance still floors, is recorded
+  (`n_site_not_converged`, `n_site_floored`) and turns `converged` `FALSE`
+  rather than reporting a silently unresolved site as a success.
+* **Every accessor on a `family = "tweedie"` ModelData sampler fit errored**
+  `family 'tweedie' needs phi2 ...` (gcol33/tulpa#766): the fit records `phi2`
+  in `$model_inputs`, but the sampler-layout probe (`cpp_tulpa_glmm_layout()`,
+  behind `coef()`, `summary()`, `confint()`, `vcov()`, `fitted()`, `print()`,
+  and the warm-start layout) hardcoded it to `NA_REAL`. `phi2` is now a real
+  argument threaded from `mi$phi2` / `args$phi2`.
+* **The SPDE Tier-1 NUTS route (`fit_spde(mode = "nuts")` /
+  `tulpa_nuts_spde()`) crashed with an internal `vector::_M_default_append`
+  when `n_iter <= n_warmup`, silently dropped `control$warmup` (the
+  `tulpa()`-wide spelling), and silently ignored `control$n_chains`**
+  (gcol33/tulpa#767). `tulpa_nuts_spde()` now validates `0 <= n_warmup <
+  n_iter` at entry; `.control_subset()`'s `n_warmup`/`warmup` alias is now
+  symmetric (it used to rewrite only `n_warmup -> warmup`, never the reverse,
+  so a fitter listing `n_warmup` alone silently lost a `warmup` argument); an
+  explicit `n_chains != 1` on this single-chain route is now refused rather
+  than ignored.
+* **An explicit `mode` was replaced by a different backend with no override
+  recorded, in two places** (gcol33/tulpa#768). An SPDE field under any
+  explicit Tier-1 backend other than the natural `mode = "exact"` / `"hmc"`
+  route (e.g. `mode = "gibbs"`) is fitted by the SPDE NUTS engine without going
+  through `.sel_redirect()`, so the override was invisible on the fit and
+  never warned about; it now is, via the same `sel$overridden` / `notify`
+  mechanism every other backend redirect uses. An areal + temporal field
+  redirected every non-ModelData selection to `nested_laplace` with
+  `notify = FALSE`, which is right for a Tier-2 `mode = "laplace"` request
+  (nothing is lost) but wrong for an explicit Tier-1 request (`gibbs`, `mala`,
+  `imh_laplace`, ...), which loses its exact-sampler tier to a Tier-2
+  approximation; `notify` now follows whether the ORIGINAL selection was
+  Tier-1, not just whether the backend name changed.
+
+# tulpa 0.4.3
+
+## Polya-Gamma Gibbs routes sample their stated posterior
+
+* **The negative-binomial iid, NNGP and multiscale NNGP Gibbs kernels removed
+  a proper field's mean into the intercept every sweep** (gcol33/tulpa#761).
+  That projection moves the state along a direction the field's prior and the
+  intercept's prior both score, while the scale conditionals read the
+  un-centred model, so no joint density was the one the chain left invariant.
+  The level a proper field shares with the intercept is now drawn from its full
+  conditional, a Gibbs step for the intercept with the sum `intercept + field`
+  held, which is Gaussian because both priors are and does not involve the
+  likelihood. An intrinsic field (ICAR, RW1, RW2) keeps its level removed. Each
+  route records `log_prob`, and `logLik()` reads it.
+  Scored against an adaptive random-walk Metropolis chain on the same log
+  density: on a 6-group negative-binomial fixture the posterior median of
+  `sigma_re` was 0.535 against 0.635 and the intercept's 90% interval 0.321
+  wide against 1.023; it is now 0.634 and 1.025. On a 10-location binomial
+  NNGP fixture the median of `sigma2` was 0.0044 against 0.448, and is now 0.400
+  (batch-means standard errors 0.026 and 0.020) with its 5% quantile at 0.008
+  against 0.036; the intercept, slope and range quantiles agree to within 0.041.
+  Scripts: `dev_notes/issue761/`.
+* **An intrinsic field's sweep ignored the intercept prior its level carries**
+  (gcol33/tulpa#763): binomial ICAR, BYM2's structured part, the
+  negative-binomial ICAR route, and the temporal RW1 trend and cyclic RW1
+  seasonal arms. The centring these kernels apply is a map onto a
+  representative of a target that is invariant under the intercept/level
+  translation, which is exact only if the field's site conditionals include
+  `N(intercept + level; 0, sd^2)`. They left it out, so the level took a flat
+  prior. Each site now carries that factor through a running field sum
+  (`PgInterceptLevel`). On a 3x3 ICAR fixture with `prior_beta_sd = 0.7`, the
+  intercept median was 2.157 against the recorded model's 2.073 and `tau` was
+  1.208 against 1.322; it is now 2.0725 and 1.321.
+
+## A free-covariance block's prior design is declared, not inferred
+
+* **An MCAR / MIID block read its prior coordinates off the rows being
+  evaluated** (gcol33/tulpa#762), so a batch of a tensor grid's rows (importance
+  draws, adaptive-grid seeds, a local-CCD cloud) is a tensor in no coordinates
+  and lost the Sigma prior: 7 rows of the default two-field grid read 2.39 to
+  4.12 nats above the whole grid. A joint grid repeats a block's rows once per
+  row of the other blocks, so an MCAR block beside any other integrated block
+  folded no Sigma prior at all and measured its cells as `NA`. The design is now
+  resolved once off the declared per-block grid (`.hp_declare()`,
+  `.joint_multi_declared_axes()`), the fold evaluates the density at any rows in
+  that design's coordinates, and the cell measure reads the same declared
+  design, so an adaptive subset of the tensor is measured on its own levels.
+  Points laid in the grid's log-Cholesky columns (a CCD design and its
+  mode-find, the outer k-hat's importance draws) read the log-Cholesky form of
+  the prior, which is the two-field density carried by the map's Jacobian;
+  a CCD-integrated MCAR fit, which had declined the prior on the design, now
+  carries it.
+
+## The HSGP-ST interaction refuses the non-centred flag
+
+* **`st_parameterization = 1` on an HSGP-ST interaction ran the Knorr-Held
+  Type IV Kronecker branch** (gcol33/tulpa#759), which reads neither HSGP
+  hyperparameter and treats basis weights as sites. The non-centred transform is
+  the Kronecker form's, and one predicate (`st_non_centered()`) now decides it
+  for the density and the mass override; the layout refuses the combination by
+  name. Reached only through a `ModelData` built by a linking package.
+
+## Output accessors follow their contracts
+
+An output-contract sweep over every `tulpa()` backend (34 fits) found the
+accessors below returning shapes, names or values their generics do not
+specify. Re-run on this release: 82 checks that failed now pass, none that
+passed now fails, and every remaining refusal names the fit class and reason.
+
+* **Zero-inflated fits predict** (gcol33/tulpa#749). `predict()`,
+  `simulate()` and `posterior_predict()` rebuild the `ziformula` design, and
+  every response-scale read uses the structural-zero mixture: `fitted()` and
+  `predict(type = "response")` return `(1 - pi) mu` (previously `fitted()`
+  returned the count mean), simulation draws the zero indicator first, and the
+  pointwise log-likelihood behind `cpo()` / `dic()` / `waic()` / `loo()` /
+  `kfold()` is the mixture density. `coef()` / `vcov()` / `summary()` locate
+  the `zi_` columns through the engine layout, which on a sampler fit with
+  random effects places them after the random-effect block; `coef()` there had
+  reported `log_sigma_re` as `zi_(Intercept)`. Held-out `kfold()` scoring and
+  `posterior_predict(newdata)` now include the offset.
+* **Multinomial and ordinal fits record `y` and `N`** (gcol33/tulpa#753) and
+  gain `fitted()` (N x K class probabilities), per-class `residuals()`,
+  `predict()` on the link and response scales, `posterior_predict()` /
+  `simulate()` of class labels, and `cpo()` / `dic()` / `waic()` / `loo()` on
+  `log P(observed class)`. The scalar-response checks (`pit_residuals()`,
+  `test_dispersion()`, `check_model()`, ...) refuse on them by name. Joint
+  nested-Laplace fits record their observations, so `nobs()` works; their
+  observation-level accessors refuse, since the fit keeps no per-arm linear
+  predictor.
+* **`logLik()` reports a value or names why not** (gcol33/tulpa#750). ESS,
+  SGHMC, SGLD, MCLMC, SMC and VI return a per-draw `log_prob` evaluated by the
+  NUTS kernel's own log posterior (agreement 2.8e-14), and the RE-covariance
+  Gibbs sweep (the default route for a Poisson random-intercept model) and the
+  Polya-Gamma Gibbs routes record the joint density of the target they sample,
+  including the negative-binomial iid, NNGP and multiscale NNGP routes once
+  they sample a stated target (gcol33/tulpa#761, below).
+* **`mode = "gibbs"` fits carry their chain** (gcol33/tulpa#751) as
+  `draws` / `chain_id` / `n_chains` with the column names the HMC sampler uses,
+  so `diagnostics()`, `as_draws_df()` and `loo()` read it. The kernels already
+  returned every retained sample; the wrapper had kept them as separate blocks.
+* **One read per fit on EP and multinomial fits** (gcol33/tulpa#752). A fit
+  reporting a closed-form Gaussian posterior is summarized from it, so `coef()`
+  / `vcov()` / `summary()` / `tidy()` / `confint()` agree exactly; the
+  class-specific `coef` / `vcov` methods are removed. `coef()` on an ordinal
+  fit now reads the same table as `summary()` and still omits the cutpoints.
+* **`cpo()` and `dic()` have `tulpa_fit` methods, and `loo::waic()` /
+  `loo::loo()` dispatch on a `tulpa_fit`** (gcol33/tulpa#754), returning loo's
+  own objects. The two pointwise log-likelihood extractors behind `kfold()` and
+  `compare_models()` are one function; repeated calls on a nested fit now return
+  the same matrix.
+* **`print(diagnostics())` describes the backend that produced the fit**
+  (gcol33/tulpa#755); the outer-grid / inner-Laplace wording appears only on
+  nested fits.
+* **Interval columns are named as `stats::confint()` names them**, `"2.5 %"`
+  (gcol33/tulpa#756). **`simulate()` sets the `"seed"` attribute**
+  (gcol33/tulpa#757). **`fit$means` is named by parameter** on `mala`,
+  `imh_laplace` and `pathfinder` fits (gcol33/tulpa#758).
+
+## The spatiotemporal interaction reads its AR1 time margin
+
+* **An AR1 temporal margin on the ST interaction was laid out and never used**
+  (gcol33/tulpa#748). The layout sampled `logit_rho_st` while the density had
+  RW1 and RW2 forms only, so an AR1 margin contributed no quadratic form and the
+  RW2 rank. Type II, Type IV (centred and non-centred) and HSGP-ST now carry
+  `R(rho)` and its log-determinant, matching a dense reference to 1e-14, and the
+  Type-IV mass override emits the AR1 rows. The separable and non-separable GP
+  interaction types, for which the engine has no space-time kernel, are refused
+  when the layout is built instead of sampling two unread ranges. Reached only
+  through a `ModelData` built by a linking package.
+
+## Refinement slices carry the whole default hyperprior
+
+* **A cell evaluated as part of a batch lost the hyperprior on every axis the
+  batch held constant** (gcol33/tulpa#760). The joint drivers read which axes
+  carry a density off the matrix they were evaluating, so the adaptive-grid and
+  var-of-means slices (which share their off-axis coordinates), and in the
+  multi-block driver the CCD, adaptive-grid, local-CCD and Pareto-k batches,
+  folded no density on those axes. Each slice's `log_marginal` was too high by
+  the missing log densities: 1.0 to 3.1 nats on a coupled `occu_cover` fit,
+  enough to put 0.52 of the posterior on the row the slices sit in against 0.21
+  on the unrefined grid. The integrated axes are now read once off the declared
+  grid (`.hp_integrated_axes()` of the initial grid,
+  `.joint_multi_integrated_axes()` of the per-block grids) and passed to every
+  evaluation. Fits whose refinement passes add no cells, and grids without
+  refinement, are unchanged. Present in every tag since v0.4.1, which first
+  carried the default hyperprior (#730).
+
+* **The `tulpa_nested_laplace()` placement stencil and inner-skew probe read
+  the prior off the rows they evaluated** (gcol33/tulpa#760). Both write their
+  rows onto the block (or hand them to the multi-block dispatch as an override),
+  so a stencil that moves a column the grid holds at one value folded that
+  column's density, and the one-row probe folded none. On a 40-region BYM2 fit
+  with `sigma` held at 0.8 the stencil's centre row read 1.02 nats below the
+  grid cell it sits on, and with `rho` held at 0.5 the probe row read 1.01 nats
+  above it; the stencil's `sigma` variance moved from 0.0408 to 0.0430. The
+  probe's marginal is not reported, so only the placement pass changes.
+  `.nl_dispatch()` now takes the block whose grid the fit declared, the
+  multi-block dispatch reads each block's axes off its declared grid (the k-hat
+  draws reach it as an override of the fit's own prior), and `.hp_collect()`,
+  `.nl_block_log_hyperprior()` and `.st_log_hyperprior()` take `axes` with no
+  default, so no caller infers them from the matrix it evaluates.
+
+## Per-thread workspaces are built in place
+
+* **Two Eigen Cholesky objects were copied before they had been computed**
+  (gcol33/tulpa#747), flagged by CRAN's gcc-UBSAN check on 0.2.0 as a load of
+  an invalid `ComputationInfo`. Eigen's `LLT` leaves that field unset until
+  `compute()` runs. The NNGP gradient kernels filled their per-thread
+  workspaces by copying one prototype; they now construct each in place through
+  `tulpa_thread_workspaces()` (`src/omp_threads.h`). The low-rank mass term's
+  factor is moved into the metric before it is factorized, and now starts from
+  a computed empty matrix. No result changes: the field was always written
+  before tulpa read it.
+
+# tulpa 0.4.2
+
+## A refined axis's SD reads each cell over its own row's box
+
+* **The per-axis posterior SD on an adaptively refined outer grid read 2x to 6x
+  below the posterior's** (gcol33/tulpa#746). `.nl_attach_axis_sd()` summed
+  cell mass by level, so a refinement slice level held one row's narrow box
+  while the base level held every other row's wide one, and the axis marginal
+  carried a spike at the base node that both the weighted SD and the 3-point
+  parabola read. `.nl_axis_row_projection()` now spreads each cell's mass over
+  the box its row gives it and collects it on the level boxes, and the parabola
+  takes the density rather than the log mass. Against the same fit on a dense
+  33-node axis with refinement off, mean |log(sd / dense sd)| goes 1.188 ->
+  0.058 on a refined 9-node base and 0.552 -> 0.327 on a refined 5-node base.
+  The per-axis mean, the interval read and every unrefined fit are unchanged.
+
+## The default range prior's dimension is the one the coordinates span
+
+* **A constant coordinate column moved the default PC range prior from d = 1
+  to d = 2** while leaving the geometry unchanged, so the fit's log marginal
+  differed from the one-column fit. `.hp_block_extent()` now takes the
+  dimension as the rank of the centred coordinates; full-rank coordinates are
+  unchanged.
+
+## Tests
+
+* The outer-grid measurement fixture fits the residual variance it simulates
+  (it passed `phi = 0.0625`, SD 0.25, against data drawn at SD 0.5), and every
+  figure read off it is re-measured (gcol33/tulpa#744).
+
+# tulpa 0.4.1
+
+## `tulpa()` states the outer prior, under one name at every door
+
+* **`tulpa()` takes `hyperprior = c("proper", "flat")`** and forwards it to the
+  nested-Laplace path, the SPDE path, the random-slope RE-covariance redirect
+  and `mode = "eb"`. Which backends read it is declared once in the backend
+  registry; `"flat"` on any other backend, or on the SPDE NUTS route, is an
+  error naming the ones that do. `re_prior$hyperprior` is refused with a
+  pointer to the argument (#745).
+* **`tulpa_eb()` and `tulpa_re_cov_nested()` name their default `"proper"`**,
+  as the nested doors do, instead of `"pc_lkj"`. The prior itself (PC + LKJ) is
+  unchanged.
+* **`fit_spde()` and `fit_st_nested()` take the same argument.** `spatial_spde()`
+  and `spatial_spde_custom()` record which of `prior_range` / `prior_sigma` the
+  caller stated (`prior_stated`), so under `"flat"` only a stated anchor keeps
+  its density.
+
+## Fixes
+
+* A nested grid with every axis pinned (a single cell) no longer errors in the
+  evidence step: its evidence is that cell's log marginal (#742).
+* The batched species driver runs the joint loops' own Newton step tail rather
+  than a copy of it; every batched and single-species fit is bit-identical to
+  before (#743).
+
+Open at this release: #744 (the outer-grid measurement fixture fits a residual
+variance four times smaller than it simulates).
+
+# tulpa 0.4.0
+
+## The nested-Laplace doors state their outer prior
+
+* **`tulpa_nested_laplace_joint()` and `tulpa_nested_laplace()` take
+  `hyperprior = c("proper", "flat")`.** `"proper"`, the default, is the per-axis
+  set of #730 and leaves every fit bit-identical. `"flat"` folds no density of
+  the engine's own: each axis the call states no density for is integrated under
+  its cell measure alone, is named in `log_hyperprior_declined` as
+  `"flat_hyperprior"`, and `log_evidence` declines with `"improper_hyperprior"`.
+  A density the call states (`prior_sigma`, `prior_alpha`, `prior_phi`, a
+  block's `rho_prior` / `prior_range` / `prior_sigma`, the copy slab, a tgmrf
+  prior) applies under either. Both doors resolve it through one function,
+  `.hp_axis_prior()`. The joint door's `prior_sigma` / `prior_alpha` /
+  `prior_phi` documentation no longer describes `NULL` as flat, and the
+  `tulpa()` and `tulpa_re_cov_nested()` pages now give `"pc_lkj"` as their
+  default.
+* **`control$local_ccd$rank`** chooses what local-CCD refinement ranks its
+  candidate cells by: `"weight"` (default, unchanged) or `"mass_moved"`, the
+  weight times `|exp(log_box_ratio) - 1|`.
+* **The outer-grid research measurements are reproducible and state their
+  prior.** `dev_notes/issue327/bary327.R`, `dev_notes/issue331/coverage331.R`,
+  `dev_notes/issue333/plane333.R` + `analyse333.R`,
+  `dev_notes/issue_328/measure_fit_ranking.R` (which now selects the ranking
+  through `rank` instead of replacing a package internal) and
+  `dev_notes/issue730/re_cov_ccd_interval.R` produce every figure the
+  barycentre, descriptor-plane, #331 recovery and RE-covariance tests quote,
+  each stamping the build, prior and within-cell read into its output. Under
+  `hyperprior = "flat"` the #331 table reproduces to the digit, and under flat
+  with the `chord` read so do the #327 four-arm tables and #328's 14 of 24.
+  The measurement fixtures state `hyperprior = "flat"`; the files record both
+  priors side by side.
+
+## A grid-batched species fit is the fit its own call returns
+
+* **Species fitted through the fused batch driver came back as bare grid
+  results.** `cpp_nested_laplace_joint_multi_batch()` returned per-species
+  log-marginals and modes that a consumer assembled into a fit by hand, so the
+  object lacked the class, fields and post-processing of an ordinary
+  `tulpa_nested_laplace_joint()` fit, and draws, prediction and `fitted()` on it
+  failed. `tulpa_joint_grid_batch(fits)` now takes one zero-argument function
+  per species, each performing an ordinary fit. Each fit runs to its main outer
+  grid solve and hands the kernel request over; one fused solve answers every
+  request; each fit is then replayed with that solve served from the fused
+  result, so every species is built by the code that builds it alone. The
+  requests must agree on everything except arm responses, arm dispersions and
+  dispersion-axis nodes, and a setting the fused driver does not carry
+  (pruning, a warm start, outer threads, tiles, checkpoints, debias, CILA, the
+  inner skew probe) refuses the batch with a `tulpa_grid_batch_ineligible`
+  error rather than solving something else; a replay whose request differs
+  from its capture is refused the same way, and the random number state is put
+  back to where the batch was called before the error leaves. The fused entry
+  gained the single-species driver's `hessian_pd_mode`,
+  `step_curvature_mode`, `force_sparse` and fixed-effect block request, runs
+  the single-species final pass at each species' mode
+  (`joint_newton_finalize_dense()` / `_sparse()`, extracted from the two joint
+  Newton loops) and packs each species through `nl_pack_grid_results()`,
+  extracted from `run_nested_laplace_grid()`. `tulpa_nl_joint_batch()` now
+  returns, per species, the list `cpp_nested_laplace_joint_multi()` returns for
+  that species alone; the hyperprior fold and weights it used to attach are
+  built by the replayed fit. On the coupled occupancy fixture
+  a batched species equals its front-door fit bit for bit, on a fixed grid and
+  on the engine defaults (placement, refinement, outer k-hat): every field,
+  `coef()`, `vcov()`, `confint()` and posterior draws at one seed, with the
+  random number stream left where the sequential fits leave it.
+
+## The batched joint driver weights its grid the way the multi-block driver does
+
+* **`tulpa_nl_joint_batch()` returned a plain softmax of the kernel's
+  log-marginals as each species' weights.** No hyperprior was folded in and no
+  cell measure applied, so a fused batch fit was weighted against a different
+  posterior from the one the multi-block driver reports for the same species on
+  the same grid. On the two-arm occupancy fixture with sigma nodes
+  `c(0.4, 0.6, 1.5)` the two differed by up to 0.10 per cell. The C++ batch
+  entry now returns log-marginals only, and each species goes through
+  `.joint_multi_attach_integration()`, extracted from `.joint_dispatch_multi()`
+  so both drivers take one construction: the regularizing hyperprior folded
+  into `log_marginal`, then `log_quad`, `axis_support` and the weights. The
+  batch entry takes the multi-block driver's `prior_sigma`, `prior_alpha`,
+  `prior_phi`, `copy_atom_mass` and `copy_slab`.
+  `test-nested-laplace-joint-batch-equivalence.R` checks each species' weights
+  and `log_quad` against `tulpa_nested_laplace_joint()` fitted alone on the same
+  fixed grid, and compares the single-species oracle's log-marginal with the
+  fold added.
+
+## The slow tier re-read under the proper default hyperpriors
+
+* **The recovery suite's residual-scale negative control had stopped being the
+  defect it names** (gcol33/tulpa#737). `recov_fit_joint_phi_crossed()` is
+  meant to fit a gaussian arm at a quarter of its simulated residual variance,
+  the gcol33/tulpa#332 crossing, and its gate asserts the slope interval
+  narrows by sqrt(2) and loses coverage. Handing the door
+  `.phi_to_kernel(cfg$phi)` at `RESID_VAR = 0.5` instead fits variance
+  sqrt(0.5), so the interval WIDENED by 0.5^(-1/4) = 1.19 and the gate read a
+  width ratio of 0.84 with equal coverage. It was red at `fa704fb` too and
+  only the slow tier runs it. The arm now hands the door
+  `.phi_to_registry(cfg$phi)`, the value whose kernel read is the generator's
+  number, and the block passes 16 of 16.
+* **The #387 and #357 calibration verdicts hold under the #730 priors.** The
+  mode-SD floor ladder, seven rows x 200 seeds: `min_sd_u = 0.15` scores a
+  summed |coverage - nominal| of 0.1614 against 0.7107 at 0.05 (304 trials
+  lost, none won), 0.2457 at 0.30 (53 lost) and 0.5164 at 0.50; declining on
+  the floor scores 0.3379. No fit reaches the ceiling, so the ceiling policies
+  are identical on this ladder. The within-cell read at the shipped placement:
+  box-uniform 0.1300 against chord 0.2933 at a fixed truth (previously 0.1233 /
+  0.2900), and 0.0252 against 0.2106 over the truth-swept fits whose placed axis
+  contained the truth (0.0361 / 0.2004). `test-hyperparameter-coverage.R`
+  passes 9 of 9, and the BYM2 rho and ICAR tau rail lifts read 2.7707 and 9.0
+  against a threshold of 2.
+
+## Free-covariance blocks and two dispersions carry a proper prior
+
+* **Every default MCAR / MIID fit reported `log_evidence = NA`**
+  (gcol33/tulpa#735). A free-covariance block lays its outer axes as the
+  log-Cholesky coordinates of Sigma, and its default two-field grid is a tensor
+  in (log sigma_1, log sigma_2, rho) converted to those columns, so no column had
+  a measure of its own and every one declined `logchol_design_measure`. The
+  block is now given one prior and one cell measure over all of its columns, on
+  the coordinates its grid is a tensor in (`.hp_logchol_design()`): the
+  two-field default carries independent PC priors on both standard deviations
+  and an LKJ prior on rho, with its cells measured in (log sigma_1,
+  log sigma_2, rho); a grid that is a tensor in the log-Cholesky columns
+  carries the same PC + LKJ prior pushed to those columns
+  (`re_cov_pc_lkj_prior()`) and their widths. The two forms agree through the
+  map's Jacobian `s2 / (1 - rho^2)` to 1e-15, and the default prior integrates
+  to one on a wide grid. A block with a fixed column declines
+  `logchol_partial_block`; one whose grid is a tensor in neither declines as
+  before. The default posterior on Sigma now carries this prior where it
+  carried none.
+* **A gamma shape and a beta precision declined `dispersion_prior_unsourced`**
+  (gcol33/tulpa#736). They now carry R-INLA's shipped defaults for the same
+  parameters, `loggamma(1, 0.01)` on the gamma family's precision parameter and
+  `loggamma(1, 0.1)` on the beta family's (rinla/R/models.R), which are
+  exponential priors on `phi` itself in the parameterisation tulpa's kernels
+  use. The rates are `.NL_HYPERPRIOR$gamma_shape_rate` and `$beta_precision_rate`.
+  Neither is a PC prior: R-INLA ships one for the mean-one Gamma(1/a, 1/a) but
+  applies it to no likelihood's shape.
+
+## The cheap screen ranks what the grid integrates
+
+* **`control$prune` ranked outer cells by the likelihood alone**
+  (gcol33/tulpa#734). The screen runs inside the kernel and softmax-normalised
+  its cheap log-marginals, while since the #730 defaults every axis's
+  hyperprior is folded into `log_marginal` in R after the kernel returns and the
+  cell measure enters only the weights. A cell its prior or its width favoured
+  could be pruned, and one they suppressed kept, and the safety gate compared two
+  prior-less argmaxes, so it could not see it. Every screened entry now receives
+  `screen_log_offset`, each cell's log hyperprior plus its log cell measure, both
+  fixed by the grid before any cell is solved (`.nl_screen_log_offset()`), and
+  ranks, cuts, restores and gates on `cheap log-marginal + offset`: the eleven
+  single-block entries through the shared entry bundle, the multi-block and
+  joint entries, and `fit_spde()`'s grid with its (log range, log sigma) prior.
+  The fit carries the offset as `prune_screen_log_offset`, the gate's ESS reads
+  the same posterior, and `prune_cheap_log_marginal` and the cheap-vs-full gap
+  stay on the kernel's scale, where the offset cancels. A fit that does not
+  screen is unchanged.
+
+## A refined outer grid is measured cell by cell
+
+* **Refinement slice cells broke the tensor measure the cell weights assumed**
+  (gcol33/tulpa#733). The adaptive and var-of-means passes add a level on one
+  axis at one combination of the others, while `.hyper_log_quad_weights()`
+  measured every axis by the widths of its global levels. Each slice cell also
+  carried a calibration term standing in for the rest of its level, and every
+  per-axis read dropped the cells another axis's pass had placed. The weights,
+  the draws and the reported moments therefore described three different
+  distributions: on the coupled `occu_cover` SBC fixture the `sigma` mean read
+  0.924 from the masked cells against 0.874 over all of them and 0.872 with
+  refinement off. A grid carrying slice cells is now measured cell by cell
+  (`.hyper_refined_log_quad()`). Every cell owns a box; a slice cell re-tiles
+  its own row of the base tensor, and where refinements on two axes meet inside
+  one base box the corner is split equally between them, so the base area is
+  conserved exactly (an extension past the outermost node adds that row's
+  extension region). The calibration term and the per-axis masks are gone, a
+  refinement pass anchors only at base cells or cells on its own axis, and a
+  read with no cell measure sums the base tensor alone. A grid with no slice
+  cells keeps the product rule bit for bit.
+* **The reported hyperparameter intervals were read without the cell
+  measure.** `.nl_posterior_moments()` handed `.nl_axis_quantiles()` the raw
+  `log_marginal`, so on an unevenly measured axis (a graded grid, a domain
+  clamp, the copy scale's atom) the median and interval weighed every node
+  alike while the mean and SD carried the widths. Both now read
+  `log_marginal + log_quad`.
+* `.nl_grid_log_quad(refining =)` rebuilds its axis specs from the base cells,
+  so a prior read off the declared nodes (the copy scale's exponential rate) is
+  not moved by a node a refinement pass appended.
+* **`axis_support` and `axis_span$integrated` did not report the span a refined
+  grid integrates.** Both were read off every distinct level on the axis, slice
+  points included, as if the grid were a tensor. Densifying a row shrinks the
+  half step at the ends of that node set, so a stated copy axis `c(0.2, 0.5)`
+  refined on the tulpaObs `share()` fixture reported `[0.171, 0.526]` while its
+  cells integrate `[0.126, 0.791]`; on a domain-closed axis the same rule could
+  also report past where the mass stops (0.975 against 0.95 for a `rho_car` row
+  densified at 0.75). `.hyper_grid_supports(refining =)` now reads a refined
+  axis's span from the construction the cell measure uses
+  (`.hyper_fibre_tiling()`): the support of the base levels, widened only by the
+  cells that slice points own past it. The joint driver passes its
+  `refining_axis` to both fields, so a densified axis reports the span its
+  declared nodes had and an extended one reaches the outer edge of the
+  extension's cell. A grid with no slice cells reports bit for bit what it did.
+* **An extension more than one base step out left part of its row unmeasured**
+  (gcol33/tulpa#740). The outermost base node kept only its own base cell, and
+  the slice point's cell starts at the midpoint between the two, so a point `k`
+  steps past the outermost node left `(k - 1) / 2` steps of its row with no
+  owner. Every node of a re-tiled row now owns its nearest-node cell inside the
+  row's region (the base span together with the slice points' cells), a base
+  node held to its base cell inside the base span; the outermost base node owns
+  the stretch past the base edge up to the midpoint, and its base cell carries
+  `prod_k f_k + sum_k e_k / |B_k|`. On the 5 x 5 flat fixture that cell's
+  absolute measure goes from 0.870 to 1.306 at `k = 2` and to 1.741 at `k = 3`,
+  and the row integrates its region to 1e-12. Unrefined grids, densified rows
+  and the refine pass's evenly spaced extensions keep their weights bit for bit.
+  Two rows extended past the same base corner on two axes still leave the
+  product of their extensions outside every cell.
+
+## WAIC, LOO and posterior_predict() read the whole linear predictor
+
+* **The linear predictor behind every WAIC / LOO read and every posterior
+  predictive replicate dropped temporal, areal and GP fields**
+  (gcol33/tulpa#721). `.tulpa_eta_draws()` assembled eta in R from the fixed
+  effects, the offset, the formula random effects and an SPDE field, so a
+  `temporal_rw1()` fit was scored as a GLM: on `vignettes/temporal-models.Rmd`
+  WAIC ranked the model without the trend first. The draws now come from what
+  the fit carries. A ModelData sampler fit records the model its draws were laid
+  out on (`fit$model_inputs`) and evaluates the engine's own linear predictor at
+  each draw (`cpp_tulpa_glmm_eta_draws()`, the `generic_eta_at()` assembly the
+  sampler's observation loop reads), matching an independent assembly from the
+  draw columns to 1e-16. A nested-Laplace fit draws from its per-cell
+  `fitted_eta` / `fitted_eta_var` mixture; the single-arm fits run through the
+  joint driver (NNGP, HSGP, SPDE, the spatiotemporal entries) now return
+  `fitted_eta` too, through that driver's own eta accumulator. On the vignette's
+  data the temporal fit now leads by 66.6 elpd, where it trailed by 1.9. `predict()` stays population
+  level, as documented, and says so for areal and temporal fields.
+
+* **The NNGP, HSGP, SPDE and spatiotemporal fits carried `fitted_eta` without
+  `fitted_eta_var`** (gcol33/tulpa#727), so their WAIC, LOO and posterior
+  predictive replicates held the spread of eta across the grid's cells and
+  none of its variance within a cell. Both joint Newton loops now read
+  `var(eta_r | theta_k, y) = a_r' Sigma_k a_r` off the snapshot of each cell's
+  precision at the mode the fixed-effect block already reads, one solve per
+  distinct loading vector. Where the sparse scatter left a large intrinsic
+  field's sum-to-zero pin off the stored precision it is folded back in by
+  Woodbury, so the variance is that of the precision the cell's log-determinant
+  was taken of: a fit forced onto the fold reproduces the stored-pin fit to
+  9e-13. Against the stored precision inverted in R the values agree to machine
+  precision on a well-conditioned NNGP fixture and to 3e-8 on an intrinsic ST
+  fit whose precision has condition number 1.2e8. `control$fitted_var = FALSE`
+  removes it on these entries as on the others, and a checkpointed grid
+  resumes it (checkpoint magic `TLPACKP7`).
+* **A block's per-row weight was applied twice by the per-observation sparse
+  joint scatter** (gcol33/tulpa#728). The INDEXED_SINGLE branch multiplied
+  `row_weight` into an amplitude that already carried it, so an areal
+  `svc_weight` block scattered the gradient and curvature of `w^2 u` against an
+  objective in `w u` wherever that path ran (a basis block alongside it, or the
+  sparse gradient gate). The row's block loadings now come from one walk,
+  `for_each_row_block_latent()`, behind that scatter, the coupled row scatter
+  and the new per-row variance.
+* **The LatentBlock driver built `fitted_eta` and `fitted_eta_var` without an
+  INDEXED_MULTI block's row weight** (gcol33/tulpa#729), which its inner solve
+  applies; the walk now folds it into the amplitude on both kinds.
+
+## logLik() on a nested fit is the evidence of its outer grid
+
+* **`logLik()` summed a nested fit's per-cell marginal likelihoods without the
+  cells' prior masses** (gcol33/tulpa#722), so the value grew with the node
+  count: by 3.3 nats between 9 and 129 nodes on one RW1 support. It is now
+  `log sum_k exp(log_marginal_k + log_cell_k)`, where `log_marginal` carries each
+  axis's normalised hyperprior density and `log_cell` is each cell's absolute
+  volume on the integration coordinate (see the next section). Every grid producer records it
+  as `fit$log_evidence` where it builds its weights (single- and multi-block,
+  joint, spatiotemporal, the generic hyper-grid driver, RE-covariance and SPDE
+  grids, and CILA's corrected marginals); a CCD design reports `NA` with
+  `log_evidence_declined = "moment_rule_design"`. At a fixed support the value
+  is flat in the node count (to 1e-5 over 9 to 129 nodes, agreeing with an
+  independent trapezoid) and converges on a two-axis grid.
+* **A single-axis grid carried no cell measure at all.** `.nl_grid_log_quad()`
+  keys axes by column name and a one-axis `theta_grid` is a bare vector, so
+  every RW1 / ICAR fit integrated with equal weights whatever its node spacing,
+  and reported no `axis_support`. `.nl_theta_matrix()` names the axis for every
+  reader. On an evenly spaced grid the weights are unchanged.
+
+## Every outer axis carries a proper hyperprior, and the evidence reads it
+
+* **An axis with no stated prior was integrated under a flat one, so its
+  evidence depended on the range the grid covered** (gcol33/tulpa#730). The
+  automatic placement moves that range, so two fits of one model could report
+  different evidences. Every default axis now carries a proper density on its
+  integration coordinate, change of variables included, folded into
+  `log_marginal` and recorded in `log_hyperprior` / `log_hyperprior_axes`:
+  a standard deviation, variance or precision takes the PC prior
+  `P(sigma > 3) = 0.01`; a Matern range, GP lengthscale or HSGP `ell` takes the
+  range PC prior in the coordinates' dimension, `P(range < U) = 0.5` at `U` one
+  fifth of the bounding-box diagonal; a bounded axis (a BYM2 or CAR mixing
+  weight, a copy coefficient's slab) takes the uniform on its domain and AR1
+  `rho` its Beta; a negative-binomial size takes R-INLA's `pc.mgamma` density
+  with `lambda = 7`. The evidence is then `lse(log_marginal + log_cell)` with no
+  renormalisation over the grid: on an RW1 fit it agrees across 9, 33 and 129
+  nodes and a support ten times wider to 2e-3, and with a trapezoid of the
+  kernel's marginal against the density written out by hand. An axis with no
+  sourced prior declines by name (`log_evidence_declined = "improper_hyperprior"`,
+  `log_evidence_declined_axes`): beta precision and gamma shape, where I found
+  no PC prior in the literature or in R-INLA; the MCAR / MIID log-Cholesky
+  axes, whose default grid has no per-column cell measure; a range axis on a
+  block without coordinates.
+* **The scale anchor is U = 3, not the samplers' U = 1, and that was
+  measured.** On the joint copy fixture (binary donor, field SD 3) the
+  posterior mean of the field SD reads 1.46 at U = 1, 2.62 at U = 3, 3.03 at
+  U = 10 and 3.22 under the flat prior; U = 1 shrinks it enough that placement
+  never fires. The recenter fallback, `spatial_spde()`'s default `prior_sigma`,
+  `tulpa_re_cov_nested()` and `tulpa_eb()` read the same anchor, and the last
+  two now default to `hyperprior = "pc_lkj"`. `spatial_spde()` /
+  `spatial_spde_custom()` resolve `prior_range` from the coordinates
+  (`spatial_spde_custom()` takes `coords =` or errors without `prior_range`).
+* **The LKJ density omitted its normalising constant**, which a relative
+  weighting cancels and an evidence does not. `re_cov_pc_lkj_prior()` now
+  carries it (Lewandowski, Kurowicka & Joe 2009).
+* **`fit_spde()` weighted its grid and CCD cells, and scored its k-hat, with the
+  PC density on (range, sigma) while integrating in (log range, log sigma)**
+  (gcol33/tulpa#731), missing `log range + log sigma`. `.spde_log_hyperprior()`
+  is the one density behind all three.
+* **A tgmrf block's own `prior(theta)` reached the weights but not
+  `log_hyperprior`** (gcol33/tulpa#732); it is recorded now, and the kernel-side
+  part separately as `log_hyperprior_in_kernel`.
+* **CILA pooled its corrected cells without the hyperprior R folds into
+  `log_marginal`.** It divided the folded marginal back out of the grid weight
+  and multiplied the kernel's unfolded corrected marginal back in, so the AR1
+  `rho` Beta and the joint hyperpriors fell out of a corrected fit's weights,
+  and with #730 every default prior would have. The folded part stays in the
+  grid weight and is added to the adopted marginal.
+
+## logLik() names its quantity from what the fit estimated
+
+* **The quantity label was read off the length of `log_marginal`**
+  (gcol33/tulpa#723), which cannot tell "conditional on estimated
+  hyperparameters" from "nothing to integrate". It now reads what the fit did:
+  `"log_evidence"` for a deterministic fit that estimated no hyperparameter
+  (integrated, or supplied by the caller as part of the model),
+  `"log_marginal_likelihood"` with `conditioned_on` naming what empirical Bayes
+  or `estimate_phi` estimated from the same data, `"log_likelihood"` for a fit
+  maximised over every parameter (`agq_fit()`), and `"log_posterior_mean"` for a
+  sampler. `compare_models(criterion = "loglik")` ranks a Laplace GLM against a
+  nested model and refuses a set that differs in quantity or in
+  `conditioned_on`. `AIC()` / `BIC()` refuse every quantity but a maximised
+  log-likelihood, and count every maximised parameter for one.
+
+## The nested-Laplace route carries offset()
+
+* **`tulpa()` dropped an `offset()` term on every fit it routed to
+  `nested_laplace`** (gcol33/tulpa#726): a temporal, areal or GP field, `s()`,
+  `latent()`. The formula's offset was stored on the fit and never reached the
+  inner solve, so the coefficients were bit-identical with and without it and
+  the intercept absorbed its mean. `tulpa_nested_laplace()` gains `offset`, the
+  shared entry bundle carries it to all eleven single-block entries and the
+  multi-block entry (and into the checkpoint fingerprint), and `fitted_eta`
+  includes it. A constant offset now shifts the intercept by exactly its value
+  on every driver.
+
+## Vignettes compare fits on the evidence logLik() reports
+
+* `temporal-models` and `spatial-models` compared a nested fit through a hand
+  log-sum-exp of `$log_marginal`, the #722 sum; both now use
+  `compare_models(criterion = "loglik")`, and `temporal-models` shows the WAIC
+  comparison it had said the base engine could not make (gcol33/tulpa#724).
+
+## A field-SD axis's decline survives a dispersion placement
+
+* **A joint fit whose field-SD rescue declined and whose dispersion rescue then
+  placed an unpinned `phi_grid` axis lost the reason `sigma` did not move**
+  (gcol33/tulpa#720). The field-SD rescues wrote their reason only to the
+  whole-fit `outer_grid_recenter_declined` slot, which is cleared by any
+  placement, and `.nl_carry_recenter_stamps()` carried nothing from an unplaced
+  predecessor. `diagnostics()` therefore gave the generic "add nodes" advice on
+  a coarsest `sigma` axis the pass had declined for a named reason such as
+  `axis_pinned`. Both field-SD rescues now write `outer_grid_axis_declined`
+  (`sigma`, or `b<k>.sigma` per copy block, with `attempts_exhausted` for a
+  block still railed when the attempts ran out on a sibling), the carry merges
+  that record whatever the predecessor's placement, and an axis a later pass
+  moved drops its old decline. The field-SD rescues also list the axes they
+  moved in `outer_grid_recenter_axes`, which they had left empty, so a fit
+  placed on both `sigma` and a dispersion axis reported only the latter as
+  moved. The fit itself is unchanged; only the record is.
+
+## Progress knobs are read by exact key
+
+* **Any single `progress.*` control knob silently switched the console progress
+  bar off** (gcol33/tulpa#719). `progress` is a strict prefix of
+  `progress.every`, `progress.throttle` and `progress.file`, and `$` on a list
+  partial-matches, so `.nl_progress_args()` reading `control$progress` got back
+  whichever one of the three was set. `isTRUE()` of a file path or a cadence is
+  `FALSE`, so asking for the heartbeat file -- the only channel that survives a
+  detached run -- turned off the bar on the same call, and `progress.every`,
+  which exists to tune the bar's cadence, switched it off instead. Setting two
+  of the three made the prefix ambiguous, `$` returned `NULL`, and the default
+  came back: the resolved setting was not monotone in how many knobs were set,
+  which is what kept it out of sight. Both reads take `control[["progress"]]`
+  now, so the two channels are independent as documented and only an explicit
+  `progress = FALSE` turns the bar off.
+
+## The control surface: one check per door, one home per default
+
+* **`fit_st_nested()` had no control-key check** (gcol33/tulpa#673), so a
+  misspelling (`rho_spatail`, `n_thread`) was accepted in silence and the fit
+  ran at the default. It calls `tulpa_check_control()` against a
+  `.CONTROL_KEYS$st_nested` set like every other nested door now, and the two
+  knobs it reads without documenting them -- `rho_spatial` and `within_cell` --
+  are in the `@param control` block. `rho_spatial`'s default moves out of an
+  inline literal into `.NL_ST_GRID`, where the rest of that driver's grid
+  defaults already live.
+* **`control$sigma_eps` was a second spelling of `phi`, in the other
+  convention** (gcol33/tulpa#675): an SD against the residual VARIANCE every
+  other door reads. It is refused by name, with a message saying which argument
+  to use, rather than arriving as a generic "unknown control knob".
+  `control$marginal` stays where it is and is now documented for what it is: the
+  one statistical knob in `control`, scoped to `mode = "eb"`, turning on the
+  marginal-Laplace covariance correction. (Promoting it to a `tulpa()` formal is
+  a live option; it would be a formal that means nothing on fifteen of sixteen
+  backends, so it is left as a documented exception.)
+* **The `tulpa()` dispatch restated defaults the backend signatures already
+  carry** (gcol33/tulpa#676) -- mala's `n_iter` / `warmup` / `epsilon`,
+  pathfinder's `n_draws`, imh's `n_iter` / `scale`, agq's `n_quad` /
+  `sigma_init` / `max_iter` / `tol` -- so the same number lived in two files and
+  a bump on one side would have been invisible from the other, which is the
+  drift gcol33/tulpa#632 measured on `k_samples`. A knob the caller did not set
+  is omitted (`.drop_null()`), so the fitter's own formal supplies it.
+* **Doc drift in `?tulpa` and `?tulpa_nested_laplace`** (gcol33/tulpa#678,
+  gcol33/tulpa#674): `sigma_re` said "message" where the code warns and listed
+  the backends that ignore it incompletely; the latent-block section claimed at
+  most one `(1 | g)` term may accompany the blocks, which is the Polya-Gamma
+  spatial Gibbs sampler's restriction and not the nested path's;
+  `@param temporal` listed three of the five temporal constructors;
+  `@param control` named four knobs of the roughly hundred accepted;
+  `screen_iters` was documented as `5L` against an engine default of `2L`
+  (gcol33/tulpa#640 measured the depth down); and `checkpoint` plus the four
+  `progress*` keys were accepted and undocumented.
+
+## One log-marginal convention, and one entry bundle
+
+* **The two grid-entry families reported `log_marginal` on two conventions**
+  (gcol33/tulpa#698). `log_prior_per_arm_re()` dropped the weak default
+  fixed-effect prior -- on the ground that a joint log-marginal should stay
+  comparable to two single-arm fits -- while the single-arm spec path
+  (`laplace_spec.cpp`) included it. icar / bym2 / car_proper / temporal route to
+  the spec path and nngp / hsgp / the five `st_*` to the joint one, so
+  `compare_models()` or `logLik()` across the two families read a constant
+  offset as evidence. It also left the joint objective missing a term its own
+  gradient and Hessian applied, which is the exact failure the informative-prior
+  note beside it describes.
+  **The mode does not move** -- the gradient already carried the term -- and
+  softmax cell weights within a fit are unchanged, because the shift is common
+  to every cell. What moves is the reported `log_marginal` on the joint-path
+  entries, by the weak prior's density and normalizer at the mode. The two
+  families now agree cell for cell on the same ICAR model
+  (`test-entry-conventions.R`).
+* **`cpp_nested_laplace_spde` was the one grid entry outside
+  `TULPA_NL_ENTRY_INPUTS`** (gcol33/tulpa#699). It hand-rolled its driver call,
+  so it hardcoded `prune_tol = 0.0` and passed neither the subspace debias, CILA
+  nor a screen depth: `control$prune` / `$prune_tol` / `$prune_log_gap` /
+  `$screen_iters` / `$fitted_var` and the debias were all unreachable on the
+  SPDE grid, and a knob added to the bundle would not have reached it either --
+  the drift `nl_entry_inputs.h`'s own header says the bundle exists to prevent,
+  and the same class as gcol33/tulpa#639's hardcoded-off screen. It goes through
+  the shared bundle and `nl_run_joint_sparse_entry()` now, `fit_spde()` resolves
+  the knobs exactly as `tulpa_nested_laplace()` does, and a test asserts all
+  twelve entries carry them. Its `n_trials` argument is renamed `n`, the name
+  every other grid entry uses.
+
+## Counters that counted the wrong thing, and a rescue that erased what it rescued
+
+* **A SoftAbs-rescued divergence was erased from the report**
+  (gcol33/tulpa#695). On a post-warmup divergence the chain re-runs the
+  trajectory under a frozen SoftAbs metric at up to three halved step sizes and,
+  on the first non-divergent retry, cleared `divergent` -- so the event never
+  reached `result.divergent[]`, `n_divergent(fit)` or `diagnostic_summary()`,
+  and its only trace was a `verbose` print. The flag stays TRUE (the trajectory
+  the chain was asked for did diverge) and the rescue is reported beside it as
+  `n_softabs_rescued`, so a reader can tell a rescued divergence from one that
+  was not.
+  The retry's other half is a real limitation and is now named as one: its
+  transition kernel is chosen CONDITIONAL on the first trajectory's outcome and
+  repeats until it succeeds, with no delayed-rejection correction, so the
+  mixture is not invariant for the target. It is opt-in (`riemannian = 1`) and
+  says so; the documented `riemannian == -1` "auto for BYM2/ICAR + dense mass"
+  branch is deleted, because no caller could select it and an auto path into a
+  non-invariant kernel is not something to leave one flag value away.
+* **`n_max_treedepth` counted warmup iterations and reached no reader**
+  (gcol33/tulpa#703). Treedepth saturation while `epsilon` is still adapting is
+  normal, so the count was inflated by design; it is post-warmup now, summed
+  over chains, and returned to R beside the per-sample `treedepth` vector that
+  covers the same iterations.
+* Both counters ride the chain checkpoint, so its payload-layout tag moves
+  `TLPACKP5` -> `TLPACKP6`: an existing chain-checkpoint file errors and points
+  at a fresh path rather than being replayed field-by-field into the new layout.
+
+## Dead code that could still be revived wrong
+
+* **`NoCheapEval` returned a `LaplaceResult` with three indeterminate fields**
+  (gcol33/tulpa#705): it default-constructs one and sets `log_marginal` alone,
+  and `LaplaceResult` declared no initializers, so `log_det_Q`, `n_iter` and
+  `converged` were read from whatever the stack held. Latent today --
+  `prune_active` requires `cheap_eval_supplied`, which is false exactly when
+  `CheapEval` is `NoCheapEval` -- and closed by in-class initializers, which
+  every other construction site overwrites.
+* **Four fixed-effect prior helpers were dead and the driver contract named two
+  of them** (gcol33/tulpa#706). `add_re_beta_priors` hardcoded `BetaPrior()`, so
+  reviving it would have silently dropped a caller-supplied `beta_prior`; every
+  prior on that path routes through `spec_inner_solve`. The helpers and the two
+  sink accessors that existed only for them are gone, and
+  `nested_laplace_multi.h`'s contract says where the priors actually come from.
+* **`REGroupOracle`'s LAYOUT RULE is written down** (gcol33/tulpa#689). A
+  consumer subclasses it and the engine calls through the vtable, so the ORDER
+  of the virtuals is exported layout under the same rule as a struct field --
+  and `check_abi_version()` cannot see a violation, because the two version
+  numbers still agree. Commit `6c0cad5` inserted `has_theta_score()` mid-vtable
+  with the version left at 40; the ABI has since moved to 43 for unrelated
+  reasons, so no such build can still bind, and the rule is now stated in the
+  header that exports it.
+
+## Reporting and comments
+
+* The single-block `field_coef` branch of the placement pilot recorded a moved
+  alpha axis and not a left-alone one, so `outer_grid_pilot$axes_kept`
+  under-reported (gcol33/tulpa#707) -- an unrecorded decline that a performance
+  knob changes, which is the shape `axes_kept` exists to prevent.
+* `.CONTROL_KEYS$tulpa`'s comment described key sets that no longer carry the
+  names it named (gcol33/tulpa#708). The subtraction is defensive, not active,
+  and the comment says so.
+
+## Front-door arguments the door documented and did not honour
+
+* **`re_prior$hyperprior` was rejected as an unknown key** (gcol33/tulpa#667),
+  though `?tulpa` documents it and the front door reads it: `.RE_PRIOR_KEYS` did
+  not list it and `tulpa_check_control()` runs first.
+* **`control$re_cov` was read only when a term carried a slope**
+  (gcol33/tulpa#668), so on a `(1 | g)` model any value -- including a typo --
+  was accepted, had no effect, and the fit silently conditioned at
+  `sigma_re = 1`. It is validated on every call now and, when the caller names
+  an integrator, honoured on any random-effect model; an unset knob still
+  redirects only for a slope, so the default path is unchanged.
+* **`sigma_re` was dropped in silence by agq / gibbs / hmc** (gcol33/tulpa#669)
+  while `?tulpa` promised those backends warn. The warning reads one
+  registry-derived list of the backends that DETERMINE the RE scale -- by
+  integrating, sampling or maximizing over it -- so the doc and the code have a
+  single referent.
+* **`n_trials` was read differently by different doors** (gcol33/tulpa#677): a
+  scalar errored at the C++ boundary on `laplace` and was recycled on `mala` /
+  `imh_laplace`, and one handed to a non-binomial family was read by nothing at
+  all -- no signal for a user who meant a binomial and typed poisson. One R-side
+  check now recycles a scalar, refuses a wrong length, and refuses the argument
+  on a family that does not have denominators.
+* **Five front-door misuses surfaced an R internal naming no argument**
+  (gcol33/tulpa#679): `family = binomial()` gave "the condition has length > 1",
+  `mode = NULL` gave "argument is of length zero", a one-sided formula gave
+  "is.numeric(y) || is.integer(y) is not TRUE", and an empty `data` gave "no
+  non-missing arguments to max". A `stats::family()` object is now accepted --
+  a non-canonical link rides the name in the engine's own `<base>_<link>`
+  convention rather than being silently fitted at the canonical one -- and the
+  other four are named.
+* **`.zi_design()` detected random effects with a regex on deparsed code**
+  (gcol33/tulpa#680), which false-positives on a `|` inside a string literal and
+  whose `any()` was papering over a deparse that wraps a long line. It walks the
+  AST with `findbars()`, two hundred lines above in the same file.
+
+## Spec constructors: one check, one anchor
+
+* **`spatial_gp(sigma_prior_U =, sigma_prior_alpha =)` was accepted on the NNGP
+  branch and silently dropped** (gcol33/tulpa#700): only the HSGP branch
+  validated and stored them, and `.gp_sampler_spec()` hardcoded `(2.0, 0.05)`
+  against the engine's own `(1.0, 0.01)` -- one PC anchor with two defaults in
+  two files. The NNGP spec carries the anchors, the sampler reads them, and the
+  default is the engine's. **An NNGP fit under a sampler mode that did not set
+  the anchors moves from `P(sigma > 2) = 0.05` to `P(sigma > 1) = 0.01`**, which
+  is the prior `spatial_gp()`'s own argument defaults have always advertised.
+* **`spatial_multiscale(nu =)` was unvalidated** (gcol33/tulpa#701) while its
+  sibling rejected anything but 1.5 or 2.5, so an unsupported smoothness was
+  stored at construction and failed deep in the fit. `.check_matern_nu()` is the
+  shared check.
+* **The inline `temporal()` constructor ignored `shared = FALSE`**
+  (gcol33/tulpa#702) while its spatial twin warned -- the asymmetry
+  `.warn_nonshared()` was centralised to remove.
+
+## Build
+
+* `Rplots.pdf` is in `.Rbuildignore` (gcol33/tulpa#682). It is what a plotting
+  call in a non-interactive session leaves behind, so it reappears after any
+  `Rscript` or test-file run that draws, and `.gitignore` -- which is where it
+  was listed -- is not read by `R CMD build`.
+
+* **The package could not be compiled on Windows at unoptimized flags**
+  (gcol33/tulpa#717), which is the path `devtools::load_all()` takes:
+  `pkgbuild::compile_dll(debug = TRUE)` is the default and replaces R's flags
+  with `-UNDEBUG -Wall -pedantic -g -O0`. A plain COFF object holds 32767
+  sections, gcc emits one comdat section per template instantiation and merges
+  none of them without optimization, so `nested_laplace_joint_multi.cpp`
+  assembled 50241 sections and `aghq_re.cpp` 36959 and the assembler stopped
+  with "file too big". `src/Makevars.win` now carries `-Wa,-mbig-obj`, which
+  selects the bigobj object variant, and the whole package builds, links and
+  fits at those flags. This is not a property of one file: six further
+  translation units sit between 21000 and 31000 sections there, while at R's
+  own `-O2` the largest of all 109 is 2221, 6.8% of the ceiling, so the
+  flag is added only to a build whose `CXXFLAGS` carries no `-O2` / `-O3` /
+  `-Os` / `-Ofast` (gcol33/tulpa#725): `R CMD check` reports it as a
+  non-portable flag whenever a compile command carries it, which it did on
+  win-builder r-devel while it was unconditional.
+
+  What made the failure look machine-specific was the repo's own `.Rprofile`,
+  which sets `options(pkg.build_extra_flags = FALSE)` and so keeps `load_all()`
+  on R's `-O2`. R reads a project `.Rprofile` only when the session STARTS in
+  the package root and startup files are not skipped, so the same clone with
+  the same toolchain built from an interactive session in the root and failed
+  from a driver launched elsewhere or under `--vanilla`.
+
+## The outer k-hat's tail is resolved once per fit, and every backend records it
+
+* **The joint path chose its proposal at the budget-stable tail and reported a
+  k-hat refitted at the published rule** (gcol33/tulpa#690), so
+  `control$k_samples` still moved the reported number -- the one property
+  gcol33/tulpa#631 exists to hold. `.k_dispatch()` resolves the held fraction
+  internally, and `.joint_pareto_uncertainty()` then re-fitted the shape at the
+  raw request, which is the published rule whenever the caller named nothing:
+  the reported k was a different quantile of the weight distribution from the
+  one the choice was made on. The joint driver resolves once at the top now and
+  hands the resolved value to every scorer and every re-fit. `.k_outer_tail_points()`
+  is idempotent and returns `NULL` at the reference budget, so a default fit is
+  unchanged.
+* **`by_arm_k` had the same split** (gcol33/tulpa#691), so a per-arm k-hat was
+  not comparable with the `pareto_k` printed beside it on the same fit.
+* **Three of the four backends recorded no tail size and raised no cap warning**
+  (gcol33/tulpa#692). `.tulpa_psis_k_uncertainty()` applies the 20% ceiling
+  silently, by design, so the bootstrap re-fits do not each warn -- and only the
+  joint driver said it once per fit, leaving a `control$k_tail_points` past the
+  ceiling reduced with no signal on the single-block, SPDE and RE-covariance
+  paths. `.k_tail_cap_warn()` is the shared warning, called once per fit by each
+  backend's attach point, and `.k_dispatch_report()` reports the tail it fitted
+  on, which every fit now carries as `pareto_k_tail_points`. The single-block
+  grid path also accepted a `tail_points` argument and dropped it, so an
+  explicit request never reached its scorer at all.
+
+## mode = "auto" never picks a backend that errors on the call that selected it
+
+* **The selector answered from the model's shape and could not see the per-call
+  features a backend refuses.** A backend now declares its restrictions in
+  `BACKEND_REGISTRY` -- the families it fits, whether it carries an offset, how
+  many random-effect terms its sweep updates -- and `.auto_backend_ok()` is the
+  one predicate the selector consults, reading those fields and the existing
+  registry-derived `.zi_backends()` / `.phi2_backends()` sets. Declaring a
+  restriction is a registry edit rather than another condition in the selector.
+* **Every random-effect formula was routed to `re_cov_gibbs`**
+  (gcol33/tulpa#666), which then refused an offset, weights, a `ziformula`, a
+  `phi2`, or a gamma / beta / t family at dispatch. Auto takes the exact debias
+  where it fits and falls through to `re_cov_nested` -- the deterministic
+  integration of the same covariance -- where it does not. A plain
+  `(1 | g)` model still gets the Gibbs debias, unchanged.
+* **A binomial areal model with two random intercepts was routed to the
+  Polya-Gamma spatial Gibbs sampler** (gcol33/tulpa#681), which updates one RE
+  block alongside the field and says so at dispatch, while
+  `mode = "nested_laplace"` fits the same model. The sweep's limit is
+  `max_re_terms` on its registry entry now.
+* **`temporal_gp()` and `temporal_multiscale()` had no auto branch at all**
+  (gcol33/tulpa#672): the selector has arms for rw1 / rw2 / ar1, so the fall
+  through redirected to nested Laplace, the one door that refuses a
+  continuous-time temporal field. They route to the exact ModelData sampler
+  they are wired for, the same way a spatially- or temporally-varying
+  coefficient already does.
+
+## A reported diagnostic says what it is, and what it could not establish
+
+* **A VI fit's uncomputed Pareto k-hat read as a clean pass** (gcol33/tulpa#709).
+  The kernel initialises `psis_k` to a `-1` "not computed" sentinel, and `-1` is
+  FINITE, so the decline branch written for exactly this case (`!is.finite(k)`)
+  was never reached and `.tulpa_khat_band(-1)` returned `"good"`. A genuine
+  Pareto shape can be negative, so the sentinel is translated to `NA` at the one
+  place it is known to be one -- the kernel's own result assembly -- rather than
+  guarded downstream by a sign test.
+* **The approximation-reliability table emitted `rhat` / `ess_bulk` / `ess_tail`
+  on i.i.d. draws** (gcol33/tulpa#713), which are the quantities the
+  draws-provenance gate withholds on a non-chain fit precisely because they are
+  vacuous there -- and this table is where the gate DISPATCHES. A prose
+  disclaimer in the print method does not reach `check_diagnostics()`,
+  `plot_rhat()` or a programmatic read; the column names do. The table now
+  carries `n_draws` and `mcse_mean`, the quantity the vacuous columns were
+  standing in for.
+* **Chain diagnostics labelled every row `param1..paramN` on mala /
+  imh_laplace / pathfinder / vi** (gcol33/tulpa#714), which store an unnamed
+  `$draws` matrix beside a fully populated `$param_names`. A warning reading
+  "Parameters with Rhat > 1.01: param3" could not be traced back to a
+  coefficient without counting columns by hand. `.tulpa_draw_names()` is the one
+  resolver -- the matrix's own names, then the fit's, then positional -- behind
+  the chain table, the i.i.d. table, `tulpa_draws_array()` and the pooled-draws
+  accessor.
+* **`pareto_k_proposal_source` and `pareto_k_first_pass` never reached
+  `diagnostics()`** (gcol33/tulpa#715), though both are stamped on the fit and
+  documented in the fitters' `@return`. The GAP between the reported k-hat and
+  the first pass is the actionable number -- a large one says the nodes are
+  badly scaled around the posterior even though the verdict is fine -- so a fit
+  rescued by a later proposal candidate read as unconditionally clean.
+* **`sbc()` reported `proper_prior = "verified"` on a run that probed nothing**
+  (gcol33/tulpa#716). The guard returns early with `n_probe = 0` when every
+  scored quantity is of the `"rank"` kind. `.sbc_premise_proper_prior()` is now
+  the one place that word is chosen, and the print method drops the
+  "over 0 probed simulations" count rather than pairing it with a verification.
+
+## Accessors that returned the wrong shape, or the wrong quantity
+
+* **`logLik()` returned three incomparable quantities under one name**
+  (gcol33/tulpa#712): a mean log POSTERIOR over draws (sampler tier), a log
+  MARGINAL LIKELIHOOD (Laplace), and a log EVIDENCE with the hyperparameters
+  already integrated out (nested) -- `-201.2` / `-210.3` / `-216.2` on the same
+  data and formula -- and `compare_models(criterion = "loglik")` ranked them in
+  one table, making a model choice on an artefact of which tier fitted each. The
+  value each tier can give is still the best available there, so it is returned;
+  it now carries a `quantity` attribute, `compare_models()` refuses a set that
+  disagrees on it and names what each reported, and `?logLik.tulpa_fit` says
+  which tier gives which and why `AIC()` / `BIC()` on a nested fit penalise a
+  value that has already integrated the hyperparameters out.
+* **`glance()` returned one row per outer grid cell on a nested fit**
+  (gcol33/tulpa#711), against the documented single-row broom contract: a
+  nested fit's `$converged` is a per-cell logical vector, and `data.frame()`
+  recycled every other column to its length. A
+  `do.call(rbind, lapply(fits, glance))` therefore produced a table whose row
+  count depended on each fit's grid size.
+* **`VarCorr()` errored and `ranef()` returned an empty frame on every AGQ fit**
+  (gcol33/tulpa#710). `agq_fit()` ships a 0-ROW draws matrix, so
+  `.varcorr_from_draws()` took `colMeans()` of nothing, built `diag(NaN, 1)` and
+  errored out of `all(sd_m > 0)` -- which `.print_re_section()`'s `tryCatch`
+  swallowed, printing the fit with no Random-effects section while the estimated
+  `sigma_re` sat on it. `.varcorr_from_point_sigma()` reads that estimate,
+  `.re_draws_mat()` no longer hands back a 0-row tail as RE draws, and the fit
+  carries `ranef_unavailable` naming why AGQ has no per-group posterior --
+  an empty table being indistinguishable from a model with no random effects.
+
+## Reachability: a family, a backend argument, and a shipped C callable
+
+* **`family = "tweedie"` was unreachable on every sampler backend**
+  (gcol33/tulpa#694). `build_sampler_model_inputs()` calls `resp.prepare()`,
+  which hard-errors when the family is tweedie and `phi2` is NaN, and the caller
+  assigned `phi2` only afterwards -- so it was always NaN at that point. `phi2`
+  is a builder argument now, set before `prepare()`.
+* **`control$n_chains` was silently ignored by every backend except NUTS**
+  (gcol33/tulpa#704): a caller asking for four chains got one particle set with
+  no `chain_id` and no signal. The same function already hard-refuses
+  `mass_matrix` and a warm start on those backends, so this is refused beside
+  them, in R where a default is still distinguishable from a request.
+* **`tulpa_sample_glmm()` stamped neither backend nor draws kind**
+  (gcol33/tulpa#693), and the provenance gate treats an untagged fit as a chain
+  -- so `mcmc_diagnostics()` computed Rhat and ESS on SMC particles and VI
+  draws. It closes through `.finalize_fit()` now, which reads `emits` off the
+  registry.
+* **`inst/include/tulpa/joint_nested_laplace_api.h` advertised a C callable
+  registered nowhere** (gcol33/tulpa#688). `R_GetCCallable` on an unregistered
+  name is a hard R error, so a `LinkingTo: tulpa` package compiled cleanly
+  against the header and died in its user's session at the first call. The
+  header is deleted -- no consumer includes it, and no shim behind it exists --
+  and `test-ccallable-registry.R` now scrapes every `R_GetCCallable` name out of
+  the INSTALLED headers and asserts each resolves, so a header added without its
+  registration fails in this suite instead of downstream.
+
+## One covariance code names one kernel, on every path
+
+* **A Matern `nu = 2.5` request was fitted with the Gaussian kernel on every
+  sampler mode** (gcol33/tulpa#686). The integer had two meanings:
+  `gp_cov_type_for_laplace()` returned `2L` for Matern-5/2, the Laplace NNGP
+  scatter's private code for it, and `.gp_sampler_spec()` / `.msgp_sampler_spec()`
+  / `.svc_sampler_spec()` handed that same value to a cast into `tulpa::CovType`,
+  where `2` is `GAUSSIAN`. So `spatial_gp(cov = "matern", nu = 2.5)` under
+  `mode = "hmc"` sampled `exp(-(d/phi)^2)`, and `predict()` on a Matern-5/2
+  Laplace fit used it too, since `cpp_gp_field_predict()` reads the fit's stored
+  code through the sampler kernel. Nothing errored, because `cov = "gaussian"`
+  is unreachable through the door's `match.arg`: `nu = 2.5` was the only way to
+  reach that kernel and it happened silently. `CovType` now carries
+  `MATERN52 = 4` and the kernels themselves live in one exported header,
+  `inst/include/tulpa/cov_kernel.h`, read by the exact-NUTS NNGP/SVC kernels,
+  the Laplace NNGP scatter, the Polya-Gamma sweep and the field predictor alike
+  -- so the smoothness travels IN the code and no path reads a `nu` beside it to
+  learn which kernel it is evaluating. `gp_cov_type()` (renamed from
+  `gp_cov_type_for_laplace()`, since it is no longer the Laplace path's own
+  mapping) returns 0 / 1 / 4. **ABI break** (`TULPA_ABI_VERSION` 42 -> 43): a
+  consumer passing a raw `cov_type` integer must re-read it against the enum,
+  and the bump is what makes that a rebuild rather than a different kernel.
+
+## A periodic temporal GP's period is stated in the units the kernel sees
+
+* **`temporal_gp(cov = "periodic", period =)` collapsed to nothing under the
+  default `scale_coords = TRUE`** (gcol33/tulpa#687). `validate_temporal_gp()`
+  standardizes the time axis and the kernel evaluates `sin(pi * d / period)`
+  against those scaled lags, while `period` travelled untouched: on a 60-month
+  series with `period = 12` the maximum scaled lag is 3.32 against a period of
+  12, over which the sine is monotone and small, so the fitted kernel had no
+  periodic structure in it at all. `period` is a LAG and now makes the same trip
+  the axis does. The declared number is left on the spec, so it prints and
+  validates as the user wrote it; `period_scaled` is that period in the
+  kernel's own units and is what the fit reads.
+
+## The two HSGP-ST prior defects the Kronecker branch's fixes did not reach
+
+* **Under a non-cyclic RW2 marginal the HSGP-ST branch left each basis
+  function's linear-ramp direction with no prior at all** (gcol33/tulpa#697).
+  `rw2_quadratic_form` annihilates a ramp and a penalty on the sum reaches the
+  constant only, so `M` improper directions rode into the target unpenalized --
+  the defect gcol33/tulpa#600 fixed for the Kronecker and Type-II paths, in the
+  one branch it did not touch. The ramp pin is now read from the same predicate:
+  `temporal_has_trend_null()` is the RW2 fact by itself and `st_needs_trend_pin()`
+  is that fact plus the interaction structure, so the density, the matrix form
+  and the mass override still share one answer.
+* **A cyclic HSGP-ST scaled its log-precision by a cyclic-aware rank while
+  evaluating an acyclic operator beside it** (gcol33/tulpa#696): `rank_t = T - 1`
+  powers of `prec_j` against a quadratic form of rank `T - 2`, per basis
+  function. This is gcol33/tulpa#596's defect in the sibling branch. Both now
+  read the fit's own `temporal_cyclic`.
+* `src/test_st_hsgp_prior.cpp` is the fixture that makes the branch reachable
+  from R at all -- nothing in tulpa sets `ModelData::has_spatiotemporal`, so a
+  consumer-shaped `ModelData` is the only way in, as it is for the Type-IV
+  fixture beside it. It drives the shipped density, not a copy.
+
+## Every per-observation input passes the finite guard
+
+* **`n_trials` and the offset were not checked** (gcol33/tulpa#665).
+  `tulpa()` guarded `X` and `y` alone, and `tulpa_laplace()` -- a front door in
+  its own right, which does not route through `.validate_glm_design()` --
+  guarded neither. An `NA` in either reached the kernel and came back as an
+  all-zero coefficient vector with no error and no warning. Both arms are now
+  in `.assert_finite_model_inputs()` and both doors call it with them.
+
+## No NUTS entry can start a trajectory on an unverified gradient
+
+* **Runtime gradient verification ran on 2 of 8 NUTS entries**
+  (gcol33/tulpa#684). The check sat in `run_hmc_chain()` (the R wrapper) and
+  `run_hmc_parallel_chains_cpp()`, while `run_hmc_chain_cpp` was entered
+  directly from six other production sites -- including
+  `tulpa_run_nuts_generic`, the `R_RegisterCCallable` a `LinkingTo` consumer
+  reaches for `backend = "hmc"`. A consumer's hand-coded `spec->gradient_fn` was
+  therefore checked when it asked for several chains and unchecked when it asked
+  for one, which is the reverse of what design principle 3 says. The gate is now
+  `ensure_gradient_verified()` inside `run_hmc_chain_cpp` itself: it skips inside
+  an across-chain OpenMP region (where the producer has already run it on the
+  main thread and an R warning would be unsafe) and skips when the fit in scope
+  has already been verified, so the check runs once per fit however many chains
+  it runs. `g_gradient_verified` travels with `GradientModeFitScope`, so a
+  fallback is still confined to the fit that triggered it.
+
+## A covariate transform is carried through the formula strippers unchanged
+
+* **`nobars()` / `no_latent_terms()` / `no_special_terms()` rebuilt every call
+  from at most two positional children, discarding argument names and any third
+  argument** (gcol33/tulpa#664). `nobars()` runs on every formula, so the damage
+  reached every backend: `poly(x, 2, raw = TRUE)` was refitted as the ORTHOGONAL
+  basis (coefficients 6.16 / -0.14 against `lm()`'s 0.47 / -0.009 on a
+  200-row fixture), `splines::ns(x, df = 3)` became a backtick-quoted
+  `` `splines::ns`(x, 0.5) `` that errors "could not find function", and
+  `scale(center =)`, `log(base =)`, `cut(breaks =)`, `bs(degree =)` all lost
+  their named arguments silently. The three strippers are now one walker,
+  `.strip_rhs()`, which descends the formula OPERATOR tree (`.FORMULA_OPS`)
+  and treats every other call as a leaf: head, arguments and names carried
+  through as they stand. A raw polynomial now reproduces `lm()` to 1e-3.
+
+## The chain checkpoint fingerprint covers the data, not only its shape
+
+* **A resume against a different data set of the same shape returned the earlier
+  fit's draws** (gcol33/tulpa#683). `run_hmc_parallel_chains_cpp` folded
+  `n_iter, n_warmup, L, n_chains, seed, max_treedepth, metric_type, adapt_delta,
+  riemannian, layout.total_params, data.N` plus the per-chain init and metric,
+  and never the contents of `y`, `X` or the offset, so every chain read as
+  already complete and `identical(fit1$draws, fit2$draws)` was `TRUE` across two
+  different responses. Both `hmc_chain_checkpoint.h` and the CLAUDE.md
+  checkpoint section stated the guarantee the code did not provide.
+* The response lives behind `ModelData::model_response_data`, an opaque pointer
+  owned by the model package, so no field-by-field fold reaches it. What is
+  reachable is the quantity the chains sample: `fold_target_identity()`
+  evaluates the log posterior at engine-fixed probe positions (chain 0's init
+  plus splitmix64 perturbations of it, never R's stream), which reads the
+  response through the likelihood the fit will use, the designs and offsets
+  through eta, and every prior hyperparameter `ModelData` carries. The perturbed
+  probes are what make the DESIGN visible -- at `beta = 0` the design drops out
+  of eta -- and a changed `X` of the same shape is now refused too. A model with
+  no generic `LikelihoodSpec` warns that its fingerprint covers settings and
+  dimensions only rather than claiming more. Requesting a checkpoint still moves
+  no draw: a same-data resume is bit-for-bit identical.
+* The nested-Laplace grid checkpoint already folded `y` and `X` by value
+  (`make_nl_grid_checkpoint`, since the #431-#451 batch); this closes the chain
+  half.
+
+## The temporal node index is checked where the areal one is
+
+* **`temporal_idx` was validated at no entry** (gcol33/tulpa#685). `block.idx`
+  reads `temporal_idx[i]` for every `i < N` through `Rcpp::IntegerVector::
+  operator[]`, which is unchecked pointer arithmetic, so a vector shorter than
+  `N` read past the allocation and returned a finite, session-dependent
+  `log_marginal`; an out-of-range, zero, negative or `NA` value was dropped by
+  the eta walk's own guard and contributed nothing to that row, silently.
+* `check_latent_obs_index()` (`src/areal_input_check.h`) is now the one gate for
+  every per-observation latent index, with `check_areal_site_index()` and the
+  new `check_temporal_index()` as its two named callers. The temporal check runs
+  inside `make_temporal_latent_block()` -- the one place every temporal-carrying
+  entry builds its block, so `cpp_nested_laplace_temporal` and all five `st_*`
+  entries inherit it rather than each calling it -- and at the three index reads
+  of `cpp_nested_laplace_multi`, which had the same gap on its own `spatial_idx`
+  and `temporal_idx`.
+
+## One spatial gate at the front door, whichever way the spec arrives
+
+* **A bare `spatial = list(type =, adjacency =)` never reached
+  `.validate_adjacency_arg()`, so an asymmetric graph fitted silently**
+  (gcol33/tulpa#670). The ICAR precision built from an asymmetric `W` is not the
+  ICAR of any graph. The check now runs on whatever `spatial$adjacency` holds,
+  and is idempotent (a graph a `spatial_*()` constructor already passed is not
+  re-reported), so the two entry styles meet at one gate.
+* **`type = "ICAR"` errored "not yet supported in Laplace"** (gcol33/tulpa#671).
+  `tulpa()` lowercased the type for its own branch and handed the raw string to
+  `select_inference_mode()`, whose comparisons are case-sensitive. The type is
+  normalised once at the door and written back onto the spec, so every consumer
+  reads the canonical spelling; `"ICAR"` and `"icar"` now give identical
+  coefficients.
+
+# tulpa 0.3.2
+
+## A placement rescue no longer deletes the checkpoint its own fit wrote
+
+* **`control$checkpoint` with `resume = FALSE` reset the file once per outer-grid
+  SOLVE, not once per fit** (gcol33/tulpaObs#316). An outer-grid placement
+  rescue refits, so `.tulpa_nl_joint_once()` runs several times within one fit;
+  it held the reset, and the post-rescue solve therefore removed every cell the
+  pre-placement solve had just written. Two consequences: a crash-resume lost
+  the widest, most expensive pass, and a later `resume = TRUE` run re-solved and
+  re-appended that whole pre-placement grid on top of the cells that survived,
+  growing the file about 2.4x per run with no duplicate keys and an unchanged
+  `log_marginal`. The reset moved up to `tulpa_nested_laplace_joint()`, the one
+  frame that spans every solve of a fit; the per-solve function now only
+  publishes the path.
+* The defect is reachable from any of the three placement rescues, so it
+  predates the dispersion axis; `phi_grid` becoming movable in 0.3.1 is what
+  gave the cover-hurdle fits a rescue that fires, and therefore what surfaced
+  it.
+* `tests/testthat/helper-phi-placement.R` -- the placement fixture moved out of
+  `test-phi-grid-placement.R` so the checkpoint file can build a fit that
+  actually triggers a rescue. A regression test that cannot see one placed is
+  worthless, so the new block asserts `outer_grid_placement` first.
+
+# tulpa 0.3.1
+
+## A per-arm dispersion axis is placed like a prior block's scale axis
+
+* **`phi_grid` axes were outside the outer-grid placement machinery, and the
+  fit's own diagnostic named one as its coarsest** (gcol33/tulpa#663).
+  `.NL_REGISTRY_AXIS_FIELD` enumerates the axes a rescue may move keyed by
+  spatial prior BLOCK type; a dispersion axis is a hyperparameter of an ARM and
+  is in no entry, so no rescue walked it. On a 12,179-cell `occu_cover()` fit
+  the reported `grid_coarsest_axis` was `phi_pos` at `h / sd = 55.79` against
+  4.93 for the auto-placed field SD, `grid_resolved = FALSE`, and the
+  dispersion posterior sat at 7.746 with no node within a factor of two of it --
+  naming as coarsest the one axis nothing could move, with advice (add nodes)
+  that would have taken ~170 of them.
+
+  `.joint_phi_grid_rescue()` now moves it. Everything the placement needs was
+  already there -- the transform registry tags a `phi_<arm>` column `"log"`,
+  and the FD stencil's re-evaluation already varies it, since
+  `.joint_grids_from_cells()` hands `grids$phi_<arm>` straight back to
+  `.joint_phi_grid_per_arm()` -- so what is new is a slot source, a provenance
+  read and a write target, not a second placement machine. It fires on the
+  axis's OWN sizing (railed, or `h / sd` past `.NL_RECENTER$resolve_mult`)
+  rather than on the whole grid's `collapsed_edge` regime, because a dispersion
+  axis is crossed onto the tensor independently of the field's geometry.
+
+* **The placement stencil now runs on a `collapsed_interior` grid** when a
+  movable dispersion axis wants it. `.joint_attach_pareto_k_placement()` exists
+  for the two field rescues, whose trigger IS `collapsed_edge`, so it computed a
+  mode and Hessian only on such a grid -- and the reported fit was
+  `collapsed_interior` (weight concentrated, modal cell interior on every axis),
+  which is why no curvature existed to place from. The extra test reads stored
+  weights (`.nl_placement_axis_wanted()`) and a caller naming no movable axis
+  runs exactly the gate it ran before.
+
+* **Provenance decides, as everywhere else.** The engine has no default
+  dispersion axis, so `.nl_axis_is_pinned()`'s "equal to the engine's own
+  default" branch has no counterpart here: an axis marked with `auto_grid()` is
+  a default and is placed, an unmarked one is a pin and is integrated exactly as
+  written. `control$auto_recenter = FALSE` holds it like any other.
+
+  Measured on a BYM2 + Gaussian copy-arm fixture (spatial hyperparameters pinned
+  at truth, four nodes over residual SD 0.02 to 2, true `phi` 0.09): pinned,
+  `h / sd` 98.2 and a posterior mean of 0.1745; marked, a posterior mean of
+  0.0898. The placement is the estimate, not only the report.
+
+## Reporting
+
+* **`outer_grid_axis_declined`** records why the placement pass left an axis
+  alone, PER AXIS. The whole-fit `outer_grid_recenter_declined` carries the
+  reason from the one rescue that could have run and is written only while the
+  fit is unplaced, so a fit whose field-SD axis moved and whose dispersion axis
+  did not said `auto_recentered` and nothing about the axis its own
+  `grid_coarsest_axis` was naming. `diagnostic_summary()`'s resolution note
+  reads it and reports the lever that applies -- the pin, not the node count.
+
+* **`n_grid` counts the cells SOLVED**, not the ones that kept usable weight.
+  `.tulpa_grid_reliability()` filtered non-positive weights and then took
+  `length()` of what survived, so a posterior sharp enough to underflow all but
+  one of 124 cells reported `outer grid quadrature ESS = 1.00 of 1 cells` -- a
+  one-cell grid integrated perfectly, rather than a 124-cell grid collapsed onto
+  one of them. `ess_grid` and `max_weight` are unchanged (dropping zero weights
+  moves neither); `rel_ess_grid` is now the share of the solved grid the
+  quadrature uses.
+
+# tulpa 0.3.0
+
+Closes every open engine issue. 0.2.14 closed seven of eleven; the remaining
+four are below.
+
+## The CCD curvature-reuse path is measured, and removed
+
+* **`control$ccd_stencil_reuse` shipped in 0.2.14 opt-in and unmeasured, and the
+  measurement does not support it** (gcol33/tulpa#662). It replaced the full
+  `1 + 2d + 4*C(d,2)` finite-difference stencil on most mode-find rounds with an
+  axial one plus an SR1 secant update of the off-diagonal block. Over 16 paired
+  joint fits -- same data, same seed, the knob the only difference -- it spent
+  **no fewer inner solves** (evals ratio 1.046 at `d = 3`, winning 0 of 8 pairs;
+  1.000 at `d = 4`, 2 of 8), because the secant model produces worse steps and
+  the walk runs 1.6x longer, spending the per-round saving again on rounds. That
+  refutes the projection it shipped on, which assumed the same number of rounds
+  in both arms.
+
+* It also **centred the design somewhere worse**, which is the failure mode the
+  issue named: the best inner log-marginal on the design fell by up to 7.5 nats
+  at `d = 3` and 16.3 at `d = 4`, moving the reported fixed effects by up to
+  1.6e-02, their standard errors by up to 1.1e-02, and the grid's quadrature ESS
+  from 8.35 to 6.92. The closing stencil is always a full one, so the design's
+  SCALE is measured either way and only its CENTRE moves -- which is why nothing
+  inside the placement could see it.
+
+* `control$ccd_stencil_reuse` and `control$ccd_refresh_every` are removed and
+  refused at the door rather than ignored. The mode-find measures a full stencil
+  every round, which is what every shipped fit already did.
+
+## One dispersion convention, in the fixtures too
+
+* **`657f179` moved every door to the residual variance and four fixtures were
+  left describing the SD** (gcol33/tulpa#661, gcol33/tulpa#659). The recovery
+  suite's own convention pin fired, as its header says it exists to
+  ("so a change on the door's side fails loudly here instead of silently
+  rescaling every gaussian fixture"), and the three failures beside it were that
+  rescaling: a seed-specific measurement taken at residual variance 0.5 and
+  re-read at 0.7071, and two joint alpha gates handed `sd_pos` where the door
+  reads `sd_pos^2` -- a 41% over-statement of the residual scale, which the ICAR
+  block's own comment names as what makes alpha unidentifiable. The engine has
+  crossed this seam twice in opposite directions: gcol33/tulpa#332 was the same
+  crossing the other way, costing a slope interval a factor of 1.4079 against
+  `sqrt(2)` and coverage 146/150 -> 120/150.
+
+* The SBC harness was crossed the same way and its `phi_crossed` NEGATIVE
+  CONTROL had swapped roles with its main arm; `test-sbc-crps.R` reads 8 failures
+  against the unconverted helper and none against the converted one.
+
+* The simulators now read the conversion from the engine
+  (`.phi_to_kernel()`) rather than restating it, so a further move of the
+  convention moves every fixture's draw with it instead of rescaling it
+  silently. The fixture constants stay in the door's own convention.
+
+## One axis marginal, three measures
+
+* **A boundary-truncation label was weakened by the very thing it was asked
+  about** (gcol33/tulpa#660). `53a2ef9` folded the outer cells' quadrature
+  weights into the axis marginal for every caller at once; #657 put the rail
+  back on the unweighted read and the other two callers were never re-asked.
+  `.nl_axis_edge_mass()` names an axis holding material weight on a boundary
+  node, and the weights include `.hyper_domain_clamp()`, which SHORTENS the
+  outermost cell when the naive half-step mirror would reach past the axis's
+  declared support -- so a bounded axis read weakest exactly at the boundary the
+  label is about. Measured over 192 BYM2 `(sigma, rho)` configurations: the
+  shipped lift runs at median 0.7826 of the unweighted read and as low as
+  0.5100, thirteen axes lost the label and none gained one. The label now reads
+  a third measure, `"span"`, which keeps the widths a node's own spacing gives
+  it -- an outer node owning a wide cell holds mass its node count does not see
+  -- and drops only the domain closure. `.nl_axis_marginal_w(measure =)` names
+  which of the three each caller wants; the rail keeps `"inner"` and every
+  reported mean, interval and spread keeps `"posterior"`.
+
+* The `"resolve"` placement trigger was checked against the same folding and is
+  unchanged: its threshold was calibrated twenty days before it, and over 240
+  axis-configurations the two reads flip no fire decision (ratio 0.777 to 1.341,
+  and equal to the bit on any single-axis log-spaced grid).
+
+* `outer_grid_h_over_sd` on a fit and `.nl_axis_h_over_sd()` are two different
+  quantities, and the comment describing the first was written about the second.
+  They agree on none of twelve measured axes and sit six orders apart on a
+  collapsed one. Both are kept and both now say what they are.
+
+# tulpa 0.2.14
+
+## The outer grid says what it did
+
+* **`n_threads_outer` was clamped to `omp_get_max_threads()` with no signal, so
+  a 10x reduction in the parallelism a caller asked for left no trace**
+  (gcol33/tulpa#651). The clamp is correct and stays -- `NlCellCache` sizes its
+  slot array from `omp_get_max_threads()`, so an unclamped `num_threads(n)`
+  would map excess workers onto slot 0 and corrupt the shared CHOLMOD factor.
+  What was missing was the report: a clamped-to-1 run and a serial-by-design run
+  printed byte-identical progress lines. A fit whose realised width is below the
+  requested one now says so once, naming the binding cap and how to lift it, and
+  records `n_threads_outer_requested` / `n_threads_outer_realised` so a timing
+  going into a report can state what it actually ran at. Measured motivation: a
+  25 km `occu_cover` fit launched at `n_threads_outer = 10` under
+  `OMP_NUM_THREADS=1` ran 32.5 h at 99% of one core and produced no checkpoint.
+
+* **The CCD mode-find ran for hours printing nothing, so a working fit and a
+  hung process were indistinguishable** (gcol33/tulpa#652). The progress reporter
+  belongs to the outer-grid loop, which the mode-find runs *before*, and at
+  `d = 4` one round is 33 full inner solves. The seed pass, each calibration
+  round and each mode-find round now emit a heartbeat on the fit's own
+  `progress` switch, carrying the spend against the ceiling, the step size, the
+  log-posterior and per-eval timing; a configured `progress_file` carries the
+  outer reporter's own four-number format, so a detached placement phase is no
+  longer an empty file.
+
+## Placing a design is now budgeted, and screening can no longer hide a collapse
+
+* **CCD placement cost was unbounded by the integration it replaces**
+  (gcol33/tulpa#653). Every reason in `.CCD_DECLINE_REASONS` was about whether a
+  Gaussian design is *definable*; none was about whether placing it is worth it,
+  so an expensive model could spend up to ~1976 inner solves at `d = 4` placing
+  a 25-node design. `control$ccd_budget` (default 1) caps the placement at the
+  tensor grid it would otherwise integrate: break-even, so a successful
+  placement never costs more than the integration it replaces and a failed one
+  caps the waste at the same number. It declines with
+  `integration_declined = "placement_budget"` up front when even the cheapest
+  placement cannot fit, and mid-placement when the spend reaches the ceiling.
+  The cost is reported as `ccd_modefind_evals` / `_budget` / `_rounds` /
+  `_seconds`. `control$ccd_stencil_reuse` (default `FALSE`, and **unmeasured**)
+  trades a stencil's mixed corners for an SR1 secant update, keeping the
+  diagonal measured and the design's closing curvature a genuine finite
+  difference; it is off by default because its value has not been measured on a
+  real fit, which is the remaining open half of the issue.
+
+* **`control$prune = TRUE` could return a displaced posterior and report a grid
+  boundary as an estimate, tripping neither safety-gate trigger**
+  (gcol33/tulpa#656). Three separate defects, all fixed:
+  - The screen kept so few cells that the placement pass had no curvature to
+    read, declined `no_usable_curvature`, and left the axis on its default span
+    with the mass on the top node -- a reported `sigma` of exactly 3.000 that was
+    the top of an un-recentred axis rather than an estimate. The screen now
+    floors the kept set at `.NL_SCREEN$min_keep` (5): a central second difference
+    needs 3 collinear nodes, so 5 is the smallest floor under which no axis can
+    be a point mass.
+  - `prune_tol` is a normalised weight and loses resolution on a steep surface.
+    `control$prune_log_gap` states the cut in **nats** instead, and a fit reports
+    the realised cut (`prune_log_gap_cut`) against the spread of the whole
+    screened surface (`prune_cheap_lm_spread`) -- a cut of 6.9 nats against a
+    spread of 98000 is the pathology, now readable off the fit.
+  - The gate's gap threshold was computed from the spread of the cells that
+    survived, so a trigger meant to bound the error from the discarded set was
+    scaled by the set it was validating. It now reads the screen's own cut: an
+    error exceeding the margin cells were discarded by is large enough to have
+    moved one across it.
+  A screened fit whose placement declines for want of curvature now warns and
+  refits on the full grid rather than reporting the boundary.
+
+  `?tulpa_nested_laplace` claimed a silently-wrong pruned posterior was
+  impossible. It was not, and that sentence is gone: the gate bounds a
+  *mis-ranking* among the cells that were solved, and a cell it discarded and
+  never solved is outside what it can see.
+
+## A bounded axis has a domain, and a stated axis is a bound
+
+* **`.hyper_axis_support()` returned 1.010 as the support of a spatial
+  correlation** (gcol33/tulpa#657). The half-node-step rule extrapolated past the
+  end of the parameter's own domain: `rho_car`'s default nodes
+  `c(0.5, 0.8, 0.95, 0.99)` closed at 1.01, and a sampler taking that support as
+  its flat prior reaches a region where the proper-CAR loading is numerically
+  intrinsic. The node spacing is **not** what was wrong -- `.hyper_axis_level_weights()`
+  exists so an unevenly placed node set integrates the *declared* measure, and
+  flat-in-logit would be improper on a bounded domain and put as much mass on
+  the last percent below 1 as on the whole middle. The **cell closure** was
+  wrong. One rule now: an outer cell owns half the distance to whatever comes
+  next on that side, the next node or the boundary. A domain registry
+  (`.NL_AXIS_DOMAIN`) makes the class unreachable rather than fixed once.
+
+  **This moves outer weights** on any fit carrying a correlation axis whose top
+  cell reached past 1: `rho_car`'s outermost prior weight falls 0.0606 to 0.0388,
+  BYM2 `rho`'s 0.00944 to 0.00527. Point estimates and modes are unaffected; the
+  grid-marginalised posterior moves. An evenly spaced grid whose top node crowds
+  the boundary no longer gets equal weights, which is deliberate -- its top cell
+  cannot extend past 1.
+
+  Also fixed here: `rho` names four different parameters (BYM2 mixing,
+  proper-CAR, AR1, and the multi-output cross-field correlation), so the
+  name-keyed `c(0, 1)` domain was a false claim that made the shipped `hsgp_mo`
+  default grid unconstructible. Axis bounds now resolve through the one registry.
+
+* **A caller-stated outer-grid axis was extended anyway, so "these are the
+  nodes" could not be expressed** (gcol33/tulpa#658). Refinability was decided by
+  axis NAME, so a stated copy axis opted into the adaptive-grid passes whether
+  or not the caller wrote its nodes down: a user stating `c(0.2, 0.5)` got a fit
+  integrating `[0.020, 4.94]`, about 100x the range they asked for, reported
+  nowhere. A stated axis is now a **bound**. It is still refined -- more finely,
+  inside the range given -- and a mode outside it shows up as mass at the edge
+  instead of moving the range. `control$axis_refine = c(alpha = "none" |
+  "densify" | "extend")` sets it per axis; `auto_grid()` on the nodes marks an
+  axis a wrapper package computed as engine-placed, so it keeps extending. A fit
+  reports `axis_span` per axis, separating the refinement term from the exact
+  half-node-step term (`k / (k - 1)` of the stated range: 2x at two nodes,
+  1.125x at nine).
+
+  **This narrows some existing fits.** Any fit that stated an axis and relied on
+  `adaptive_grid = TRUE` extending it now integrates the stated range. It also
+  reaches the var-of-means consistency pass, which runs by default on every joint
+  fit and not only under `adaptive_grid = TRUE`; and since the engine has no
+  default for `phi_grid`, every `phi_*` axis counts as stated. Restore the old
+  behaviour per axis with `axis_refine = c(alpha = "extend")`.
+
+## Hyperpriors reach every block they name
+
+* **`prior_alpha` and `prior_sigma` on a multi-block joint grid regularized only
+  the first block carrying the axis, silently** (gcol33/tulpa#655). A fit copying
+  two blocks got block 1 shrunk and block 2 flat with no message. One spec now
+  reaches **every** block carrying that axis, and a per-block list
+  (`list(list(block = 1, prior = ...), ...)`, keyed the way the multi-block copy
+  spec already keys its amplitude side) regularizes blocks differently. Naming a
+  block that carries no such axis is an error listing the blocks that do. The
+  fold needed no new machinery -- it is per-axis-spec by construction, so N
+  blocks is N independent folds; under the old code block 2's atom was never
+  reached at all. A fit records what was applied in `hyperprior_axes`.
+
+  **This changes results** for a direct `tulpa_nested_laplace_joint()` caller who
+  passed one spec to a grid carrying that axis on several blocks. Broadcast
+  rather than refusal is what keeps the engine's own
+  `.joint_multi_sigma_grid_rescue()` coherent: it sets a scalar `prior_sigma` on
+  a multi-block grid and refits, and fires exactly on the multi-copy-block
+  collapsed-edge fits this issue is about.
+
+## Fixed in passing
+
+* **Rail detection was riding on prior mass placed outside the parameter's
+  domain.** `.nl_axis_rail()`'s marginal folds the outer prior's cell masses, and
+  the domain closure above shortens exactly the cell at the boundary being
+  tested, which moved the argmax to an interior node and stopped a railed BYM2
+  mixing weight being detected at all. The rail now reads the inner marginal,
+  which carries no cell widths and is invariant to both the domain closure and
+  to refinement subdividing cells; the two clauses, the `lift = m * w[k]` form
+  and the threshold of 2 are unchanged. This was latent before this release:
+  `#375` calibrated the guard at 2.511 on the 100-region BYM2 `rho` fixture, and
+  a later change folding `log_quad` into the same marginal moved the measured
+  quantity to 2.099 without re-tuning the threshold, leaving 5% of headroom. The
+  detector now reads 2.5106 with the domain closure on or off.
+
+* Axis `bounds` on a multi-block joint grid resolved on the block-prefixed name
+  while the scale and point-mass metadata resolved on the bare one, so `b1.sigma`
+  and `b1.rho` carried no domain at all.
+
+# tulpa 0.2.13
+
+* **`logLik()` resolved `df` to 0 whenever `n_fixed` was unset, so `AIC()` and
+  `BIC()` came back identical.** The count was picked with a `%||%` chain over
+  `length()` calls -- `n_fixed %||% length(mode) %||% length(means)` -- and
+  `length(NULL)` is `0`, not `NULL`, so the chain accepted the zero at its
+  middle term and the `means` fallback was unreachable. Both information
+  criteria then carried no parameter penalty and reduced to `-2 logLik`, which
+  is finite and plausible and ranks nothing. Resolved from the first candidate
+  that yields a positive count instead; the priority (`n_fixed`, then `mode`,
+  then `means`) is unchanged (#654).
+
+# tulpa 0.2.12
+
+* **A refined grid's per-cell lists were sized from cell 1, which a cheap-pass
+  screen can leave empty.** `.joint_glue_extras_to_res()` decided whether a
+  joint fit carries per-cell modes, iteration counts, precision triplets and
+  covariance blocks by testing `extras[[1]]` alone. Which side data a fit holds
+  is a property of the FIT (`store_Q`, the kernel's own outputs), but which
+  CELLS hold it is not: `prune = TRUE` never solves a screened-out cell, so
+  that cell has no mode, no precision and no covariance block whatever the fit
+  stored. When the screen dropped the grid's first corner, the test read a
+  pruned cell, the rewrite was skipped, and the lists stayed at their
+  pre-refinement length while the grid grew under adaptive refinement.
+  `tulpa_posterior_draws()` builds its mixture from those per-cell precisions
+  and refuses a list that does not index the grid, so prediction stopped on a
+  fit that had otherwise converged. Each list is now sized from the first cell
+  that actually carries the field; a pruned cell keeps its empty slot and is
+  skipped by the mixture rather than filled in.
+
+# tulpa 0.2.11
+
+* **Every R-level `phi` is the residual VARIANCE for `gaussian` / `lognormal`
+  (gcol33/tulpa#650).** It was the variance at `tulpa()`, `tulpa_laplace()`,
+  `tulpa_ep()` and `build_glmm_logpost()` and the residual SD at
+  `tulpa_nested_laplace()`, `fit_st_nested()`, `fit_spde()`, the
+  `tulpa_nested_laplace_joint()` arms and their `phi_grid`,
+  `tulpa_sample_glmm()`, the `laplace_*_at()` helpers and the rational-SPDE
+  helpers, so one model was `phi` at one door and `sqrt(phi)` at another.
+  `.phi_to_kernel()` is now called once per function, adjacent to the kernel
+  call that wants the SD; the joint tier converts at its single C++ boundary,
+  covering the arm scalar, the per-arm `phi_grid` override and the
+  `[n_arms x n_batch]` `phi_batch`. The compiled surface is not uniformly SD,
+  so the conversion is not blanket: `cpp_glmm_oracle_make` and
+  `cpp_re_cov_gibbs_sweep` take the variance and are handed `phi` raw, and
+  `truncated_gaussian`, `interval_gaussian` and `inverse_gaussian` are their own
+  families rather than variance families. `fit_spde()` stores `$phi` in that one
+  convention instead of `$phi_kernel`. **This changes what an existing call
+  means**: a script passing a residual SD to any of the flipped doors now states
+  its square, and passes `phi^2` to describe the same model.
+
+* **A `phi_grid` axis is the residual variance too, and the fixtures that carry
+  one were left on the SD scale (gcol33/tulpa#650, gcol33/tulpa#649).** An entry
+  in `phi_grid` overrides the arm's scalar `phi` outright, so squaring the
+  scalar alone is a no-op on any fixture with an axis and the axis is the only
+  thing the kernel reads. Seven test fixtures and four vignettes are restated on
+  the variance scale, each describing the model it describes.
+  `test-nested-laplace-joint-phi-grid.R` was `skip_on_cran()`-gated and reading
+  7 FAIL / 7 PASS: every recovery assertion in it compared a posterior mean over
+  a variance axis against a true SD. `test-recenter-pilot.R`'s fixture had
+  stopped collapsing its outer grid -- ESS 1.53 -> 4.95 against a `< 2` trigger
+  -- so its placement never fired and the `h / sd` identity block was measuring
+  nothing.
+
+  The engine is unchanged across this. Built clean at `66e5f60` and at the fixed
+  fixtures and run on the same outer grid, every cell whose coordinates match
+  exactly returns a bit-identical `log_marginal`; the cells that differ are the
+  adaptive-refinement nodes, whose coordinates differ because the phi axis does.
+
+# tulpa 0.2.10
+
+* **`phi` means two different things on two sets of doors, and only some of
+  them said so (gcol33/tulpa#645).** The R family registry parameterizes
+  `gaussian` / `lognormal` by the residual VARIANCE and the compiled kernels
+  by the residual SD; `.phi_to_kernel()` converts between them at exactly two
+  call sites, `tulpa()` and `tulpa_laplace()`. Every other door hands `phi` to
+  its consumer raw, so one model is `phi` on those front doors and
+  `sqrt(phi)` on `tulpa_nested_laplace()`, `fit_st_nested()` and `fit_spde()`,
+  and a reader taking one for the other is out by a factor of `phi`.
+  `tulpa_nested_laplace()` documented `phi` as "Dispersion (negbin/gamma)",
+  naming the two families where the value is neither convention and staying
+  silent on gaussian; `fit_spde()` and the internal `laplace_spde_at()` /
+  `laplace_gp_at()` said "negbin only" / "negbin / gamma only" for a `phi`
+  the shipped tests pass `sqrt(0.05)` to on a gaussian fit;
+  `fit_st_nested()`, `tulpa_ep()` and `build_glmm_logpost()` said only
+  "passed to the family". Each now names its convention, the per-family
+  reading and the counterpart door. `tulpa_ep()` and `build_glmm_logpost()`
+  evaluate the R registry, so their `phi` is the variance; the rest are
+  kernel doors and take the SD. `tulpa_nested_laplace_joint()`,
+  `tulpa_sample_glmm()`, `fit_spde_nuts()` and `tulpa_laplace()` already said
+  so and are unchanged. Documentation only: no argument, default or
+  numerical behaviour moved.
+
+# tulpa 0.2.9
+
+* **The #317 mixed-read gate scored its three arms under two different
+  outer-edge policies, and its pins predated the flip that caused it
+  (gcol33/tulpa#643, gcol33/tulpa#644).** `cc3e8ed` moved
+  `.NL_SUPPORT$mixed$outside` from `"clamp"` to `"extend"` so that a locally
+  refined fit and the unrefined fit of the same model could not report intervals
+  built two different ways. The gate in
+  `test-nested-laplace-joint-ccd-local.R` was not re-measured with it -- that
+  commit's own sweep ran at `local_ccd = NULL`, so the arm it scored was the
+  density path and the arm that moved was `mixed` -- and its `mixed` totals rose
+  from 3.18024 / 2.69889 to 3.46157 / 3.14443, taking `:785` red under the slow
+  tier while staying invisible at `TULPA_FAST=1`.
+
+  Its two comparators had meanwhile stayed on an inline `outside = "clamp"`, so
+  the comparison varied the collapse construction and the edge policy together
+  when it exists to isolate the first. All three arms now go through the one
+  dispatch at the one within-cell construction. Scored on a common policy the
+  gate's verdict holds either way and the margin is wider under the shipped one
+  (`lo`: mixed 3.14443 against 4.79910 and 4.48729, where under `clamp` it is
+  2.69889 against 3.92249 and 3.83155), so what moved is the margin and not the
+  finding. Bisected across 205 commits, and the pins are re-measured rather than
+  regenerated: the comment records both the flip and the alignment.
+
+# tulpa 0.2.8
+
+* **A single-block outer cell's cost is the per-row predictive-variance loop,
+  and it is now both cheaper and optional (gcol33/tulpa#638).** The loop fills
+  `fitted_eta_var` with one back-solve per observation per cell, and it is the
+  whole of the path's size dependence: with it switched off the per-cell cost is
+  flat in N (0.225 to 0.254 s over N = 900 to 10800 on a 30x30 ICAR lattice,
+  11 cells, serial), with it on it is `0.217 + 4.685e-4 N`. Two changes. A row's
+  loading vector is `(X row, RE group, per-block index and weight)`, none of
+  which moves with the outer cell, so rows agreeing on all of it carry the same
+  vector at every cell and the driver now solves one of them and hands the value
+  to the rest -- an intercept-only design with 900 distinct rows of 5400 costs
+  0.244 of what its N predicts and 1.047 of what its distinct count predicts,
+  4.07x. And `control$fitted_var = FALSE` skips the pass outright for a caller
+  that reads only `fitted_eta`, 21x at N = 10800. The key is compared on exact
+  bit patterns with every merge confirmed element-by-element, so a hash
+  collision cannot fuse two rows. `SparseCholeskySolver` also gained a
+  workspace-reusing `cholmod_solve2` path, so the back-solves no longer allocate
+  and free per call.
+
+* **Cheap-pass grid screening is reachable from `tulpa_nested_laplace()`
+  (gcol33/tulpa#639).** Both entry runners hardcoded `prune_tol = 0.0`, so the
+  eleven single-block entries could not screen even though the shared driver,
+  the `CheapEval` closure and the safety gate were all built for them -- and
+  this is the path where a cell is expensive enough for screening to pay.
+  `control$prune`, `$prune_tol`, `$screen_iters` and `$fitted_var` now thread
+  through to every entry, under the same `.joint_prune_safety_gate` the joint
+  front door applies, so a single-block fit cannot silently return a pruned
+  answer either. The gate's warning now names the front door the fit came in
+  through.
+
+* **The cheap screen's depth is a control knob with a measured default of 2,
+  down from a hardcoded 5 (gcol33/tulpa#640).** The screen runs on every cell
+  and only has to RANK them, and each cell is warm-started from its
+  already-screened lattice neighbour, so every step above what the ranking needs
+  is paid on the whole grid including the cells it keeps. Over four fixtures at
+  depths 1/2/3/5 the answer does not move -- Spearman 1.000 against the full
+  solve, argmax kept, at most 1.2e-3 of the true posterior mass dropped, fixed
+  effects within 4.8e-5, safety gate never fired -- while the cost does: on the
+  fixture that isolates the screen's own price, depth 5 is a net loss at 0.75x
+  where depth 1 is 1.33x. The default is 2 rather than 1 because a small 8-cell
+  ICAR fixture ranked at Spearman 0.976 on one step and 1.000 on two. Set it per
+  fit with `control$screen_iters`; pruning itself remains opt-in.
+
+# tulpa 0.2.7
+
+* **The outer-grid placement pass no longer has to be paid for with a full grid
+  (gcol33/tulpa#636).** Placement reads an argmax cell and an FD curvature
+  stencil, both off `log_marginal`, and neither off the integration the
+  detecting pass paid for -- so a placement that fires discards every inner
+  Newton solve of the grid it detected on. `control$recenter_pilot` on
+  `tulpa_nested_laplace_joint()` (default `FALSE`) detects on a THINNED grid over
+  the same spans -- both endpoints kept plus at most three nodes between them --
+  and solves the full grid once, at the placed axes. The rescues are unchanged:
+  each already detects on the fit it is handed and writes onto the prior it is
+  handed. Measured over 48 paired seeds on a `(sigma, alpha, phi)` donor + copy
+  fixture: 0.78x the cells solved where the placement fires on 10 of 12 seeds,
+  1.29x where it never fires, so the knob is off by default and pays exactly
+  when the pilot's cells cost less than the firing rate times the full grid.
+
+* **The pilot is a pre-screen, so it can only ADD a placement.** A pilot whose
+  detection places nothing is followed by the full fit, which then gets its own
+  detection through the same rescue pair; a fit declining both is bit-identical
+  to the same fit with the knob off. A coarse grid does fire somewhat more
+  readily (the trigger is `ess_grid < 2`, which falls with the cell count): over
+  the same sweep the arms disagreed on 9 of 48 pairs, every one the pilot placing
+  where the full grid did not, 7 of the 9 reaching a higher maximum inner
+  log-marginal. `outer_grid_pilot` records the pilot's resolution, cells, thinned
+  and kept axes, and the regime / ESS / edge axes it DECIDED from -- the reported
+  grid is never the grid the trigger was read on.
+
+* **A recentred axis's reported `h / sd` is `1.25 * sd_used / sd_realized`, not
+  1.25.** The node layout's ratio is in PLACEMENT SDs; `.nl_axis_h_over_sd()`
+  divides by the weighted posterior SD the placed grid realizes, so the two agree
+  only where the placement SD is the one the weights realize. Wherever the mode-SD
+  clamp SUBSTITUTED a bound they cannot: the floor exists to widen an axis sharper
+  than it. Measured, floor binding on 18 of 18 placed fits, `sd_raw` median 0.0543
+  against the substituted 0.15 and a realized 0.0489, reported 3.83. The comment
+  claiming 1.25 "by construction" is corrected, and the identity is pinned by
+  test. An axis no rescue moves carries no such relation at all.
+
+* `.nl_grid_ess()` is the one read of a grid's quadrature effective sample size,
+  behind `.joint_pareto_grid_regime()` and `diagnostic_summary()` alike.
+
+# tulpa 0.2.6
+
+* **A NUTS chain that ends by an exception no longer leaves the progress
+  reporter registered (gcol33/tulpa#635).** `g_active_grid_progress` is a
+  process-global raw pointer to a reporter owned by a local `unique_ptr`, and
+  both places that set it cleared it only on the normal exit path. Any exception
+  in between -- a model's `Rcpp::stop` from its own gradient, a non-centered
+  field transform reporting `Q` not positive definite, `bad_alloc` from a
+  per-chain buffer -- destroyed the reporter with the frame and left the global
+  naming it. The next NUTS run in that process read the non-null pointer, took
+  it for an already-active reporter, declined to build its own, and ticked the
+  freed object once per iteration. `ActiveGridProgressScope` now ties the
+  global's lifetime to the frame that owns the reporter, closing every exit at
+  once. Measured before and after: unfixed, the pointer is still set once a
+  chain has been killed by a planted gradient exception and the following chain
+  is denied a reporter of its own; fixed, it is cleared and the following chain
+  builds one.
+
+* **The outer-k candidate dispatch is unchanged at the default budget, verified
+  on 3300 configurations (gcol33/tulpa#634).** gcol33/tulpa#629's synthetic sweep
+  re-run on current main is BIT-IDENTICAL to its committed baseline across all
+  3300 rows and all 24 columns, adopted proposal source included -- the same
+  standard gcol33/tulpa#630 used, and the strongest available statement that the
+  tail-rule change above does not move a default fit. Along the way the
+  skew-normal rescue was measured rather than assumed: it is adopted on 7 of
+  3300 rows, scored on 34, improves the k-hat by a median 0.106 where adopted,
+  and crosses a reported band on **none** of them. Every adopted row is a
+  target whose true skewness is exactly 0, so the gate is firing on
+  sample-skewness noise in a heavy tail rather than on asymmetry. Reading
+  `pareto_k_proposal_source == "skew_normal"` as "this fit needed a skew
+  correction" over-reads it.
+
+* **One documentation claim corrected.** The candidate dispatch was described as
+  keeping the minimum over all four candidates, so that none could make a fit
+  read worse. It keeps the better of each rung and its input, which is not the
+  same: the mixture is compared to the GRID-MOMENT Gaussian rather than the
+  moment-matched one, deliberately, so that a refined Gaussian which got under
+  the mixture only by widening past the grid cannot mask a grid-width
+  deficiency. A fit can therefore report a mixture at 1.161 with a
+  moment-matched Gaussian of 0.889 in hand, which happens on 1 of the 3300
+  sweep cells.
+
+* **The copy coefficient's outer axis can be integrated more finely without
+  restating its prior (gcol33/tulpa#633).** It was the one outer axis a copy fit
+  could not raise: `alpha_grid` REPLACES the nodes, and the axis carries prior
+  structure -- the atom at 0 that gives the "no copy" base model posterior mass,
+  plus a log-spaced slab -- so a caller who only wanted a finer integration had
+  to restate the prior to get one, and consumers close the grid off entirely
+  under `copy()` for that reason. `alpha_n` (`field_coef$n` on the single-block
+  path) re-reads the engine's own axis at a higher RESOLUTION: same bounds, same
+  atom, more nodes between them. Supplying both it and `alpha_grid` is an error
+  rather than a silent ranking. Underneath, `.nl_grid_axis(key, n =)` re-reads
+  any declared axis at a different resolution and refuses on one declared as
+  explicit nodes, which has no resolution to vary.
+
+* **The saturation is in the placement, not the prune.** Measured engine-side
+  rather than through the consumer package, since the axis is the engine's:
+  raising the donor `sigma_grid` from 13 to 29 nodes leaves the alpha axis at
+  its declared 6 at every setting and grid ESS at 1.7 / 3.1 / 4.3 while the cell
+  count more than doubles, and `prune = TRUE` reproduces the same node counts
+  and the same ESS to the digit. With the resolution raised alongside, ESS runs
+  2.3 / 6.8 / 12.5. Whether the engine should instead solve for a declared ESS
+  floor -- the issue's second open question -- is not answered by this and is
+  not implied by it.
+
+* **`control$k_samples` is a precision knob again (gcol33/tulpa#631).** It was
+  documented as one and was not: under the published PSIS tail rule
+  `min(S/5, 3 sqrt(S))` the fitted tail FRACTION shrinks as `3 / sqrt(S)`, so a
+  larger budget described a DEEPER quantile of the weight distribution rather
+  than the same one more precisely, and two fits of one model differing only in
+  their budget could report different reliability bands. The four outer
+  backends now resolve their tail size through `.k_outer_tail_points()`, which
+  holds the fraction the default budget implies. The fraction is INHERITED from
+  `.nl_diag("k_samples")` rather than chosen, so a default fit is bit-for-bit
+  unchanged on every backend -- the helper returns `NULL` there and the
+  explicit-request path, with its 20% cap and cap warning, is never entered.
+  Resolved once in `.k_dispatch()`, the single candidate loop gcol33/tulpa#630
+  put behind all four backends. `tulpa_psis()`'s own default stays the published
+  rule, so the `loo::psis()` equivalence oracle is untouched.
+
+* **The held fraction is a FLOOR under the published rule, not a replacement.**
+  Below the reference budget the published rule is in its `S/5` regime and is
+  the more generous of the two -- 40 tail points at 200 draws against the
+  fraction's 27 -- so replacing it would have bought a stable estimand by making
+  every cheap diagnostic noisier. Measured cost of getting that wrong: a per-arm
+  k-hat crossing its reported band on the 200-draw fixture in
+  `test-joint-pareto-k-proposal.R`. Under the floor no budget is fitted on fewer
+  tail points than before, and the fitted fraction is confined to `[13.5%, 20%]`
+  over a 500x range of budgets instead of collapsing to 1.3% at 50000 draws.
+
+* **`k_tail_points` now exists on the backends whose documentation named it.**
+  It was a joint-path knob only, while `tulpa_re_cov_nested()`, `fit_spde()` and
+  `tulpa_nested_laplace()` documented it as the way to hold the estimand -- so
+  following that advice hard-errored on an unknown control knob. All four accept
+  it and thread it to the shared PSIS core.
+
+* **A skewed hyperparameter marginal needs no rescue, and the fixture that said
+  otherwise was reading its own budget.** `test-outer-skew-rescue.R` asserted
+  that a skewness-0.9 target reads unreliable on a symmetric proposal and is
+  repaired by the skew-normal one. Measured across budgets, that target reads
+  0.017 at the shipped budget and climbs to 1.627 at 10000 draws under the
+  published rule; the fixture reached the rescue only because it scores at 4000.
+  This is gcol33/tulpa#629's result -- skewness does not inflate an outer k-hat,
+  a heavy tail does -- arriving from the other side. The test now asserts the
+  measured property. That the rescue is consequently not adopted on any fixture
+  in the repo is recorded as gcol33/tulpa#634.
+
+* **One outer-k draw budget across the four backends that report it
+  (gcol33/tulpa#632).** `R/settings.R` opens by naming copy-pasted defaults as
+  the defect it exists to remove and lists `k_samples` among the five it
+  consolidated, but the joint path never read it: `500L` was hardcoded at the
+  front door, at the escalation's fallback, and in four entry-point signatures,
+  while `tulpa_nested_laplace()`, `fit_spde()` and `tulpa_re_cov_nested()` read
+  `.nl_diag("k_samples")`, which was `200L`. That is not cosmetic. Under
+  gcol33/tulpa#631 the budget sets the PSIS tail FRACTION as well as the
+  precision -- 20.0% at 200, where the `S/5` cap binds, against 13.6% at 500 --
+  and the k-hat is read against the FIXED `k_usable` band, so the same
+  hyperparameter posterior scored on two backends was characterised at two
+  different quantiles of the weight distribution and could be banded
+  differently for a reason the fit did not record.
+
+* **The one value is 500**, which raises the grid, SPDE and RE-covariance
+  default from 200. It is the joint path's, and it is on the record rather than
+  on preference: the joint path was raised from 200 to 500 at gcol33/tulpa#127
+  when outer scoring stopped being adaptive-batched and the single budget
+  started carrying the whole estimate instead of a batch of it -- a reason that
+  covers all four backends now that they all score single-batch -- and 13.6% is
+  both the fraction gcol33/tulpa#631 measured the k-hat to be stable at and the
+  one every shipped outer-k number, the whole gcol33/tulpa#629 and #630 corpus
+  included, was read at. It costs those three paths 500 rather than 200 inner
+  Laplace solves when `diagnose_k` is on, since one draw is one off-grid
+  re-solve; `control$k_samples` sets it per fit on every front door.
+  `k_samples_ok` / `k_samples_good` (the budgets a `k_quality` target starts
+  from, `800L` / `2000L`) and `k_bootstrap` (`1000L`, unchanged in value) moved
+  into the registry with it.
+
+* **The lint that missed it is re-keyed to the concept.** `test-settings.R`
+  searched for `k_samples` next to the literal `200`; gcol33/tulpa#127 renamed
+  the joint variable to `diagnose_draws` and raised it to `500` in the same
+  commit, so the drift walked out from under a rule keyed to one name and one
+  number. The rule now rejects any budget in this family defaulted to a numeric
+  literal outside the settings file, and a companion test evaluates every entry
+  point's default against the registry -- a source lint cannot see a second
+  registry-shaped default that reads a different key.
+
+# tulpa 0.2.5
+
+* **`control$k_samples` moves the outer Pareto-k-hat, not just its interval
+  (gcol33/tulpa#631).** It was documented as the estimate's precision knob. Under
+  the automatic PSIS tail rule `min(S/5, 3 sqrt(S))` the fitted tail FRACTION
+  shrinks as `3 / sqrt(S)`, so a larger budget describes a deeper quantile of the
+  weight distribution: on a synthetic heavy-tailed outer target the reported
+  shape runs 0.57 / 1.41 / 3.53 / 7.94 over 500 to 50000 draws. The estimator is
+  not what moves -- `tulpa_psis()` reproduces `loo::psis()` to 1e-13 at every one
+  of those budgets, a closed-form Pareto control is flat across the same range,
+  and holding the tail fraction gives 0.569 / 0.702 / 0.708 / 0.692 with the seed
+  spread narrowing.
+
+* **The `k_quality` escalation's precision rung no longer moves the estimand.**
+  That rung doubles `k_samples` on a miss whose bootstrap CI straddles a band
+  boundary, and it is the fallback precisely because it should only narrow the
+  interval around whatever the k-hat already is. It now pins the GPD tail size to
+  the fraction the fit's own first pass used, so the extra draws sharpen the same
+  number. An explicit `control$k_tail_points` is left alone, and the pinned
+  fraction is at most 1/5 by construction, so the 20% cap warning never fires.
+
+* The `k_samples` documentation on `tulpa_nested_laplace_joint()`,
+  `tulpa_re_cov_nested()` and the PSIS core is corrected to say what the knob
+  does. The outer-k default remains the published tail rule rather than a fixed
+  fraction; `dev_notes/issue631/RESULTS631.md` records why, and
+  `tulpa_psis()`'s own default is unchanged so the `loo::psis` equivalence
+  oracle still holds.
+
+# tulpa 0.2.4
+
+* **One proposal-candidate dispatch behind all four outer-k backends
+  (gcol33/tulpa#630).** An outer Pareto-k-hat scores a PROPOSAL, so what it
+  reports depends on which proposal families were offered.
+  `tulpa_nested_laplace_joint()` scored four and kept the best;
+  `tulpa_nested_laplace()`, `fit_spde()` and `tulpa_re_cov_nested()` each called
+  the importance-sampling core once and reported the raw first pass. The
+  candidate layer now lives in `R/outer_pareto_candidates.R` on a
+  backend-agnostic contract (`.k_cand_spec()`), and each backend supplies a spec
+  rather than a scorer. A spec with no integration nodes -- `fit_spde(method =
+  "ccd")`, `tulpa_re_cov_nested()` -- withholds the grid mixture rather than
+  reading a design spacing as a grid resolution, and keeps its radius cap at
+  `Inf` as before. The joint path is unchanged bit for bit, asserted by
+  re-running gcol33/tulpa#629's 3300-configuration sweep against its committed
+  baseline. Over that issue's 165 synthetic cells the single-candidate read
+  calls 53 `unreliable` where the full dispatch calls 8, median k-hat 1.159 ->
+  0.736 -> 0.259.
+
+* **A small-group binary RE-covariance k-hat was mostly the proposal's scale,
+  not a skewed posterior.** On `test-psis.R`'s tiny-binary fixture (25 groups x
+  3 binary observations) the proposal as the mode-find places it scores 14.6 to
+  49.1 over five seeds; re-estimated from its own importance-weighted moments it
+  scores 0.29 to 0.78 on four of them, with one genuinely beyond a Gaussian's
+  reach at 39.4. The package documented the high value as a correct signal; that
+  note is corrected, and the arbiter test now asserts the repair and its limits
+  instead of a separation that does not survive.
+
+* **New reported fields on every nested backend: `pareto_k_proposal_source` and
+  `pareto_k_first_pass`.** The first names which proposal family produced the
+  reported k-hat; the second is the k-hat of the proposal exactly as the backend
+  placed it, before refinement. A large gap says the nodes are badly scaled
+  around the hyperparameter posterior even where the verdict is fine -- the
+  "poor integration versus non-Gaussian posterior" distinction gcol33/tulpa#629
+  asked for. `pareto_k_proposal_source` also reports which integrator actually
+  ran: a `fit_spde(method = "ccd")` fit that fell back to the grid path says so.
+
+* `.k_dispatch()` declines below the PSIS floor before any candidate runs, so a
+  sub-floor `control$k_samples` no longer pays target evaluations to discover it
+  cannot fit a GPD tail.
+
+# tulpa 0.2.3
+
+* **What an outer Pareto-k-hat measures, measured (gcol33/tulpa#629).** The
+  `k_quality` ladder was thought to be unable to reach a genuinely SKEWED
+  hyperparameter posterior, with the proposal-side rescues
+  (`.joint_pareto_score_mixture` / `_skew`) as the untouched lever for it.
+  Neither half holds. Skewness is not what a k-hat measures -- the importance
+  ratio against a Gaussian proposal stays bounded on a skew-normal target, which
+  reads a median grid-moment k-hat of 0.224 at true skewness 0.851 and -0.073 at
+  0.967 -- so the skew-normal rescue is scored on 0-5.3% of rows and adopted on
+  0-1.7%, and where it is scored (on a heavy tail, the shape that DOES defeat a
+  Gaussian proposal) it reads worse than the Gaussian it was asked to rescue.
+  Over 165 synthetic configurations the largest gain any un-adopted candidate
+  offers on a miss cell is 0.089, crossing no band boundary, so no proposal-side
+  rung is added to `k_refine`; and every target reaches the good band on some
+  grid, including one at true skewness 6.74 and excess kurtosis 141, so the
+  escalation does not gain a decline rung either. One thing the sweep does say
+  about the shipped `"grid"` rung: on a heavy tail, densifying a too-narrow grid
+  moves the k-hat monotonically the wrong way while widening fixes it, so the
+  boundary-extension half is what earns its place. No behaviour change; the
+  verdict is pinned in `tests/testthat/test-outer-proposal-lever.R` and written
+  up in `dev_notes/issue629/RESULTS629.md`. Two findings from the same
+  measurement are filed rather than folded in: three of the four outer-k
+  backends score a single proposal candidate and read a worse band on 27% of
+  configurations (gcol33/tulpa#630), and the reported k-hat moves with
+  `control$k_samples`, documented as a precision knob only (gcol33/tulpa#631).
+
+# tulpa 0.2.2
+
+* **The `k_quality` escalation reads which lever its miss actually takes, and
+  keeps chasing when refinement runs out.** A miss has two causes: the outer
+  Pareto-k-hat can sit CONFIDENTLY outside the requested band (the integration
+  grid does not represent the hyperparameter posterior), or its bootstrap CI can
+  STRADDLE a band boundary (the point estimate may already be inside the band and
+  only the interval's width prevents confirming it). The loop read only
+  `reached / not reached` and answered both by refining the grid. Refining is
+  correct first on either -- it lowers the k-hat itself rather than the noise
+  around it, and can move an ambiguous k INTO the band, which is what the shipped
+  fixture measures -- but when refinement reports it added nothing, the two
+  separate. A confidently-bad k-hat on a grid that cannot be refined ends the
+  chase as before; an ambiguous one now spends its remaining rounds on the lever
+  refinement never touches, doubling the importance-draw budget so the GPD tail
+  is fitted on more actual tail ratios. Previously such a fit was abandoned with
+  rounds still in its budget, its integration possibly already meeting the
+  request. `.joint_attach_k_quality()` classifies every miss as
+  `k_quality_miss = "resolution"` / `"precision"` (`NA` when there is nothing to
+  classify) and the loop reads that classification rather than re-deriving it.
+
+* Two settings the escalation needed made explicit rather than implied. The
+  refinement switches (`adaptive_grid`, `integration = "grid"`) are set inside
+  the refinement branch, not once before the loop: set before it, a round meant
+  to hold the grid still advanced it by the default one pass. The refinement
+  level counts refinement rounds (`passes`), not loop rounds, so a draw round no
+  longer burns a pass. `k_precision_growth` (2) joins `R/settings.R` with its
+  derivation -- a GPD shape estimate's standard error falls as `1 / sqrt(S)`, so
+  a constant factor is a constant proportional narrowing per round.
+
+* **A fit records the chase, and says which read produced its band.**
+  `k_quality_k_trace` is the outer k-hat round by round, starting at the first
+  fit's, so a chase that did not descend monotonically is visible instead of
+  leaving only the last round's number. The LAST round is returned, not the
+  lowest-k one: the refinement passes are nested, so each round's grid is a
+  strict superset of the last and each round's proposal is rebuilt from the grid
+  that round changed -- returning a smaller grid because a differently-built
+  proposal scored better would be optimising the diagnostic rather than the fit.
+  `k_quality_best` is documented as the band of the RETURNED fit accordingly.
+
+* **Three user-facing messages named a knob that hard-errors.**
+  `control$diagnose_draws` was renamed to `control$k_samples` and the joint front
+  door stops on the old name, but the shared PSIS decline vocabulary
+  (`draws_too_few`, surfaced through `pareto_k_declined` / `diagnostic_summary()`
+  on every nested-Laplace backend), the `k_tail_points` tail-cap warning, and the
+  `k_quality` band-confidence reason each still told the reader to raise it. The
+  roxygen also carried `"the legacy k_samples name is accepted as an alias for
+  k_samples"`, self-referential and false -- there is no alias. All corrected to
+  `control$k_samples`, along with the internal comments that called
+  `diagnose_draws` "the user-facing precision knob" and were what those messages
+  were written from; `fit$diagnose_draws` remains the returned field's name. A
+  source lint in `test-settings.R` fails on an imperative aimed at a dead knob
+  name.
+
+# tulpa 0.2.1
+
+* **A declared hyperprior meets the outer grid in one coordinate, and a
+  declared point mass keeps the prior probability it declares.** Three ways the
+  same rule was stated twice. The joint driver's `prior_sigma` / `prior_alpha` /
+  `prior_phi` families are documented as densities on the axis's natural scale
+  and were added straight to `log_marginal`, whose cell widths are measured on
+  the axis's integration coordinate, so the realised prior was
+  `pi(theta) / theta` rather than `pi(theta)`: on a 9-node geometric `sigma`
+  grid a `pc.prec(U = 2, alpha = 0.05)` put 22.7 % of its mass on the smallest
+  node where the declared prior puts 4.3 %. The change of variables now happens
+  in one place, `.hyper_prior_carry()`, shared by that fold, the generic
+  driver's, and the axis quadrature, and the joint path reproduces the closed-
+  form cell probabilities of its own declared prior to quadrature error
+  (max 0.0034, from 0.184). A density on an axis describes that axis's
+  CONTINUUM, so it is no longer read at the zero level of an axis carrying an
+  `atom_mass` -- where the change of variables had made it `log(0)`, giving the
+  atom zero weight whatever the declared mass said, and where a density finite
+  at the origin instead reweighted the atom against the continuum, so the
+  declared split was not the split the fit integrated. The continuum's declared
+  density now sets its SHAPE and `1 - atom_mass` sets its share, and
+  `.hyper_atom_fold_scale()` weighs the atom on the continuum's own scale where
+  the density is folded into `log_marginal` rather than carried in the weights.
+  A declared `atom_mass` is therefore the prior probability the fit integrates,
+  whatever the density is and however far the nodes reach
+  (gcol33/tulpa#624, gcol33/tulpa#625, gcol33/tulpa#626).
+
+* **The recommended `prior_alpha` on the copy scale moves from
+  `c(U = 8.0, alpha = 0.01)` to `c(U = 4.0, alpha = 0.01)`, and the
+  half-normal from scale 2 to 1.** The old numbers were calibrated against a
+  realised prior of `pi(a)/a`, so correcting the coordinate moves the whole `U`
+  scale. What sets it is the measure the axis carries with no prior at all,
+  and on the copy scale that is not flat: with no `prior_alpha` the axis takes
+  the engine's own exponential slab, whose rate is read off the declared grid
+  by putting 5 % of the prior above its largest node. On this fixture's alpha
+  grid (largest node 2.0) that is `lambda = 1.50`, the strength of a PC prior
+  at `U = 3.07`. A user `prior_alpha` REPLACES that slab rather than adding to
+  it, so it shrinks harder than the default only once its own
+  `lambda = -log(alpha)/U` beats 1.50 -- which is why the bias crosses truth
+  near the slab's own strength and why `U = 8` (`lambda = 0.58`) reads as
+  anti-shrinking. Swept over `U` on
+  `test-nested-laplace-joint-sigma-pos-prior.R`'s own fixture and 50 seeds
+  (alpha truth 1.0, coupled sigma truth 0.6), the alpha geometric bias is
+  monotone in `U` and crosses truth near `U ~ 3.4`: flat +0.056, `U = 8`
+  +0.116, `U = 4` +0.049, `U = 2` -0.071, `U = 0.25` -0.491. `U = 8` now shrinks
+  LESS than the axis's own no-prior measure, which is why it read as a
+  regression rather than a stale constant. Nothing in tulpaObs sets these
+  knobs: `control$prior.sigma` / `.alpha` / `.phi` are forwarded only when a
+  caller supplies them, so no downstream default was calibrated against the
+  old measure. The over-shrinking arms reproduce
+  gcol33/tulpa#22's cross-axis mechanism unchanged -- pulling alpha below its
+  truth lifts the coupled donor `sigma` above 0.6, to 0.94 at `U = 0.25` -- so
+  the recommendation's REASONING stands and only its calibration moved. The
+  test now also asserts what #22 actually claims, that the regularizer beats
+  the flat axis, which no bound in it had been testing.
+
+* **A reported per-axis `theta_sd` comes from the estimator that axis's own
+  resolution calls for.** It was the 3-point parabola at the modal node
+  wherever that fit, which reads the curvature at the mode: a Gaussian summary,
+  and one that moves with the spacing of the three nodes it reads. On the copy
+  axis of a coupled `occu_cover` fit it measured 0.150 against 0.294 on two
+  grids over one data set, and sat four times below the spread it stood in for.
+  The report is now the weighted spread of the axis marginal wherever the axis
+  is resolved, and the parabola only where the marginal has collapsed onto too
+  few nodes to have a spread -- the case it was added for, where the weighted
+  read is a floor at zero. The two regimes are separated by the axis's own
+  quadrature effective sample size, read off the weights, so the choice is not
+  one estimator judging the other: `.nl_diag("axis_sd_ess")` carries the
+  threshold and the ladder it was measured off. On a Gamma(1.5, 2) marginal the
+  weighted read spans 2.26 to 2.30 across three grids where the parabola spans
+  1.16 to 1.88. `theta_sd_source` / `theta_sd_ess` /
+  `theta_sd_stencil_declined` travel on the fit, so which estimator produced a
+  reported SD is a property of the fit. The choice is made in
+  `.nl_posterior_moments()`, so every nested path reports one rule: the
+  single-block and spatiotemporal paths always reported the weighted read, a
+  floor at zero on a collapsed axis, and the joint paths carried their own call.
+  A design-weighted grid keeps the weighted read whatever its ESS, since a
+  central-composite design's nodes are not a per-axis lattice for a parabola to
+  read; that is recorded as `design_weighted` rather than left implicit.
+
+* **The var-of-means consistency pass triggers on the axis ESS, not on one SD
+  estimator compared against the other.** Its old test was the weighted SD
+  against the parabola, which with the weighted read now reported would have
+  been the estimator against itself and the pass would never have fired. It
+  asks the question it is actually about -- how many nodes the marginal spreads
+  over -- and keeps the parabola as the SCALE its new points are placed at,
+  which is the regime that estimator is right in. `control$var_of_means_
+  tolerance` is replaced by `control$var_of_means_min_ess`; the moved knob
+  hard-errors.
+
+* **An outer axis holding weight on a boundary node is named, whether or not
+  its mode sits there.** Both producers of an edge label tested the MODE: the
+  rail returns early unless the boundary node is the axis marginal's argmax,
+  and the grid regime returned `"spread"` without inspecting an axis as soon as
+  `ess_grid >= 2`. So an axis with a third of its marginal on its last node and
+  its mode one node in was reported clean, while truncating its own tail
+  exactly as a railed one does. `outer_grid_edge_mass_axes` (and the regime's
+  `edge_mass_axes` / `_sides`, read in every regime) is the second label, in the
+  rail's own currency -- the boundary node's weight against what a flat marginal
+  would put there, so the threshold means the same at any node count.
+  `.nl_diag("edge_mass_lift")` carries it: `1` is where the boundary node
+  carries what a flat marginal would, and over 1400 arrangements of four
+  marginal shapes it names none that leaves less than 0.7 % of its own marginal
+  outside the span, at a false-alarm rate of 0.011 against "more than 5 %
+  outside". `railed` keeps its own stronger statement, that the span does not
+  contain the axis's own mode.
+
+* **The axis marginal every one of those labels reads carries the grid's
+  measure.** `.nl_axis_marginal_w()` normalised `log_marginal` alone, so a rail,
+  a resolution read and a reported mean were taken against three-quarters of
+  the same object on a grid whose spacing is not uniform.
+
+* **Refinement may not move a declared support.** The consistency pass's slice
+  points are clipped to `slab_bounds` the way the extension proposals already
+  are, so a node outside the declared prior support is not solved for a cell
+  that would carry zero weight. An axis whose posterior presses on that support
+  reports it through the boundary-mass label above.
+
+* **A declared axis prior says which coordinate it is a density on.** An outer
+  axis prior could be declared two ways and the two were read on two
+  coordinates: `slab_log_density` is carried across explicitly (`+ log(x)` on a
+  log axis) while a spec's `log_prior` entered `log_marginal`, which is weighted
+  by cell widths measured on the integration coordinate -- so a caller writing
+  `dexp(sigma)` got a prior tilted by `1 / sigma`.
+  `hyper_axis_spec(log_prior_coord = )` names the coordinate:
+  `"integration"` (the default, and what every existing fit was taken under,
+  since it is also what the flat default's zero contribution is flat on) or
+  `"natural"`, which declares a density on the axis value and picks up the
+  change of variables. Inert on a linear axis, where the two coincide
+  (gcol33/tulpa#623).
+
+* **The outer hyperparameter grid is a quadrature rule for a declared prior,
+  not the prior itself.** Every node carried the same prior weight, so a grid
+  that gained nodes after seeing the data carried a different measure than the
+  one it started with. On a coupled `occu_cover` fixture the copy axis went from
+  6 nodes to 11 and its span from `[0, 3]` to `[0, 16.4]`, which moved the point
+  mass at `alpha = 0` from a sixth of the prior to an eleventh and moved the
+  posterior mean of `alpha` by 18 %. Nodes now carry an integration weight built
+  from their spacing (`R/hyper_quadrature.R`), so placing them differently
+  changes the quadrature error and nothing else. On an evenly spaced grid the
+  weights are equal, which is the rule the engine already applied, so an
+  unrefined grid is unchanged.
+
+* **The copy scale carries a declared prior.** `p(alpha) = w0 * delta_0 +
+  (1 - w0) * Exponential(lambda)`, with `w0 = 0.5` and `lambda` set to put 5 %
+  of the prior above the largest node of the grid the caller declares, which is
+  `Exponential(1)` on the default grid. Both parts are fixed before the fit, so
+  refinement may follow the posterior past the declared nodes and still be
+  integrating the measure it started with. `control$copy_atom_mass` sets `w0`,
+  and a caller-supplied `prior_alpha` replaces the declared density rather than
+  compounding with it. `sigma` and the dispersion axes keep a flat measure over
+  their declared span.
+
+* **`fit$copy_atom` reports the point mass at `alpha = 0` against the posterior
+  mass left on it.** A point mass competes with a continuum, so a posterior
+  concentrated at zero can come from either the data or `w0`, and the two
+  numbers together are what separate them. On a weakly identifying fixture the
+  default `w0 = 0.5` leaves 0.81 of the posterior on the atom against a true
+  `alpha` of 1; at `copy_atom_mass = 0.01` the same likelihood locates the mode.
+
+* **Multi-block axes resolve their scale metadata on the bare axis name.**
+  `.joint_axis_specs()` matched `sigma` and `alpha` exactly, so a multi-block
+  grid's `b1.sigma` fell through to the natural scale. This was invisible while
+  every node weighed the same and became a difference in the weights once they
+  tracked spacing.
+
+* **Every path that turns `log_marginal` into posterior weights carries the same
+  measure.** The single-block and multi-block `tulpa_nested_laplace()` paths and
+  both spatiotemporal paths formed their weights from the log-marginal alone, so
+  the declared prior reached only the joint path. All of them now go through
+  `.nl_grid_log_quad()`, and each fit records the span its quadrature integrated
+  in `fit$axis_support` so a second engine can read it rather than rebuild it.
+
+* **An axis's integration coordinate is declared where its grid is built.**
+  `.hyper_axis_scale()` covers the axes the joint and single-block dispatchers
+  name, `.nl_st_axis_specs()` declares the spatiotemporal ones beside
+  `.st_log_grid()`, and an axis neither covers carries no quadrature weight at
+  all, which leaves its nodes equally weighted. Reading the coordinate off the
+  node spacing instead would let the data choose the measure, and treating the
+  log-spaced `tau_spatial` / `tau_temporal` axes as linear moved the
+  spatiotemporal grid's weights.
+
+* **The CCD designs a copy scale on the coordinate its measure lives on, and
+  splits at the atom.** `.joint_ccd_grid()` took the copy `alpha` from the
+  outer Pareto-k registry, where it is carried as an unconstrained real, and
+  placed an affine design on it. That coordinate has no positivity, so design
+  nodes ran below zero: on a two-block coupled fixture, five of twenty-five
+  cells were solved at a negative copy scale, a sign-flipped coupling outside
+  the model's support. Nor did any node land at `alpha = 0`, so "no coupling"
+  carried no posterior weight on the CCD path at all while the tensor rule
+  integrated it as a level. The continuum is now designed in `log alpha`, and
+  because a copy scale is a point mass at zero beside that continuum, the outer
+  posterior over `n` such axes is a mixture of `2^n` components: one design per
+  subset of couplings switched off, combined by the prior mass each
+  configuration declares (`control$copy_atom_mass`). The two-block fixture goes
+  from 25 nodes to 64, against 144 for the tensor grid it replaces. A grid with
+  no copy atom is a single component and is designed as before, on the same
+  nodes. Past `2^n = 8` components the CCD declines to the tensor rule
+  (`copy_atom_components`). A split design hands the outer Pareto-k no
+  mode-Hessian proposal: its components are built in `log alpha` while the
+  diagnostic unconstrains the same grid on the identity coordinate, the only one
+  that represents the `alpha = 0` cells, and one Gaussian is not a mixture
+  either way. The diagnostic keeps its grid-weighted proposal, which the split's
+  spread of components supports; `pareto_k_proposal_source` reads `grid_moment`
+  on those fits.
+
+* **A grid column holding one value across every cell is a fixed setting, not
+  an axis of the grid.** `.joint_axis_specs_from_grid()` built an integration
+  axis for every column of `theta_grid`, so a constant column was handed to the
+  quadrature as a coordinate to integrate over. A constant contributes the same
+  factor to every cell and cancels when the weights are normalised, and some
+  such columns are not quantities to integrate at all: a Poisson count grid
+  carries an `r = Inf` node to pin the negative-binomial size, which
+  `.nl_grid_log_quad()` then rejected as a non-finite grid. Constant columns are
+  dropped before a spec is built for them, so a pinned sentinel leaves the
+  weights identical to the same grid without it, and a held-but-finite setting
+  shifts every cell by one common constant.
+
+* **`tulpa_nested_laplace()` refuses a non-finite response instead of blaming
+  itself for one.** `.assert_finite_model_inputs()` was wired into three doors
+  by hand and not into this one, so an NA response was absorbed rather than
+  rejected: every grid cell returned `converged = FALSE` with `log_marginal =
+  0`, the softmax over those weights was uniform, a fit came back, and the
+  grid-Hessian retention then found no `Q` on any cell and reported the user's
+  own missing data to them as "This is a tulpa bug; please report." The guard
+  now runs inside `.validate_glm_design()`, the one validator every `(y, X,
+  n_trials)` door goes through, so `tulpa_gibbs()`, `fit_st_nested()` and the
+  `re_cov` fitters are covered by the same fix and a door added later inherits
+  it (gcol33/tulpa#613).
+
+* **The outer Pareto-k diagnostic no longer trips the caller-facing grid-size
+  warning.** The re-evaluation substitutes `control$k_samples` (default 200)
+  importance draws for the block's grid axis and re-dispatches through the
+  ordinary fitter, so a 7-node fit warned that its grid had 200 cells and
+  advised reducing per-block grid sizes -- advice about a number the caller did
+  not choose and that remedy does not reach. `.nl_internal_batch()` is the one
+  predicate separating an internal batch from a grid the caller asked for, and
+  the joint side reaches it through `.joint_with_quiet_opts()`, which already
+  quiets the checkpoint and the progress bar for the same class of leak. The
+  hard cell cap is deliberately not gated: it is a resource ceiling, and an
+  internal batch costs exactly what a user one does (gcol33/tulpa#614).
+
+* **The Windows arm64 parallel failure is the OpenMP reduction losing a
+  thread's contribution, and no fit goes through it.** `tulpa_parallel_sum()`
+  cuts a range into contiguous chunks by index arithmetic and adds the chunk
+  totals in chunk order, precisely so nothing about a sum is left to the
+  runtime, and every hot loop was moved onto it -- but the two fixtures behind
+  `test-parallel-equivalence.R` were left on a raw `reduction(+:)` clause, so
+  the failures they produced were on a construct that ships nowhere. Read off
+  the r-universe R-release build's own numbers: `log_lik = -669.2` against a
+  true -898.6, and the missing 229.417 is, to the four figures the report
+  printed, exactly the last chunk of a 4-thread static split (chunk sums
+  -221.97 / -219.51 / -227.70 / -229.44; dropping the fourth gives -669.18).
+  One private copy was not added in. The iterations ran -- the same build
+  passed the per-element `results` identity at every thread count -- so what
+  failed is the combination the runtime performs at the end of the region,
+  which is the one step `tulpa_parallel_sum()` never asks it for. Both
+  constructs are now computed over the same values in the same call, beside the
+  per-observation results, the requested thread count, the resolved team size
+  and the team the loop actually ran on; the reduction tolerance is the
+  summation bound the values imply rather than a fixed constant (2.6e-11 and
+  1.0e-10 absolute here, against the 1e-10 relative that failed, so the shipped
+  construct is held more strictly than before); and `sum_shipped` carries the
+  verdict while `sum_omp_red` warns with the numbers, since a red suite there
+  would be a third-party runtime defect on a construct no fit can reach
+  (gcol33/tulpa#610).
+
+* **`parallel_block_reduce()` no longer carries a `reduction(+:)` clause.** It
+  was the last one in the tree outside the test fixtures, in the package's own
+  linear-algebra header, named for the job `tulpa_parallel_sum()` does and
+  carrying the construct that job exists to avoid. It has no caller, so nothing
+  was non-reproducible; it is where the next caller would have picked it up
+  (gcol33/tulpa#618).
+
+* **CI checks the arithmetic the package actually ships.**
+  `-ffp-contract=off` pins a C++ result and the same expression in R to the
+  same rounding, which is what makes a numeric assertion comparable across the
+  matrix -- but with it on every job, nothing in CI compiled the arithmetic
+  CRAN and r-universe build. 0.2.0 was green on all four platforms and then
+  failed `checking tests` on every aarch64 r-universe build. `fp-contract` is
+  now an input on the `build-env` action, and macOS arm64 -- the only platform
+  in the matrix where FMA is reachable, since it is baseline on aarch64 and
+  absent from the generic x86-64 the others compile for -- runs both ways. A
+  failure the unpinned job alone shows is the contraction; one both show is the
+  algorithm (gcol33/tulpa#611).
+
+* **`plot.sbc()`'s arguments are documented by the block attached to it.** An
+  internal helper had been inserted between the `@param` tags and the function,
+  so the `#` comment opening it ended the roxygen block and the tags attached
+  to the helper, which carries no title and discards them without a warning.
+  `man/sbc.Rd` still listed the four arguments only because it predated the
+  move: regenerating the documentation deleted them, and the next `R CMD check`
+  after that would have reported `Undocumented arguments in documentation
+  object 'sbc'` -- a WARNING, on whichever unrelated commit happened to run
+  `document()` (gcol33/tulpa#619).
+
+* **The calibration surface is documented.** `sbc()` and the predictive shapes
+  it consumes shipped exported and tested, and appeared in no reference index,
+  no vignette and no README section, so the only way to find them was to read
+  `NAMESPACE`. `vignette("sbc")` is the new article: both experiments run
+  end to end on a nested-Laplace fit, with the deliberately mis-scaled control
+  arm the run has to reject, the guards each experiment's premises are checked
+  by, and the measured disagreement between this and the per-fit reliability
+  band in both directions (gcol33/tulpa#339). `api.md` gains the matching
+  section, and the README a `Calibration, validated` one.
+
+* **Every export is in the reference index.** `_pkgdown.yml` listed 63 of 164
+  exports and swept the rest into `internal` through the
+  `lacks_concepts()` catch-all, so `sbc()`, `tulpa_laplace()`, `tulpa_eb()`,
+  `tulpa_ep()`, `tulpa_posterior_draws()`, every prior builder, every
+  `plot_*()` and the whole `as_draws` / `ranef` / `tidy` / `glance` interop
+  surface were absent from the published index. Nothing user-facing is hidden
+  now; the sections gained are `Priors`, `Reading a fit`, `Calibration`,
+  `Plots`, and `Outer-grid integration and utilities`. The two
+  `has_concept("spatial")` / `has_concept("temporal")` selectors matched
+  nothing -- no Rd in the package carries a `\concept{}` -- and the explicit
+  lists that were doing the work are kept.
+
+* **A folded SBC panel reads the folded verdict.** `plot.sbc(folded = TRUE)`
+  drew the folded ECDF and annotated it with the RAW p-value and the RAW band
+  verdict. The fold exists to catch a symmetric dispersion error the raw ECDF
+  cancels, so the one case it matters for is exactly the one the mislabelling
+  broke: a panel visibly outside the band reporting `inside`. Both reads now
+  come from one `.sbc_panel_note()` (gcol33/tulpa#612).
+
+* `api.md` named `spatial_hsgp()`, `find_latent_terms()`, `no_latent_terms()`
+  and `parse_bar_term()` as public. The first does not exist -- the
+  Hilbert-space basis is `spatial_gp(approx = "hsgp")` -- and the other three
+  are internal. Thirty-eight exports it did not name are now listed, including
+  `tulpa_re_aghq()`, `fit_st_nested()`, `tulpa_hyper_grid()`,
+  `tulpa_multinomial()` / `tulpa_ordinal()`, `temporal_ar()` / `temporal_ar2()`,
+  `VarCorr()`, `posterior_sample()` / `mcmc_draws()`, `diagnostics()` and
+  `laplace_diagnostics()`.
+
+* **The published changelog was an empty page.** pkgdown reads a version
+  heading as `# <package> <version>`; this file used `## <version>` under a
+  `# tulpa NEWS` title, which `build_news()` reports as *no version headings
+  found* and renders as a `Changelog` heading with nothing under it. All 225
+  entries are now `# tulpa <version>`, which is also the form
+  `usethis::use_news_md()` writes and R's own NEWS.md reader parses
+  (225 versions, none with an `NA` version) (gcol33/tulpa#615).
+
+* **The site build refused a correct build once the changelog rendered.**
+  `pkgdown/build_site.R` asserts that `CLAUDE.md` / `AGENTS.md` / `api.md` /
+  `todo.md` reach neither `docs/` nor the search index, and tested the second
+  by searching `search.json` for the string `AGENTS.html`. The release note
+  describing that guard contains that string, so the guard failed on its own
+  documentation. It now matches a search entry's `path` (gcol33/tulpa#616).
+
+* The README's release pin and citation still read `0.1.0`.
+
+# tulpa 0.2.0
 
 * **A varying coefficient's level is identified by centring on both SVC
   parameterizations** (gcol33/tulpaRatio#25). A term contributes
@@ -77,7 +3018,7 @@
 
 * `Language: en-US` declared in DESCRIPTION.
 
-## 0.1.23
+# tulpa 0.1.23
 
 * **`tulpa_re_aghq()` returns the optimizer's evaluation counts.** The joint
   driver is one `stats::optim` call, and nothing on the fit said how much work
@@ -87,7 +3028,7 @@
   evaluations rather than iterations, and relabelling them would have made the
   number say something it does not.
 
-## 0.1.22
+# tulpa 0.1.22
 
 * **The AGHQ failure sentinel is refused as an optimum, and it is named once.**
   `cpp_aghq_objective()` reports `-1e10` where a group's solve failed -- a
@@ -107,7 +3048,7 @@
   `cpp_aghq_fail_penalty()`, so neither the C++ producers nor the R consumers
   write the literal (gcol33/tulpa#606).
 
-## 0.1.21
+# tulpa 0.1.21
 
 * **The per-group AGHQ solve status is on the fit.** `tulpa_re_aghq()` computed
   `group_ok` from `cpp_aghq_blups()`, raised a warning naming the first few
@@ -119,7 +3060,7 @@
   it. The detection itself is unchanged; only the reporting channel is new
   (gcol33/tulpa#605).
 
-## 0.1.20
+# tulpa 0.1.20
 
 * **The bound-reading families pass the compiled-impl gate.**
   `builtin_family_spec()` refuses any family `family_has_compiled_impl()` does
@@ -144,7 +3085,7 @@
 * **`rstantools` is declared.** The test suite reaches one borrowed generic from
   it; it was used without being named in `DESCRIPTION`.
 
-## 0.1.18
+# tulpa 0.1.18
 
 * **A bounded link builds its tail rather than recovering it** (#602). Cauchit's
   `linkinv` was `0.5 + atan(eta) / pi`, which in the lower tail subtracts two
@@ -197,7 +3138,7 @@
   factorization-failure fallback stopped diverging from the shared one at
   12b641d. Both drivers call `newton_damped_fallback` and `newton_step_tail`.
 
-## 0.1.17
+# tulpa 0.1.17
 
 * **The eleven nested-Laplace grid entries share one tail** (#603, closing the
   last item of #465). Each entry used to build its own checkpoint, resolve its
@@ -231,7 +3172,7 @@
   fingerprint each make a resume against a written checkpoint refuse. A build
   with one bundle member dropped fails it at all eleven entries.
 
-## 0.1.16
+# tulpa 0.1.16
 
 * **A block's per-row design weight is read on every contribution kind**
   (#463). `LatentBlock::row_weight` -- the `svc_weight` that makes a field a
@@ -346,7 +3287,7 @@
   `DEFAULT_TAU_BETA` so the same weak fixed-effect prior has one definition in
   the two parameterizations the kernels read it in, tied by a static assertion.
 
-## 0.1.15
+# tulpa 0.1.15
 
 * **The next ten audit issues, and the one that was still a live drop**
   (#445, #447, #448, #450, #452, #453, #454, #455, #456, #457). Nine had their
@@ -401,7 +3342,7 @@
     two function-local statics) were verified against the current tree and
     already carry their fix and, where one is expressible from R, their test.
 
-## 0.1.14
+# tulpa 0.1.14
 
 * **The next ten audit issues are the tests they asked for** (#427, #428, #429,
   #430, #432, #433, #435, #436, #437, #440). The `src/` work for all ten had
@@ -478,7 +3419,7 @@
   bumped: a file written by the previous layout would be replayed field by field
   into the new one and mis-parsed.
 
-## 0.1.13
+# tulpa 0.1.13
 
 * **A tgmrf block's symbolic frame is the union over grid points** (#472). The
   `SparseHessianBuilder` is initialized once per fit, and the frame was read off
@@ -556,7 +3497,7 @@
   backtracking line search's doc now states the acceptance test it actually
   applies.
 
-## 0.1.12
+# tulpa 0.1.12
 
 * **`LikelihoodSpec::ll_fwd` is removed, and the ABI is 42** (#493). The slot
   was assigned at six sites and read at none: `resolve_gradient_fn` dispatches
@@ -644,7 +3585,7 @@
   different quantities.
 
 
-## 0.1.11
+# tulpa 0.1.11
 
 * **The outer-grid measurement files state the within-cell read instead of
   inheriting it** (#599). `test-nested-laplace-joint-box-mass.R`,
@@ -672,7 +3613,7 @@
   rules are unchanged -- the box multiplier's per-cell values are identical
   under both reads. Write-up: `dev_notes/issue599/RESULTS599.md`.
 
-## 0.1.10
+# tulpa 0.1.10
 
 * **The Type-IV RW2 kernel's site-specific linear trends are pinned** (#600).
   `st_sum_to_zero_penalty()` pinned the interaction along its row sums and its
@@ -713,7 +3654,7 @@
   Consumer-package paths only: nothing in tulpa sets
   `ModelData::has_spatiotemporal`.
 
-## 0.1.9
+# tulpa 0.1.9
 
 * **A cyclic Type-IV interaction is fitted under the cyclic Q_t** (#596).
   `st_kronecker_temporal_quad()` passed `cyclic = false` to the RW1 / RW2
@@ -764,7 +3705,7 @@
   `make_se_kernel_matvec` route through `tulpa_parallel_for`, so a team of one
   skips libgomp as `matvec` already did.
 
-## 0.1.8
+# tulpa 0.1.8
 
 * **The non-centered SPDE transform assembles the same precision as the Laplace
   path** (#590). `SpdeNcTransform` built `Q = tau^2 K diag(1/C0) K` while
@@ -801,7 +3742,7 @@
   implicit-diff gradient is recorded there as deliberately untested, since no
   valid input reaches it.
 
-## 0.1.7
+# tulpa 0.1.7
 
 * **A diagonal-plus-low-rank mass matrix, and the Type-IV interaction's
   sum-to-zero margins carried in it** (#597). `mass_matrix = "gmrf_margin"` is
@@ -851,7 +3792,7 @@
   precision-informed diagonal and the margin metric are scored against one copy
   of the numerical-Hessian arbiter rather than two.
 
-## 0.1.6
+# tulpa 0.1.6
 
 * **The Type-IV spatiotemporal interaction has a precision-informed mass
   metric, and a measurement saying it does not beat the adapted diagonal**
@@ -887,7 +3828,7 @@
   new metric is scored against the numerical Hessian of the engine's own
   log-posterior over the block.
 
-## 0.1.5
+# tulpa 0.1.5
 
 Behaviour changes, in the order they are most likely to affect a fit.
 
@@ -987,7 +3928,7 @@ Behaviour changes, in the order they are most likely to affect a fit.
   and roxygen (#575), and eight comments describing code that is no longer
   there are corrected (#568, #574, #525, #537).
 
-## 0.1.4
+# tulpa 0.1.4
 
 * **The NUTS metric is reachable from the sampler front door** (#545).
   `select_and_init_mass_matrix` resolved AUTO, detected the mass blocks and
@@ -1067,7 +4008,7 @@ Behaviour changes, in the order they are most likely to affect a fit.
   history, dated benchmark tables and a stale "known heisenbug" note that told
   the reader to avoid the only GP density there is are out of the code.
 
-## 0.1.3
+# tulpa 0.1.3
 
 * **The correlation Cholesky covers the whole cone** (#431, #443). The raw
   parameters of a correlated random-effect term were mapped by
@@ -1169,7 +4110,7 @@ Behaviour changes, in the order they are most likely to affect a fit.
 * Multi-chain stochastic-sampler results guard the `log_lik` copy against a
   short vector the way the VI/ESS shim already did (#439).
 
-## 0.1.2
+# tulpa 0.1.2
 
 * **The BYM2 outer grid checks its mixing-weight axis** (#421).
   `cpp_nested_laplace_bym2` fixed the cell count from `sigma_spatial_grid`
@@ -1213,7 +4154,7 @@ Behaviour changes, in the order they are most likely to affect a fit.
   `C + kNngpNugget * I`, the matrix the kernel factorizes, read off the
   scatter's own return rather than written into the test (#578).
 
-## 0.1.1
+# tulpa 0.1.1
 
 * **One default fixed-effect prior, resolved at the front door** (#408).
   `tulpa()` substituted `sd = 2.5`, `10` or `100` on the fixed effects
@@ -1291,7 +4232,7 @@ Behaviour changes, in the order they are most likely to affect a fit.
   that flowed through `tulpa()` as an unrestricted model, or errored about an
   unrelated field. `fit_st_nested()` is the spatiotemporal entry point.
 
-## 0.1.0
+# tulpa 0.1.0
 
 First CRAN release. The engine's surface is unchanged from 0.0.198; this
 version number marks the release rather than a feature change.
@@ -1397,7 +4338,7 @@ version number marks the release rather than a feature change.
   duration of the build and asserts they reached neither `docs/` nor
   `search.json`.
 
-## 0.0.198
+# tulpa 0.0.198
 
 * **`tulpa_re_aghq()` returns the mode/theta cross-Hessian block** (#398).
   Adds `blup_cross` (Bf) to the return value: the per-group `-d^2 ell_g /
@@ -1429,7 +4370,7 @@ version number marks the release rather than a feature change.
   construction on a toy model with deliberately collinear RE terms; the new
   diagonal is byte-identical to the pre-existing `blup_var`.
 
-## 0.0.197
+# tulpa 0.0.197
 
 * **Fix: the batched joint nested-Laplace driver's DENSE path could converge a
   species to a different mode than its own independent fit** (gcol33/tulpa#397).
@@ -1451,7 +4392,7 @@ version number marks the release rather than a feature change.
   `joint_pd_step_solve_dense` with `JointPDMode::LM`, mirroring the
   single-species driver and the batch driver's own sparse branch exactly.
 
-## 0.0.196
+# tulpa 0.0.196
 
 * **The simulation-based-calibration and goodness-of-fit entry points are S3
   generics**, so a downstream package registers a method on its own fit object
@@ -1472,7 +4413,7 @@ version number marks the release rather than a feature change.
 * `test_uniformity()` muffles only the ties warning a discrete response
   produces, rather than every warning the Kolmogorov-Smirnov test can raise.
 
-## 0.0.195
+# tulpa 0.0.195
 
 * **A reported hyperparameter bound that left the node range now says so**
   (gcol33/tulpa#390). An endpoint past the outermost NODE is produced by the
@@ -1501,7 +4442,7 @@ version number marks the release rather than a feature change.
   `n_pts` are kept with it: nine nodes moves 50% coverage FURTHER from nominal
   while costing proportionally more inner solves.
 
-## 0.0.194
+# tulpa 0.0.194
 
 * **CUDA is used when a device is available, and there is now exactly one
   definition of the batched-CUDA backend** (gcol33/tulpa#396).
@@ -1536,7 +4477,7 @@ version number marks the release rather than a feature change.
   and the gcol33/tulpa#389 determinism arbiter passes with the CUDA backend
   live on a device-equipped machine.
 
-## 0.0.193
+# tulpa 0.0.193
 
 * **`LatentBlock::d_fac` is read through one accessor that carries its
   contract** (gcol33/tulpa#394). Twelve call sites read this grid-dependent eta
@@ -1569,7 +4510,7 @@ version number marks the release rather than a feature change.
   is an OpenMP parallel-for and the block prep that reaches this deliberately
   runs outside its critical section.
 
-## 0.0.192
+# tulpa 0.0.192
 
 * **Every factor in a batched NNGP Cholesky is verified, not one of them**
   (gcol33/tulpa#392). `batch_nngp_scatter` hands the neighbour covariances to
@@ -1587,7 +4528,7 @@ version number marks the release rather than a feature change.
   costs, so full coverage sits an order below the work it verifies. The exact
   one-matrix CPU cross-check stays alongside it as the layout check.
 
-## 0.0.191
+# tulpa 0.0.191
 
 * **`gp(approx = "nngp")` takes the coordinate dimension you give it**
   (gcol33/tulpa#391). 0.0.190 made the NNGP neighbour COVARIANCE read every
@@ -1613,7 +4554,7 @@ version number marks the release rather than a feature change.
   mode take exactly 2, because both store coordinates at a fixed 2-D stride, and
   they say so with the dimension they were given.
 
-## 0.0.190
+# tulpa 0.0.190
 
 * **An NNGP fit is a function of its data again: the neighbour covariance was
   built from an out-of-bounds read** (gcol33/tulpa#389). Three NNGP
@@ -1680,7 +4621,7 @@ version number marks the release rather than a feature change.
   that row is inadmissible -- but the row itself should be re-measured before it
   is cited (gcol33/tulpa#390).
 
-## 0.0.189
+# tulpa 0.0.189
 
 * **A recentred outer axis whose mode SD hit the CEILING now declines the
   placement and keeps its incoming span** (gcol33/tulpa#387). A clamp is not a
@@ -1747,7 +4688,7 @@ version number marks the release rather than a feature change.
   fixed one it still is. A decline for any other reason is a failure of the
   mode-find itself and still takes the pass down.
 
-## 0.0.188
+# tulpa 0.0.188
 
 * **Reported hyperparameter intervals are read with the box-uniform within-cell
   construction by default** (gcol33/tulpa#357). The outer grid's weights say how
@@ -1798,7 +4739,7 @@ version number marks the release rather than a feature change.
   coordinates on the reported axis, so a box partition of them would assert a
   property nothing measured. The RE-covariance backends are unchanged.
 
-## 0.0.187
+# tulpa 0.0.187
 
 * **The outer-grid placement pass reaches every registry family whose axes
   carry a coordinate, and every one it does not reach says why**
@@ -1870,7 +4811,7 @@ version number marks the release rather than a feature change.
   grid's collapsed-edge regime, so none of the three has a measured meaning
   there.
 
-## 0.0.186
+# tulpa 0.0.186
 
 * **Behaviour change: `control$skew_correct` now defaults to `TRUE`**
   (gcol33/tulpa#364). `summary()` and `confint()` on a nested-Laplace fit report
@@ -1930,7 +4871,7 @@ version number marks the release rather than a feature change.
   fit moves by 0.397. That required gcol33/tulpa#386 in 0.0.185; without it every
   one of those classes moved.
 
-## 0.0.185
+# tulpa 0.0.185
 
 * The CENTRE band on the inner-Laplace skew correction is off
   (`.NL_DIAG$centre_unreliable = Inf`, gcol33/tulpa#376). It shipped at 1.20 in
@@ -1984,7 +4925,7 @@ version number marks the release rather than a feature change.
   `"skew_map_cell"` when every row was corrected, `"skew_map_cell/mixture_cdf"`
   when both reads are in play, and the base source when none was.
 
-## 0.0.184
+# tulpa 0.0.184
 
 * `weights` reaches the spatial mode-finding, not only the marginal precision
   built at it (gcol33/tulpa#385). `dispatch_laplace_spatial()` carried no
@@ -2026,7 +4967,7 @@ version number marks the release rather than a feature change.
 
   Evidence in dev_notes/issue385/.
 
-## 0.0.183
+# tulpa 0.0.183
 
 * An EM soft label travels on `weights`, not on a fractional `y`
   (gcol33/tulpa#383). `tulpa_em_laplace()`'s own zero-inflated-Poisson example
@@ -2075,7 +5016,7 @@ version number marks the release rather than a feature change.
   conditions away, `V_between > 0` and `V_total > V_within`, and that is what
   the block now asserts.
 
-## 0.0.182
+# tulpa 0.0.182
 
 * `sbc(experiment = "posterior")` reports the pooling premise from the guard's
   own state rather than asserting it (gcol33/tulpa#380). The driver calls
@@ -2084,7 +5025,7 @@ version number marks the release rather than a feature change.
   field that cannot say "not reached" hides a path that was never taken. It now
   reads `state$checked`, the same way `fresh_groups` already read its own.
 
-## 0.0.181
+# tulpa 0.0.181
 
 * `R CMD check` is clean again (gcol33/tulpa#382). Three pre-existing defects,
   none related to the code they sat next to, and each a one-line fix.
@@ -2105,7 +5046,7 @@ version number marks the release rather than a feature change.
   wall clock and differs between two identical runs by construction. The
   assertion now drops that attribute and keeps the experiment.
 
-## 0.0.180
+# tulpa 0.0.180
 
 * **New: `sbc()`**, one exported front door for simulation-based calibration
   (gcol33/tulpa#380). The SBC machinery from gcol33/tulpa#335, gcol33/tulpa#339
@@ -2148,7 +5089,7 @@ version number marks the release rather than a feature change.
   assumed when it is not. Whether the simulator drew those groups' effects
   independently is not observable from outside the callback and is not claimed.
 
-## 0.0.179
+# tulpa 0.0.179
 
 * The chord read's own interior interpolation no longer reports `Inf` as a
   bound (gcol33/tulpa#381). `.nl_wtd_quantile()` delegates the interior to
@@ -2173,7 +5114,7 @@ version number marks the release rather than a feature change.
   bounds 9504 -> 0, finite pre-fix reads that moved 0, repaired bounds outside
   their own bracket 0, mis-ordered reads 0.
 
-## 0.0.178
+# tulpa 0.0.178
 
 * An undeclared axis's mirrored cell edge is guarded the way a declared one's
   is, so a reported interval bound cannot come back `Inf` or `NaN`
@@ -2235,7 +5176,7 @@ version number marks the release rather than a feature change.
   `.tulpa_interval_read_note()` fired for all of them reported the second pair as
   running to the extreme coordinate, which is the opposite of what happened.
 
-## 0.0.177
+# tulpa 0.0.177
 
 * The box builder's interior midpoint is formed as `a / 2 + b / 2` rather than
   `(a + b) / 2`, so a partition whose every edge is a representable double is
@@ -2292,7 +5233,7 @@ version number marks the release rather than a feature change.
   interior box already pinned. A new randomized `identical()` sweep over all
   four domains holds the bisector to the sum form's own numbers.
 
-## 0.0.176
+# tulpa 0.0.176
 
 * A DECLARED hyperparameter support is no longer overruled by the coordinate
   guess that sits under it, so a reported outer cell edge cannot leave the
@@ -2358,7 +5299,7 @@ version number marks the release rather than a feature change.
   `positive`, that same node set now has a finite in-support partition and the
   box read no longer declines on it.
 
-## 0.0.175
+# tulpa 0.0.175
 
 * Box-uniform is promoted to a selectable WITHIN-CELL construction behind the
   existing `support` taxonomy, and the position sensitivity it carries is
@@ -2467,7 +5408,7 @@ version number marks the release rather than a feature change.
   Evidence: `dev_notes/issue357/RESULTS.md`, `common357b.R`, `boxpos357b.R`,
   `coarse357b.R`, `analyse357b.R`, `identity357.R`, `unit357.R`.
 
-## 0.0.174
+# tulpa 0.0.174
 
 * The skew correction's centre band carries what it is measured to cost
   (gcol33/tulpa#376). `.NL_DIAG$centre_unreliable = 1.20` was chosen in
@@ -2491,7 +5432,7 @@ version number marks the release rather than a feature change.
   its justification in `R/settings.R` now records the enlarged measurement, the
   derivation, and the price the band is being paid for.
 
-## 0.0.173
+# tulpa 0.0.173
 
 * A fit reaches the skew correction's centre band from its own data, and the
   decline path is tested there (gcol33/tulpa#364). The band
@@ -2509,7 +5450,7 @@ version number marks the release rather than a feature change.
   groups of 2 the band declines 178 of 300 intercept-seeds, every one with the
   shape band and the combined inner band both admitting.
 
-## 0.0.172
+# tulpa 0.0.172
 
 * The rail detector's materiality guard is read on a node-count-free scale
   (gcol33/tulpa#375). `.nl_axis_rail()` required the boundary node to carry at
@@ -2531,7 +5472,7 @@ version number marks the release rather than a feature change.
   loses 0 / 0 / 1 at the 95 / 80 / 50% levels, and the 95% coverage at
   `rho = 0.9999` goes 0.000 to 0.167 where the detector had never fired at all.
 
-## 0.0.171
+# tulpa 0.0.171
 
 * The default BYM2 mixing-weight axis reaches 0.999 (gcol33/tulpa#361). On a
   BOUNDED axis a coarse span and a short span are not interchangeable: the
@@ -2583,7 +5524,7 @@ version number marks the release rather than a feature change.
   their rescues trigger on the whole grid's collapsed-edge regime, not on a
   per-axis rail, so `"always"` has no measured meaning there.
 
-## 0.0.170
+# tulpa 0.0.170
 
 * A joint fit is reproducible bit for bit at any thread count
   (gcol33/tulpa#374). `reduction(+:)` leaves the order its per-thread private
@@ -2621,7 +5562,7 @@ version number marks the release rather than a feature change.
   observations. Rows where all three arms run the same code move by up to 17% in
   the same capture, so the 3% is at the edge of what the instrument resolves.
 
-## 0.0.169
+# tulpa 0.0.169
 
 * A one-thread OpenMP region is no longer entered at all on any loop reached
   per objective evaluation, per Newton iteration or per Gibbs sweep
@@ -2664,7 +5605,7 @@ version number marks the release rather than a feature change.
   caller's frame instead of an outlined region body. Per auxiliary draw at
   N = 48: 9.96 -> 7.27, 8.97 -> 6.58 and 9.91 -> 7.77 us.
 
-## 0.0.168
+# tulpa 0.0.168
 
 * The eta-independent part of a built-in family's log-density is now evaluated
   once per observation per FIT rather than once per observation per objective
@@ -2700,7 +5641,7 @@ version number marks the release rather than a feature change.
   binomial, 0.230 -> 0.138 us gaussian, 0.189 -> 0.118 us poisson. Per
   auxiliary draw at N = 48 that is 9.9 -> 6.4, 11.3 -> 6.4 and 10.3 -> 5.7 us.
 
-## 0.0.167
+# tulpa 0.0.167
 
 * The single-arm nested-Laplace loop reports its log-marginal at the Newton
   mode (gcol33/tulpa#371). `laplace_newton_solve_ll` applied
@@ -2722,7 +5663,7 @@ version number marks the release rather than a feature change.
 * `tests/testthat/test-cila.R` holds the non-joint gaussian arbiter to the
   joint file's 1e-9, where it read 3.4e-07 before, and pins `score_max`.
 
-## 0.0.166
+# tulpa 0.0.166
 
 * A reported hyperparameter interval stays inside the quantity's own support
   (gcol33/tulpa#369). gcol33/tulpa#353 gave the density read
@@ -2808,7 +5749,7 @@ version number marks the release rather than a feature change.
   likelihood -- 93% of the cost at that size, and not reachable by batching the
   density call.
 
-## 0.0.165
+# tulpa 0.0.165
 
 * The inner-Laplace skew correction's CENTRE is banded, not only its shape
   (gcol33/tulpa#362). The reported quantile is
@@ -2840,7 +5781,7 @@ version number marks the release rather than a feature change.
   rare-event intercept, -3.77 / -3.20 on the small-group RE fit, against
   gcol33/tulpa#302's +3.54 / +6.12 / +4.64).
 
-## 0.0.164
+# tulpa 0.0.164
 
 * A default outer axis that does not contain its own posterior mode is detected
   per axis and moved (gcol33/tulpa#361). The auto-recenter
@@ -2940,7 +5881,7 @@ version number marks the release rather than a feature change.
   `"redispatch_failed"`, or the first cell's own reason where nothing usable
   came back.
 
-## 0.0.163
+# tulpa 0.0.163
 
 * `auto_grid()` coerces in place instead of through `as.numeric()`, so a
   MATRIX-valued axis survives the mark (gcol33/tulpa#360). Two families store
@@ -2968,7 +5909,7 @@ version number marks the release rather than a feature change.
   `log_marginal`. `.NL_COPY_SPEC_FIELDS` is the read-field set, held against
   the resolver's own body by a source lint.
 
-## 0.0.162
+# tulpa 0.0.162
 
 * A node set that is an MCMC SAMPLE is named as one, and no longer borrows a
   cell partition's outer half-cell (gcol33/tulpa#358). `support = "density"`
@@ -3018,7 +5959,7 @@ version number marks the release rather than a feature change.
   joint path, the only one that scores a proposal it can discard. No reported
   k-hat moves: the aperture consumes no RNG and the scoring is untouched.
 
-## 0.0.161
+# tulpa 0.0.161
 
 * The inner-Laplace LOCATION term `gamma_1` is computed, and the skew
   correction is applied about the centre it defines (gcol33/tulpa#354). Rue,
@@ -3057,7 +5998,7 @@ version number marks the release rather than a feature change.
   `gamma1_not_computable` rather than being corrected about an assumed centre.
   The default stays `FALSE`.
 
-## 0.0.160
+# tulpa 0.0.160
 
 * A fit whose supplied grid axis went unused says so through its own readers
   (gcol33/tulpa#355). gcol33/tulpa#352 records the drop on
@@ -3074,7 +6015,7 @@ version number marks the release rather than a feature change.
   unchanged. This is the read half of the gcol33/tulpa#293 rule that a
   silent-disable path needs a reason field.
 
-## 0.0.159
+# tulpa 0.0.159
 
 * The hyperparameter-axis interval reaches the outer cells' own edges instead of
   stopping at the extreme grid coordinate (gcol33/tulpa#353).
@@ -3147,7 +6088,7 @@ version number marks the release rather than a feature change.
   log posterior, with the old setting asserted PD as the control -- rather than
   reaching it by luck.
 
-## 0.0.158
+# tulpa 0.0.158
 
 * A grid axis the resolved path cannot read is refused or recorded, never
   dropped in silence (gcol33/tulpa#352). A `sigma_grid` on an icar block reached
@@ -3232,7 +6173,7 @@ version number marks the release rather than a feature change.
   handing back a pair `.nested_fixed_moments()` silently returns `NULL` on with
   `grid_fixed_declined` reporting `NA`.
 
-## 0.0.157
+# tulpa 0.0.157
 
 * `tulpa_posterior_draws()` serves a single-block nested-Laplace fit
   (gcol33/tulpa#347). The posterior of such a fit IS the outer-grid Gaussian
@@ -3272,7 +6213,7 @@ version number marks the release rather than a feature change.
   power-scaling) go through the silent accessors, so a fallback does not narrate
   itself.
 
-## 0.0.156
+# tulpa 0.0.156
 
 * `control$max_grid_cells` sets the multi-block outer-grid cell ceiling
   (gcol33/tulpa#343), defaulting to the 2048 that was hard-wired. The cap is a
@@ -3329,7 +6270,7 @@ version number marks the release rather than a feature change.
   cannot be simulated under one parameterization and scored under another.
   Bit-identical across all six families.
 
-## 0.0.155
+# tulpa 0.0.155
 
 * Simulation-based calibration and a strictly proper score join the fixed-truth
   recovery sweeps as posterior arbiters (gcol33/tulpa#335). Coverage at one or
@@ -3368,7 +6309,7 @@ version number marks the release rather than a feature change.
   log-likelihood rank at ks = 0.17 while its intercept marginal stays inside.
   `dev_notes/issue335/RESULTS.md`.
 
-## 0.0.154
+# tulpa 0.0.154
 
 * `.nested_fixed_moments()` renormalizes the grid weights over the cells that
   retained a fixed-effect block (gcol33/tulpa#342). It normalized over the whole
@@ -3389,7 +6330,7 @@ version number marks the release rather than a feature change.
   unchanged from #342: a healthy fit retains every cell, so no reported number
   moves on one.
 
-## 0.0.153
+# tulpa 0.0.153
 
 * A nested-Laplace fit's fixed-effect credible bounds are the quantiles of the
   Gaussian mixture its outer grid defines, `sum_k w_k N(mu_kj, V_kjj)`, instead
@@ -3438,7 +6379,7 @@ version number marks the release rather than a feature change.
   posterior the engine had already computed, and the two agreed closely wherever
   the grid was near-Gaussian in the fixed-effect marginal.
 
-## 0.0.152
+# tulpa 0.0.152
 
 * Neither free outer cell rule is promoted, decided by coverage rather than by
   grid accuracy (gcol33/tulpa#331). 200 seeds at each of three resolutions, all
@@ -3485,7 +6426,7 @@ version number marks the release rather than a feature change.
   through the closed form by construction, since its error bound sits under the
   in-box slack.
 
-## 0.0.151
+# tulpa 0.0.151
 
 * The gaussian recovery fixture no longer fits at a quarter of its own residual
   variance (gcol33/tulpa#332). `recov_draw_y()` drew `rnorm(N, 0, sqrt(phi))` --
@@ -3565,7 +6506,7 @@ version number marks the release rather than a feature change.
   and a floor without gaining a verdict -- which is how the median, the one part
   the gcol33/tulpa#326 rule moves, had none.
 
-## 0.0.150
+# tulpa 0.0.150
 
 * The cross-cell estimator asymmetry in local-CCD refinement is documented as a
   known and instrumented property rather than left reading as an expected
@@ -3576,7 +6517,7 @@ version number marks the release rather than a feature change.
   says so, points at `log_mass_ratio` as the per-cell reading, and records what
   the asymmetry costs in coverage rather than in grid-internal metrics.
 
-## 0.0.149
+# tulpa 0.0.149
 
 * A CI-coverage gate now reaches local-CCD refinement (gcol33/tulpa#320). The
   joint recovery fixture builds one `iid` block, so it has one latent axis and
@@ -3602,7 +6543,7 @@ version number marks the release rather than a feature change.
   second level and the width effect are read through the shared harness rather
   than a parallel one.
 
-## 0.0.148
+# tulpa 0.0.148
 
 * A locally refined cell now reports the ratio of the two estimates of its own
   mass it already carries (gcol33/tulpa#323): the coarse atom
@@ -3632,7 +6573,7 @@ version number marks the release rather than a feature change.
   non-quadraticity, `offset` / `mode_gain` are off-centring, `log_mass_ratio` is
   mass correction, and `skew_max` reads `misfit` and nothing else.
 
-## 0.0.147
+# tulpa 0.0.147
 
 * The outer-grid dump / rebuild harness is in the test suite
   (`tests/testthat/helper-outer-grid-dump.R`, gcol33/tulpa#322). A candidate
@@ -3660,7 +6601,7 @@ version number marks the release rather than a feature change.
   `exp(log_marginal)`, which loses the scale and is undefined on a cell whose
   inner solve returned no finite marginal.
 
-## 0.0.146
+# tulpa 0.0.146
 
 * The local-CCD cubic misfit score now reports the whitened gradient its own
   least-squares fit already estimated, and the refinement carries it per cell as
@@ -3675,7 +6616,7 @@ version number marks the release rather than a feature change.
   a gradient across the cell is a cross-cell estimator question, orthogonal to
   the local shape `skew_max` reads.
 
-## 0.0.145
+# tulpa 0.0.145
 
 * Local CCD refinement of the joint outer grid now keeps a refined cell's node
   cloud only where the cell's own outer log-marginal is close to the quadratic
@@ -3966,7 +6907,7 @@ version number marks the release rather than a feature change.
   fit that already asked for one and was turned down, and names the decline
   instead.
 
-## 0.0.144
+# tulpa 0.0.144
 
 * **The subspace debias reaches the grid and joint nested backends**
   (gcol33/tulpa#306, the follow-up to #304). `control$subspace_debias` is now
@@ -4088,7 +7029,7 @@ version number marks the release rather than a feature change.
   gamma_3-derived `$skew_correction` record two commits later. The record is
   diagnostic-derived, so it is stripped alongside them (gcol33/tulpa#313).
 
-## 0.0.143
+# tulpa 0.0.143
 
 * **The joint tier's fixed-effect block is extracted inside each cell's own
   solve** (gcol33/tulpa#307). Filling `$grid_modes` / `$grid_hessians` on a joint
@@ -4128,7 +7069,7 @@ version number marks the release rather than a feature change.
   `extract_inner_vcov_block_cell()` drives it against a factorized cell with the
   constraint; the joint loops go through the latter.
 
-## 0.0.142
+# tulpa 0.0.142
 
 * **A joint fit reports uncertainty on its fixed effects** (gcol33/tulpa#305).
   `summary()`, `confint()` and `vcov()` on a `tulpa_nested_laplace_joint()` fit
@@ -4186,7 +7127,7 @@ version number marks the release rather than a feature change.
   weight. A pruned cell with no retained block previously turned the whole
   marginalized covariance into `NA`.
 
-## 0.0.141
+# tulpa 0.0.141
 
 * **The reliability band is now the debias SELECTOR: exact MCMC runs on only the
   misfit directions** (gcol33/tulpa#304). Escalation used to be whole-fit and
@@ -4314,7 +7255,7 @@ version number marks the release rather than a feature change.
   one uniform per test whatever the ratio is, which is what keeps the migrated
   Gibbs sweep's RNG stream unchanged.
 
-## 0.0.140
+# tulpa 0.0.140
 
 * **`gamma_3` is now consumed, not only graded: the inner-Laplace marginals can
   be skew-corrected** (gcol33/tulpa#302). The cubic term was computed, banded
@@ -4366,7 +7307,7 @@ version number marks the release rather than a feature change.
   `tests/testthat/test-inner-skew-correction.R`, and a paired
   corrected-vs-Gaussian coverage gate in `test-nested-laplace-recovery.R`.
 
-## 0.0.139
+# tulpa 0.0.139
 
 * **`gamma_3` now scores coupled multi-predictor likelihoods instead of
   declining on them** (gcol33/tulpa#301). The cubic Edgeworth term assumed a
@@ -4428,7 +7369,7 @@ version number marks the release rather than a feature change.
   direct numerical third derivative of its own log-density and the step policy
   measured rather than asserted (`tests/testthat/test-cell-curvature3.R`).
 
-## 0.0.138
+# tulpa 0.0.138
 
 * **The inner Laplace layer now has a likelihood-agnostic reliability number**
   (gcol33/tulpa#303). `gamma_3` scores the inner Gaussian by expanding the joint
@@ -4493,7 +7434,7 @@ version number marks the release rather than a feature change.
   declined fit the only field carrying the `inner_pareto_k` prefix is the reason
   string, which `$` would partial-match into the k-hat.
 
-## 0.0.137
+# tulpa 0.0.137
 
 * **The engine can now test its own coupled likelihood paths** (gcol33/tulpa#300).
   `CellCouplingSpec` has been virtual-dispatched per cell since the joint driver
@@ -4546,7 +7487,7 @@ version number marks the release rather than a feature change.
   agreement) and four blocks in `tests/testthat/test-inner-skew.R`. Shared
   scaffolding is in `tests/testthat/helper-coupled-fixture.R`.
 
-## 0.0.136
+# tulpa 0.0.136
 
 * **The joint nested-Laplace grid no longer returns numbers that depend on what
   else the machine was doing.** Two identical fits could disagree in their last
@@ -4583,7 +7524,7 @@ version number marks the release rather than a feature change.
   report different widths, that is the explanation for a shift in their last
   bits.
 
-## 0.0.135
+# tulpa 0.0.135
 
 * **A prior block missing its required fields now errors instead of segfaulting
   the session** (gcol33/tulpa#299). Each `.NL_REGISTRY` entry declares, per
@@ -4604,7 +7545,7 @@ version number marks the release rather than a feature change.
   lints both converters' sources so a field read unconditionally by a branch but
   left undeclared fails the suite.
 
-## 0.0.134
+# tulpa 0.0.134
 
 * **`fit_st_nested()`'s auto-recenter no longer switches itself off when a grid
   knob is set to the engine's own default value** (gcol33/tulpa#294). The
@@ -4684,7 +7625,7 @@ version number marks the release rather than a feature change.
   `res` replaced by `NULL` by a diagnostic that was only meant to decline. The
   probe is now its own function.
 
-## 0.0.133
+# tulpa 0.0.133
 
 * **Every engine default now lives in one file (`R/settings.R`).** A default
   outer hyperparameter axis used to be written where it was consumed, so the
@@ -4733,7 +7674,7 @@ version number marks the release rather than a feature change.
   `.nl_grid_axis("gmrf_tau")` / `.nl_grid_axis("field_sd")`. Pre-release, so no
   shim.
 
-## 0.0.132
+# tulpa 0.0.132
 
 * **The #289/#290/#291 auto-recenter now fires for wrapper-package fits: axis
   provenance replaces field presence (#293).** The rescue's guard was
@@ -4784,7 +7725,7 @@ version number marks the release rather than a feature change.
   agrees with the defaulted-grid fit's on a collapsed grid). Use
   `control$auto_recenter = FALSE` to hold a grid where it is.
 
-## 0.0.131
+# tulpa 0.0.131
 
 * **The 0.0.130 auto-recenter now also engages under the default
   `diagnose_k = FALSE`, and covers `fit_st_nested()`'s spatiotemporal grid
@@ -4812,7 +7753,7 @@ version number marks the release rather than a feature change.
     grid-construction knob (`tau_lower`/`tau_upper`/`n_grid_*`/`rho_lower`/
     `rho_upper`) was set explicitly.
 
-## 0.0.130
+# tulpa 0.0.130
 
 * **Outer hyperparameter grids auto-recenter on a collapsed boundary instead
   of railing silently (#289, #290).** Every nested-Laplace family built its
@@ -4851,7 +7792,7 @@ version number marks the release rather than a feature change.
   spatiotemporal grid got the diagnostic only, since it has no existing
   mode-find machinery to reuse -- tracked as #291.
 
-## 0.0.129
+# tulpa 0.0.129
 
 * **`temporal_gp()` now reaches a fitter (#287).** The constructor was
   exported, documented, and carried a `tulpa()` worked example, but `tulpa()`
@@ -4892,7 +7833,7 @@ version number marks the release rather than a feature change.
   would have passed before this), that Matern `nu = 0.5` reproduces the
   exponential fit to the bit, and that the periodic kernel tracks its period.
 
-## 0.0.128
+# tulpa 0.0.128
 
 * **The nested-Laplace entry points no longer each carry their own fingerprint
   and skew boilerplate (#286).** `cpp_nested_laplace_*` was already well
@@ -4932,7 +7873,7 @@ version number marks the release rather than a feature change.
   No behaviour change: the entry points shed 225 lines of plumbing, and the
   fingerprint values and returned lists are identical.
 
-## 0.0.127
+# tulpa 0.0.127
 
 * **1015 lines of unreachable C++ removed from `src/` (#284).** Four headers
   and a set of functions nothing called. Each was checked by grepping the whole
@@ -4965,7 +7906,7 @@ version number marks the release rather than a feature change.
   calls it as `H_inv.at(...)`, which a search for the qualified name misses. It
   stays.
 
-## 0.0.126
+# tulpa 0.0.126
 
 * **The small-dense Cholesky core takes its storage layout as a required
   argument (#285).** `linalg_fast.h` shipped two triangular-solve pairs on
@@ -4997,7 +7938,7 @@ version number marks the release rather than a feature change.
   checks it on matched and mismatched buffers, including the cuSOLVER-shaped
   one whose opposite triangle still holds the input.
 
-## 0.0.125
+# tulpa 0.0.125
 
 * **The batched CUDA Cholesky returned a column-major factor that every
   consumer read row-major (#283).** `batch_nngp_scatter` hands the NNGP
@@ -5027,7 +7968,7 @@ version number marks the release rather than a feature change.
   and GPU paths are held to the same answer. A fixture that stays under 50
   locations exercises only the path that was already right.
 
-## 0.0.124
+# tulpa 0.0.124
 
 * **The NNGP prior scatter is checked against the matrix it claims to build
   (#278).** `apply_nngp_full_prior_dense` and `apply_nngp_full_prior_sparse`
@@ -5048,7 +7989,7 @@ version number marks the release rather than a feature change.
   turned out to be a symptom rather than the cause -- see 0.0.125, where the
   broken CUDA factor behind it is fixed and nothing floors on that fixture.
 
-## 0.0.123
+# tulpa 0.0.123
 
 * **The last standalone Newton loop is gone (#282).** #277 left
   `cpp_laplace_fit_spde_precomputed` -- the fixed-hyperparameter fit behind the
@@ -5075,7 +8016,7 @@ version number marks the release rather than a feature change.
   residual movement is confined to the auxiliary-weight directions the rational
   precision leaves unidentified.
 
-## 0.0.122
+# tulpa 0.0.122
 
 * **The SPDE FEM assembly builds the operator order it was asked for (#280).**
   `SpdeQBuilder::rebuild()` branched `if (alpha == 1) ... else <alpha 2>`, so
@@ -5113,7 +8054,7 @@ version number marks the release rather than a feature change.
   `alpha = 1..4`, the conversion against the closed-form marginal variance, and
   a `nu = 2` field end to end.
 
-## 0.0.121
+# tulpa 0.0.121
 
 * **`cpp_laplace_fit_gp` and `cpp_laplace_fit_spde` are now one-cell runs of
   the shared machinery (#277).** Both were fixed-hyperparameter spatial kernels
@@ -5162,7 +8103,7 @@ version number marks the release rather than a feature change.
   (`kappa = sqrt(8 nu) / range` is 0 and `tau` is infinite); this is the verdict
   `cpp_nested_laplace_spde()` has always returned there.
 
-## 0.0.120
+# tulpa 0.0.120
 
 * **Outer `pareto_k` no longer over-flags collapsed-grid fits (#276).** On a
   sharp hyperparameter posterior the outer grid collapses onto ~1 cell, the
@@ -5224,7 +8165,7 @@ version number marks the release rather than a feature change.
   Owen's T by quadrature per point, which is right for a few reported quantiles
   and unusable for hundreds of proposal draws).
 
-## 0.0.119
+# tulpa 0.0.119
 
 * **`gamma_3` wired through the SPDE / GP bespoke Newton pair (#273 item
   3).** `cpp_laplace_fit_gp`, `cpp_laplace_fit_spde` and
@@ -5240,7 +8181,7 @@ version number marks the release rather than a feature change.
   kernels' existing surface. #273 item 2 (the coupled non-separable
   cubic-term derivation) remains open.
 
-## 0.0.118
+# tulpa 0.0.118
 
 * **`gamma_3` wired through the joint multi-block dispatch (#273).** The
   inner-Laplace skewness diagnostic #272 shipped for every single-arm kernel
@@ -5281,7 +8222,7 @@ version number marks the release rather than a feature change.
   mcar, rw1/rw2/ar1, iid, miid, tgmrf, lf) and raises a clear error naming
   the block, the arm, and the expected/actual counts.
 
-## 0.0.117
+# tulpa 0.0.117
 
 * **Inner-Laplace skewness diagnostic: score the layer outer Pareto-k-hat
   doesn't cover (#272).** `pareto_k` scores the OUTER hyperparameter-grid
@@ -5313,7 +8254,7 @@ version number marks the release rather than a feature change.
   coupled-arm cubic-term derivation, the SPDE/GP bespoke large-`n` Newton
   pair) tracked in #273.
 
-## 0.0.116
+# tulpa 0.0.116
 
 * **Stale test fixed, no engine bug (#271).** `test-tulpa-entry-nested.R`'s
   "more than one random-intercept term alongside a block errors" test
@@ -5332,7 +8273,7 @@ version number marks the release rather than a feature change.
   (routing, `re_block_index`, and bit-exact equivalence to the direct
   multi-block `tulpa_nested_laplace()` call).
 
-## 0.0.115
+# tulpa 0.0.115
 
 * **The joint Hessian sparsity pattern now covers a latent block reached by
   only one side of a coupled arm pair (#270).** `HessianPatternGuard`
@@ -5360,7 +8301,7 @@ version number marks the release rather than a feature change.
   test-coupling spec (`test-cell-coupling-cross-hess.R`), independent of
   tulpaObs.
 
-## 0.0.114
+# tulpa 0.0.114
 
 * **`mode = "auto"` no longer conditions a random-effect term's SD at 1 (#267).**
   `tulpa(y ~ x + (1 | g))` on the default mode reported `sd = 1, source =
@@ -5396,7 +8337,7 @@ version number marks the release rather than a feature change.
   (`prior_df = n_coefs + 1`), documented as the closest analogue. See
   `vignette("priors")`.
 
-## 0.0.113
+# tulpa 0.0.113
 
 * **A random-effect term on the nested path has its SD integrated instead of
   conditioned at 1 (#265).** `tulpa(y ~ s(x) + (1 | site))` reported
@@ -5443,7 +8384,7 @@ version number marks the release rather than a feature change.
   #268, deliberately not bundled here: a PC prior on the `iid` axis alone would
   trade the cross-path inconsistency for one inside a single fit.
 
-## 0.0.112
+# tulpa 0.0.112
 
 * **An explicit `mode` is no longer silently overridden by a structural redirect
   (#266).** `tulpa(y ~ s(x) + (1 | site), mode = "eb")` fitted `nested_laplace`
@@ -5487,7 +8428,7 @@ version number marks the release rather than a feature change.
   live one. A reader grepping for the ST rank found the wrong copy first, which
   is the shape that made gcol33/tulpaRatio#12 possible.
 
-## 0.0.111
+# tulpa 0.0.111
 
 * **`ranef()` reports the per-group posterior on both RE-covariance backends
   (#264).** It returned a 0-row data frame for a fit from either integrator --
@@ -5522,7 +8463,7 @@ version number marks the release rather than a feature change.
   stated `fit$ranef_unavailable` reason. `?ranef` documents what each backend
   reports and why.
 
-## 0.0.110
+# tulpa 0.0.110
 
 * **`tglmm()` and `tgam()` are removed; `tulpa()` fits both model classes.**
   The two doors dispatched through `tulpa()` and returned a byte-identical fit,
@@ -5558,7 +8499,7 @@ version number marks the release rather than a feature change.
   partial match there while it would silently resolve on a nested fit. A
   conditioning fit is still labelled `conditioned`.
 
-## 0.0.109
+# tulpa 0.0.109
 
 * **The intrinsic RW rank is exported, so a linking package can consume it
   instead of carrying its own copy (gcol33/tulpaRatio#12).** `rw1_rank()` and
@@ -5570,7 +8511,7 @@ version number marks the release rather than a feature change.
   `tau` posterior. `tulpa_temporal::rw1_rank` / `rw2_rank` keep resolving, so
   the engine's own call sites are unchanged.
 
-## 0.0.108
+# tulpa 0.0.108
 
 * **An areal field's component partition is now set with its adjacency, so a
   consumer cannot leave the field unidentified (gcol33/tulpaRatio#19).** The
@@ -5664,7 +8605,7 @@ version number marks the release rather than a feature change.
   `Hw^-1 Ho` at the mode, i.e. how far the working weight understates the true
   curvature) and `bigscale` (the residual table above).
 
-## 0.0.106
+# tulpa 0.0.106
 
 * **The Newton stall test no longer reads slow convergence as a converged mode
   (gcol33/tulpa#255).** `newton_converged()` carried a rescue path for an
@@ -5732,7 +8673,7 @@ version number marks the release rather than a feature change.
   is `TLPACKP2`. A file written by an earlier version errors with the existing
   "point `checkpoint$path` at a fresh path" message instead of being misparsed.
 
-## 0.0.105
+# tulpa 0.0.105
 
 * **The zero-inflation refusal names every family the gate admits
   (gcol33/tulpa#250).** The kernel guard stops on
@@ -5769,7 +8710,7 @@ version number marks the release rather than a feature change.
   `select_inference_mode()` already builds from the registry. Correct today,
   stale the moment a tier is added.
 
-## 0.0.104
+# tulpa 0.0.104
 
 * **The dispersion convention follows the base family, not the spelling
   (gcol33/tulpa#256).** `phi` is the residual VARIANCE for the normal families
@@ -5804,7 +8745,7 @@ version number marks the release rather than a feature change.
   derived from the registry (`.phi2_backends()`) rather than restated in the
   refusal message.
 
-## 0.0.103
+# tulpa 0.0.103
 
 * **`estimate_phi` covers every front-door family that has a dispersion
   (gcol33/tulpa#247).** It was offered for twelve and carried a derivative for
@@ -5889,7 +8830,7 @@ version number marks the release rather than a feature change.
   drift; zero-inflated `beta_binomial` is admitted by that (it has both an atom
   at zero and, now, an observed curvature).
 
-## 0.0.102
+# tulpa 0.0.102
 
 * **Out-of-pattern Hessian writes are detected instead of silently discarded
   (gcol33/tulpa#249).** `SparseHessianBuilder::add()` dropped any contribution
@@ -5927,7 +8868,7 @@ version number marks the release rather than a feature change.
   counter on both write paths, the raise, the zero-versus-nonzero distinction,
   and a real fit.
 
-## 0.0.101
+# tulpa 0.0.101
 
 * **`portable_math.h` compiles for downstream packages on macOS again
   (bugfix).** The header returns `std::pair` from `portable_digamma_lgamma()`
@@ -5939,7 +8880,7 @@ version number marks the release rather than a feature change.
   tulpaObs's macOS `R CMD check` down at `count_grouped_oracle.o`. The header
   now includes `<utility>` itself. Header-only change, no behaviour anywhere.
 
-## 0.0.100
+# tulpa 0.0.100
 
 Warm-starting the sampler from a cheaper fit of the same model.
 
@@ -6463,7 +9404,7 @@ Fixed:
   passing it in `control` to `tulpa_eb()` directly errors rather than being
   accepted and ignored.
 
-## 0.0.97
+# tulpa 0.0.97
 
 The soft sum-to-zero constant that identifies intrinsic latent fields, moved
 onto the reference idiom and single-sourced (#241).
@@ -6505,7 +9446,7 @@ Internal:
   per-component precision. `test-mcar-prior.R`'s reference now reads the same
   helper the C++ does rather than hard-coding the value.
 
-## 0.0.96
+# tulpa 0.0.96
 
 A settable prior on the zero-inflation coefficients, and the correctness fix
 that finding it turned up.
@@ -6549,7 +9490,7 @@ Fixed:
   the identity at a prior far from the default to show it is a property of the
   likelihood and not of the default scale.
 
-## 0.0.95
+# tulpa 0.0.95
 
 One diagnostic front door, selected by draws provenance.
 
@@ -6584,7 +9525,7 @@ Fixed:
   the new `diagnostics()` example now use `mode = "smc"`, a deterministic
   backend that does emit draws.
 
-## 0.0.94
+# tulpa 0.0.94
 
 Empirical Bayes over random-effect covariances, and the lme4 / posterior
 accessor surface.
@@ -6664,7 +9605,7 @@ Correctness:
   now warns rather than being reported as a fitted value -- the low end is the
   classic empirical-Bayes collapse to `sigma = 0`.
 
-## 0.0.93
+# tulpa 0.0.93
 
 Zero inflation as a composition over the count families, and compiled kernels
 for the last three families that had none.
@@ -6751,7 +9692,7 @@ Correctness:
   `inst/include/tulpa/autodiff_fwd.h` serving a single include, and is deleted
   rather than left to diverge once `expm1` landed.
 
-## 0.0.92
+# tulpa 0.0.92
 
 Audit fixes (0.0.91 review, issues #228-#239).
 
@@ -6798,7 +9739,7 @@ Clean-up:
   in `spatial_gp.R` (#236); single-sourced the natural-scale hyperparameter
   transforms shared by `spatial_range()` / `temporal_corr()` (#237).
 
-## 0.0.91
+# tulpa 0.0.91
 
 Audit fixes (0.0.90 review, issues #218-#227).
 
@@ -6871,7 +9812,7 @@ Audit fixes (0.0.90 review, issues #218-#227).
   sampler and autodiff sources and repaired truncated comment fragments in the
   joint Pareto-k module.
 
-## 0.0.90
+# tulpa 0.0.90
 
 Audit fixes (0.0.89 review, issues #207-#217).
 
@@ -6952,7 +9893,7 @@ Audit fixes (0.0.89 review, issues #207-#217).
   was tightened from 1e-4 to 1e-12 (the estimators match `posterior::` to
   ~8e-16).
 
-## 0.0.89
+# tulpa 0.0.89
 
 Audit fixes (0.0.88 review, issues #193-#206).
 
@@ -7001,7 +9942,7 @@ Audit fixes (0.0.88 review, issues #193-#206).
   removed, and the multi-block CAR_proper log-det cache made cell-keyed
   (`NlCellCache`) to match the single-block path.
 
-## 0.0.88
+# tulpa 0.0.88
 
 * **SoftAbs divergence-retry invariance test (#189).** The post-warmup SoftAbs
   retry re-runs a diverged NUTS trajectory under a frozen Hessian-based metric
@@ -7015,7 +9956,7 @@ Audit fixes (0.0.88 review, issues #193-#206).
   invariance holds empirically -- 24-seed paired |t| < 0.4 on every summary,
   divergences 735 -> 8, no posterior shift.
 
-## 0.0.87
+# tulpa 0.0.87
 
 Bug fixes and cleanups from a second whole-repo audit (issues #176-192).
 
@@ -7070,7 +10011,7 @@ already in the internal log-scale parameterization, so equal-weight grid
 integration is correctly calibrated and adding a user-scale Jacobian biases the
 scale posterior.
 
-## 0.0.86
+# tulpa 0.0.86
 
 Bug fixes from a whole-repo audit.
 
@@ -7147,7 +10088,7 @@ Warnings and cleanups.
   design-principle / improvement enumerations (`principle #5`, `improvement #1`)
   were preserved.
 
-## 0.0.85
+# tulpa 0.0.85
 
 Per-block quadrature order and an optional variance-component prior on the AGHQ
 path.
@@ -7175,7 +10116,7 @@ path.
   curvature there, keeping the joint optimum non-singular without materially
   shifting an identified fit. R-only, no ABI change.
 
-## 0.0.84
+# tulpa 0.0.84
 
 Checkpoint fix (#161).
 
@@ -7191,7 +10132,7 @@ Checkpoint fix (#161).
   checkpoint. A resumed fit stays byte-identical to an uninterrupted one; fits
   with `diagnose_k = FALSE` are unaffected.
 
-## 0.0.83
+# tulpa 0.0.83
 
 Front-door API convention cleanup (#156, fully closed) and the
 missing-front-door features (#158, fully closed). **ABI break**
@@ -7266,7 +10207,7 @@ log-determinant; downstream packages must rebuild.
   Recovers the varying-coefficient surface / trajectory on simulated data
   (cor > 0.94).
 
-## 0.0.82 (2026-07-15)
+# tulpa 0.0.82 (2026-07-15)
 
 The sampled spatial range gets a real prior. **ABI break**
 (`TULPA_ABI_VERSION` 33 -> 34); downstream packages must rebuild, and any
@@ -7363,7 +10304,7 @@ anchors (see the last bullet).
   `TULPA_ABI_VERSION` remains a compiled constant by design: it describes the
   DLL a model package linked against, not the metadata beside it.
 
-## 0.0.81 (2026-07-15)
+# tulpa 0.0.81 (2026-07-15)
 
 Third deep-audit pass: statistical, memory-safety, and backend-consistency
 fixes surfaced by a fan-out code audit.
@@ -7546,7 +10487,7 @@ fixes surfaced by a fan-out code audit.
   the other component's contribution. The two-process negbin kernel now draws the
   exact real Polya-Gamma shape (`rpg_real`).
 
-## 0.0.80 (2026-07-14)
+# tulpa 0.0.80 (2026-07-14)
 
 CRAN-preparation release.
 
@@ -7666,7 +10607,7 @@ CRAN-preparation release.
 * Test suite: heavy fit / sampler blocks are `skip_on_cran()`-gated; vignette
   sampler chunks shrunk to CRAN-friendly iteration counts.
 
-## 0.0.79 (2026-07-12)
+# tulpa 0.0.79 (2026-07-12)
 
 * `integration = "grid_adaptive"` now declines to the dense tensor BEFORE any
   inner solve when the outer grid is small (fewer than `control$adaptive_grid_min_cells`
@@ -7678,7 +10619,7 @@ CRAN-preparation release.
   the same wall-clock. The adaptive integrator earns its speedup only on large
   outer grids whose hyperparameter posterior concentrates.
 
-## 0.0.78 (2026-07-12)
+# tulpa 0.0.78 (2026-07-12)
 
 * New outer-grid integrator `integration = "grid_adaptive"` for the multi-block
   joint nested-Laplace driver, the low-dimensional companion to the CCD. It seeds
@@ -7699,7 +10640,7 @@ CRAN-preparation release.
   `1 <= d <= 3` latent axes, where the CCD mode-find is not worth it but a dense
   tensor still pays a full inner solve for every near-zero-weight cell.
 
-## 0.0.77 (2026-07-10)
+# tulpa 0.0.77 (2026-07-10)
 
 * The outer-grid thread memory clamp in the sparse joint nested-Laplace driver
   now budgets against the memory that is actually **free**, not the installed
@@ -7737,7 +10678,7 @@ CRAN-preparation release.
   alongside the existing `total_ram_bytes()`, exposed to R for diagnostics as
   `cpp_available_ram_bytes()` / `cpp_total_ram_bytes()`.
 
-## 0.0.76 (2026-07-10)
+# tulpa 0.0.76 (2026-07-10)
 
 * The coupled-cell scatter in the sparse joint nested-Laplace driver (the
   `occu_cover()` hot loop, about 94% of runtime on a large fit) runs in parallel
@@ -7760,7 +10701,7 @@ CRAN-preparation release.
   regularizes the tail without that bias. The sigma-pos-prior recovery test
   asserts the retuned, measured behaviour.
 
-## 0.0.75 (2026-07-08)
+# tulpa 0.0.75 (2026-07-08)
 
 * SPDE field prediction standard errors (`predict(se.fit = TRUE)` with the field
   included) are computed by a streaming C++ kernel (`cpp_spde_field_se`) that
@@ -7775,7 +10716,7 @@ CRAN-preparation release.
   phases. This halves the pre-grid setup working set at a given
   `control$n_threads_outer`; fits are numerically identical.
 
-## 0.0.74 (2026-07-07)
+# tulpa 0.0.74 (2026-07-07)
 
 * `adjacency()` gains a settable neighbourhood. `order = k` extends the grid /
   raster stencil to the k-th ring: queen keeps every cell within Chebyshev
@@ -7788,7 +10729,7 @@ CRAN-preparation release.
   (default) and `offsets = NULL` reproduce the previous queen / rook graphs
   byte-for-byte.
 
-## 0.0.73 (2026-07-07)
+# tulpa 0.0.73 (2026-07-07)
 
 * Posterior prediction: `posterior_predict()` draws replicated responses from
   the posterior predictive (per-draw linear predictor -- fixed and random
@@ -7845,7 +10786,7 @@ CRAN-preparation release.
   observation processes owned by model packages via `LikelihoodSpec`; the
   engine keeps only the generic interval/truncated gaussian kernels.
 
-## 0.0.72 (2026-07-07)
+# tulpa 0.0.72 (2026-07-07)
 
 * New approximation-layer fitters:
   - `tulpa_ep()`: Expectation Propagation for GLMs with a Gaussian coefficient
@@ -7899,7 +10840,7 @@ CRAN-preparation release.
   to `R/nested_laplace_moments.R`, and the Polya-Gamma Gibbs dispatch plus the
   `tulpa_gibbs()` front door to `R/fit_gibbs.R`.
 
-## 0.0.71 (2026-07-06)
+# tulpa 0.0.71 (2026-07-06)
 
 * `cpp_laplace_fit_spatial()` and `cpp_laplace_fit_bym2()` gain a `force_sparse`
   argument (0 = size threshold, 1 = force sparse, -1 = force dense) threaded to
@@ -7915,7 +10856,7 @@ CRAN-preparation release.
   silently reproducing its own new draws (`test-integrator.R`,
   `tools/gen_leapfrog_ref.R`).
 
-## 0.0.70 (2026-07-06)
+# tulpa 0.0.70 (2026-07-06)
 
 * `tulpa_integrator("adaptive2")` / `"adaptive3"` cap the warmup-end curvature
   estimate at `DENSE_MAX_PARAMS` (200) parameters. Above that bound the
@@ -7927,7 +10868,7 @@ CRAN-preparation release.
   `p + 1` gradient sweeps at warmup end. Default leapfrog, the fixed schemes, and
   any model at or below the bound are unchanged.
 
-## 0.0.69 (2026-07-06)
+# tulpa 0.0.69 (2026-07-06)
 
 * `tulpa_integrator("adaptive2")` and `"adaptive3"` wire the SIMP step-adapted
   minimum-error integrators into NUTS. Each chain resolves its multistage
@@ -7966,7 +10907,7 @@ CRAN-preparation release.
   integrator decls now include only `simp/scheme.h`, so the Eigen-heavy headers
   do not enter every translation unit.
 
-## 0.0.67 (2026-07-03)
+# tulpa 0.0.67 (2026-07-03)
 
 * The SIMP integrator headers are now vendored into `src/simp/` (snapshot via
   `vendor_simp.sh`) instead of pulled in through `LinkingTo: SIMP`. tulpa builds
@@ -7976,7 +10917,7 @@ CRAN-preparation release.
   the snapshot after updating SIMP. No behaviour change: `tulpa_integrator()`
   and the schemes are identical.
 
-## 0.0.66 (2026-07-03)
+# tulpa 0.0.66 (2026-07-03)
 
 * `tulpa_integrator("minerror2")` selects the two-stage minimum-error
   integrator from SIMP 0.2.0. Its coefficient cancels the leading energy error
@@ -7986,7 +10927,7 @@ CRAN-preparation release.
   linear-Gaussian recovery test and is the recommended advanced integrator for
   near-Gaussian posteriors. Requires `SIMP (>= 0.2.0)`.
 
-## 0.0.65 (2026-07-03)
+# tulpa 0.0.65 (2026-07-03)
 
 * The HMC / NUTS trajectory integrator is now backed by the SIMP symplectic
   integrator library (`LinkingTo: SIMP`). Both leapfrog steppers (the in-place
@@ -8003,7 +10944,7 @@ CRAN-preparation release.
   step-size stability threshold interacts poorly with dual-averaging
   adaptation). See `?tulpa_integrator` and `test-integrator.R`.
 
-## 0.0.64 (2026-07-01)
+# tulpa 0.0.64 (2026-07-01)
 
 * `tulpa_pit()` runs in C++ (`cpp_tulpa_pit`), and the leave-one-out PIT
   weighting is exposed as `cpp_psis_loo_pit` -- per-observation PSIS leave-one-out
@@ -8012,7 +10953,7 @@ CRAN-preparation release.
   order. Both draw from R's RNG stream in the same order as their former R
   bodies, so results are byte-identical under a fixed seed (test-pit-cpp.R).
 
-## 0.0.63 (2026-07-01)
+# tulpa 0.0.63 (2026-07-01)
 
 * `tulpa_psis()` runs its deterministic core -- the Zhang-Stephens generalized-
   Pareto tail fit and the Pareto smoothing of the upper-tail log weights -- in a
@@ -8023,7 +10964,7 @@ CRAN-preparation release.
   reproducible; each per-observation LOO fit and each bootstrap refit is now the
   C++ path. Byte-close to the former R body (~1e-12).
 
-## 0.0.62 (2026-06-30)
+# tulpa 0.0.62 (2026-06-30)
 
 * `tulpa_nested_laplace_joint()` gains `prior_phi`, a regularizing hyperprior on
   the per-arm dispersion axes declared through `phi_grid` (a Beta precision, a
@@ -8034,7 +10975,7 @@ CRAN-preparation release.
   see the regularized posterior; with no `phi_grid` it is a no-op. Threads
   through the single- and multi-block paths (gcol33/tulpa#139).
 
-## 0.0.61 (2026-06-23)
+# tulpa 0.0.61 (2026-06-23)
 
 * New `control$local_ccd` refines a multi-block tensor outer grid with local
   central-composite-design node clouds (`R/nested_laplace_joint_ccd_local.R`):
@@ -8064,7 +11005,7 @@ CRAN-preparation release.
   conservation, and the escalation path are pinned by
   `test-nested-laplace-joint-ccd-local.R`.
 
-## 0.0.60 (2026-06-23)
+# tulpa 0.0.60 (2026-06-23)
 
 * Joint nested-Laplace CCD outer integration is now robust to a sharply-peaked,
   ill-conditioned hyperparameter posterior -- the shape a joint occu_cover fit
@@ -8088,7 +11029,7 @@ CRAN-preparation release.
   expensive inner Laplace) the line search no longer serialises the mode-find;
   the accepted step is the same the sequential backtrack would take.
 
-## 0.0.59 (2026-06-22)
+# tulpa 0.0.59 (2026-06-22)
 
 * New `adjacency()` front door builds the symmetric graph that `spatial()` and
   `spatial_car()` consume, so areal models no longer need a hand-coded
@@ -8112,7 +11053,7 @@ CRAN-preparation release.
   `tulpa_adjacency` object directly (unwrapping its `$adjacency`), in addition
   to a bare matrix.
 
-## 0.0.57 (2026-06-22)
+# tulpa 0.0.57 (2026-06-22)
 
 * Joint nested-Laplace cell loop: a `CellCouplingSpec` can now declare, via the
   new `dense_cross_pairs(n_coupled, rank1_self_supported)` virtual, which
@@ -8128,7 +11069,7 @@ CRAN-preparation release.
   even before). Removes a `std::bad_alloc` on grids with a very high-visit cell
   (e.g. an all-undetected cell with tens of thousands of plots).
 
-## 0.0.56 (2026-06-21)
+# tulpa 0.0.56 (2026-06-21)
 
 * `k_quality` escalation is now driven by adaptive integration-grid refinement
   rather than diagnostic-draw doubling (gcol33/tulpa#131). When the outer
@@ -8149,7 +11090,7 @@ CRAN-preparation release.
   -- is now pinned by a direct unit test, not only indirectly via the band
   threshold.
 
-## 0.0.55 (2026-06-21)
+# tulpa 0.0.55 (2026-06-21)
 
 * The outer Pareto-k proposal refinement (moment matching, gcol33/tulpa#119) is
   allowed more passes. Proposal refinement is a separate step from the bare
@@ -8162,7 +11103,7 @@ CRAN-preparation release.
   usable band and still falling. A fit that already fits, or one whose moment
   matching has plateaued, pays the same as before.
 
-## 0.0.54 (2026-06-20)
+# tulpa 0.0.54 (2026-06-20)
 
 * `control$k_quality` now climbs the reliability ladder (gcol33/tulpa#131). When
   an `"ok"` / `"good"` target is not confidently reached on the first fit, the
@@ -8177,7 +11118,7 @@ CRAN-preparation release.
   into an internal engine driven by the escalation front door, with no change to
   the fit itself for the default `k_quality = "report"`.
 
-## 0.0.53 (2026-06-20)
+# tulpa 0.0.53 (2026-06-20)
 
 * Fixed: the outer Pareto-k no longer under-reports when the hyperparameter
   posterior is heavier or wider than the integration grid (gcol33/tulpa#130). The
@@ -8192,7 +11133,7 @@ CRAN-preparation release.
   moment-matched Gaussian, so the collapsed-grid path (gcol33/tulpa#117) is
   unaffected. The skipped bad-case recovery test is restored.
 
-## 0.0.52 (2026-06-20)
+# tulpa 0.0.52 (2026-06-20)
 
 * New `control$k_quality` reliability front door for the joint nested-Laplace
   outer Pareto-k (gcol33/tulpa#129). A single statement of the reliability the fit
@@ -8207,7 +11148,7 @@ CRAN-preparation release.
   and the integration-refinement rung (`k_refine`) are tracked in
   gcol33/tulpa#131. The reliability vignette covers the new front door.
 
-## 0.0.51 (2026-06-20)
+# tulpa 0.0.51 (2026-06-20)
 
 * Outer Pareto-k reliability bands are now sample-size dependent (gcol33/tulpa#128).
   The usable upper boundary is `min(1 - 1/log10(S), 0.7)` for `S` importance draws
@@ -8226,7 +11167,7 @@ CRAN-preparation release.
   grid is in fact too narrow). A fix that bounds the refinement to the grid is
   tracked; the bad-case recovery test is skipped meanwhile.
 
-## 0.0.50 (2026-06-19)
+# tulpa 0.0.50 (2026-06-19)
 
 * Joint nested-Laplace outer Pareto-k: replaced the adaptive batched reporting
   (#123/#124) with a single-batch + bootstrap uncertainty (gcol33/tulpa#127). The
@@ -8263,7 +11204,7 @@ CRAN-preparation release.
   draw-count-dependent usable boundary `min(1 - 1/log10(S), 0.7)`, the bootstrap
   band-confidence flag, and the reliability ladder from reporting to debiasing.
 
-## 0.0.49 (2026-06-19)
+# tulpa 0.0.49 (2026-06-19)
 
 * Joint nested-Laplace outer Pareto-k: adaptive batched reporting with a proper
   Monte Carlo standard error and a band-resolution flag (gcol33/tulpa#124). The
@@ -8294,7 +11235,7 @@ CRAN-preparation release.
   two batches). The `1/sqrt(B)` rule reduces the seed-to-seed variance, not the
   GPD k-hat's small-sample bias (controlled by `k_samples`, kept `>= 200`).
 
-## 0.0.48 (2026-06-19)
+# tulpa 0.0.48 (2026-06-19)
 
 * Joint nested-Laplace outer Pareto-k: opt-in batched reporting
   (gcol33/tulpa#123). The outer k-hat is a noisy estimator -- a generalized
@@ -8319,7 +11260,7 @@ CRAN-preparation release.
   the already opt-in / slow diagnostic; a handful of batches (5-10) gives an
   honest min/max range.
 
-## 0.0.47 (2026-06-19)
+# tulpa 0.0.47 (2026-06-19)
 
 * New built-in `truncated_gaussian` family (gcol33/tulpa#122): an
   upper-truncated Gaussian latent, the bounded-support sibling of the
@@ -8347,7 +11288,7 @@ CRAN-preparation release.
   gradient/Hessian, the PSD data-free information identity, and overflow safety
   are checked in `test-multinomial-logit.R`.
 
-## 0.0.46 (2026-06-18)
+# tulpa 0.0.46 (2026-06-18)
 
 * Joint nested-Laplace outer Pareto-k: grid-mixture (basin) importance proposal
   (gcol33/tulpa#121). The engine represents the hyperparameter posterior as the
@@ -8377,7 +11318,7 @@ CRAN-preparation release.
   0.81, peaks flagged unreliable) to a stable usable band (max ~0.47 across seeds,
   median ~0.16) with a roughly two-fold higher importance-sampling effective size.
 
-## 0.0.45 (2026-06-18)
+# tulpa 0.0.45 (2026-06-18)
 
 * `tulpa_criteria()` gains a `group` argument that sets the LOO unit explicitly
   (gcol33/tulpa#118). A column of `log_lik` is the leave-one-out fold; with
@@ -8410,7 +11351,7 @@ CRAN-preparation release.
   more arms; the single-block shared-field layout declines rather than
   mis-attribute its axes.
 
-## 0.0.44 (2026-06-18)
+# tulpa 0.0.44 (2026-06-18)
 
 * New built-in `interval_gaussian` family: an interval-censored Gaussian latent
   (an ordered probit with KNOWN thresholds). The latent value is
@@ -8447,7 +11388,7 @@ CRAN-preparation release.
   refine it, rather than over-widening the proposal with the local mode curvature
   of a non-Gaussian outer marginal.
 
-## 0.0.43 (2026-06-18)
+# tulpa 0.0.43 (2026-06-18)
 
 * Joint nested-Laplace outer Pareto-k: the collapsed-grid mode-Hessian rescue
   (gcol33/tulpa#116) now engages when a hyperparameter axis is pinned
@@ -8480,7 +11421,7 @@ CRAN-preparation release.
   `tulpa.kdiag.percell` (default TRUE; falls back to the re-order, then the
   broadcast mode, when grid modes are unavailable).
 
-## 0.0.42 (2026-06-18)
+# tulpa 0.0.42 (2026-06-18)
 
 * Faster joint nested-Laplace outer Pareto-k diagnostic (gcol33/tulpa#118).
   Profiling the joint occu_cover diagnostic showed the dominant cost is the
@@ -8516,7 +11457,7 @@ CRAN-preparation release.
   byte-for-byte exact diagnostic, and `tulpa.kdiag.capture` exposes the importance
   log-ratios for an external cross-check.
 
-## 0.0.41 (2026-06-18)
+# tulpa 0.0.41 (2026-06-18)
 
 * Mode-Hessian outer Pareto-k proposal for the joint nested-Laplace backend
   (gcol33/tulpa#116). The outer `pareto_k` diagnostic built its importance
@@ -8548,7 +11489,7 @@ CRAN-preparation release.
       well-conditioned tensor collapse (quad-ESS = 1.00): `grid_moment` k = 0.895
       (unreliable) -> `mode_hessian` k = 0.543 (reliable).
 
-## 0.0.40 (2026-06-17)
+# tulpa 0.0.40 (2026-06-17)
 
 * Outer-grid progress reporter (`tulpa_progress::GridProgress`, the
   nested-Laplace grid and parallel NUTS sampler): two fixes for long detached /
@@ -8608,7 +11549,7 @@ CRAN-preparation release.
   uses the physical performance-core count (capped at 2 under R CMD check), and
   an integer pins the width.
 
-## 0.0.38 (2026-06-17)
+# tulpa 0.0.38 (2026-06-17)
 
 * `laplace_diagnostics()`: a front-door diagnostic for deterministic
   (i.i.d.-draw) nested-Laplace fits, the class `mcmc_diagnostics()` declines to
@@ -8630,18 +11571,18 @@ CRAN-preparation release.
   honour `n_threads_outer` (previously hardcoded to one thread), giving a
   5.8-7.7x speedup on `diagnose.k = TRUE` fits with k-hat unchanged.
 
-## 0.0.37 (2026-06-16)
+# tulpa 0.0.37 (2026-06-16)
 
 * build: the `tulpaMesh` dependency floor is raised to `tulpaMesh (>= 0.1.3)`,
   locking it to the current tulpaMesh release. The `Remotes` install reference was
   already `gcol33/tulpaMesh@v0.1.3`.
 
-## 0.0.36 (2026-06-16)
+# tulpa 0.0.36 (2026-06-16)
 
 * Maintenance release. No user-facing changes; the version is bumped to keep the
   tulpa and tulpaObs release tags in step.
 
-## 0.0.35 (2026-06-16)
+# tulpa 0.0.35 (2026-06-16)
 
 * test(tiers): the test suite is now organized into three explicit cost tiers,
   single-sourced in `tests/testthat/helper-tiers.R`: tier 1 structural (ungated,
@@ -8654,7 +11595,7 @@ CRAN-preparation release.
   The default and CRAN runs are unchanged.
 * build: bump `LinkingTo: gcol33/tulpaMesh` to `v0.1.3`.
 
-## 0.0.34 (2026-06-12)
+# tulpa 0.0.34 (2026-06-12)
 
 * feat(nested-laplace-joint): `cpp_joint_inner_vcov_blocks` now defaults
   `field_marginal = TRUE` (and `n_threads = 1`). The cheap selected-inversion
@@ -8677,7 +11618,7 @@ CRAN-preparation release.
   `arm_neg_hess_diag` so the assembled Hessian matches the dense path to machine
   precision.
 
-## 0.0.33 (2026-06-12)
+# tulpa 0.0.33 (2026-06-12)
 
 * perf(nested-laplace-joint): the joint post-grid inner-covariance extraction is
   now a single parallel C++ primitive, `cpp_joint_inner_vcov_blocks`
@@ -8693,7 +11634,7 @@ CRAN-preparation release.
   forms the full block (the betas-only callers). Numerically identical to the
   former dense path on the read sub-blocks (`test-joint-inner-vcov.R`).
 
-## 0.0.32 (2026-06-12)
+# tulpa 0.0.32 (2026-06-12)
 
 * refactor(linalg): the small-dense lower-Cholesky factorization, triangular
   solves, log-determinant, and NNGP conditional (kriging) moments are now a
@@ -8716,7 +11657,7 @@ CRAN-preparation release.
   arm-level `spatial_idx`; the multi-block path still fills a zero placeholder --
   the only behavioral split, now an explicit policy argument.
 
-## 0.0.31 (2026-06-12)
+# tulpa 0.0.31 (2026-06-12)
 
 * fix(laplace): `tulpa_laplace(..., weights=)` now scales the log-likelihood by
   the per-observation weight, matching the already-weighted score and Fisher
@@ -8735,7 +11676,7 @@ CRAN-preparation release.
   a 4-cell surplus grid; `test-nested-laplace-joint-threading.R` locks in the
   invariance.
 
-## 0.0.30 (2026-06-10)
+# tulpa 0.0.30 (2026-06-10)
 
 * refactor(spde): the fractional rSPDE Laplace marginal moves from R to C++
   (`cpp_spde_fractional_logmarginal`, Eigen). The well-conditioned `B` /
@@ -8857,7 +11798,7 @@ CRAN-preparation release.
   log-prior equals the sum of the `L` independent single-component log-priors.
   A connected graph is the `n_components = 1` case, byte-identical to before.
 
-## 0.0.28 (2026-06-09)
+# tulpa 0.0.28 (2026-06-09)
 
 * feat(spatial): the separable-MCAR areal block can now be COPIED across arms in
   the joint multi-block driver. A correlated `(intercept, slope)` field sharing a
@@ -8876,7 +11817,7 @@ CRAN-preparation release.
   correlation) and the copy `alpha` against simulated truth
   (test-nested-laplace-joint-multi-copy.R).
 
-## 0.0.27 (2026-06-09)
+# tulpa 0.0.27 (2026-06-09)
 
 * feat(formula): the varying-coefficient bar column-expansion is now public.
   `tulpa_bar_field_specs(~ 1 + w || node, data)` expands an lme4-style bar into
@@ -8891,7 +11832,7 @@ CRAN-preparation release.
   constructor are refactored onto the shared bar recognizer so the engine and
   any consumer cannot drift (gcol33/tulpa#93).
 
-## 0.0.26 (2026-06-08)
+# tulpa 0.0.26 (2026-06-08)
 
 * fix(spatial): `fit_spde(method = "ccd")` now actually runs the central-
   composite design. `fit_spde_nested_ccd()` took `optimHess()` of the negative
@@ -8904,7 +11845,7 @@ CRAN-preparation release.
   design instead of the 25-node grid. A weakly-identified axis still falls back
   to the grid via the existing mode and Hessian guards (gcol33/tulpa#92).
 
-## 0.0.25 (2026-06-08)
+# tulpa 0.0.25 (2026-06-08)
 
 * feat(spatial): the correlated areal field (separable MCAR,
   `spatial(graph, ~ ... | cell)`) now integrates its cross-covariance `Sigma`
@@ -8929,7 +11870,7 @@ CRAN-preparation release.
   every cross-correlation `rho_ij` with covering CIs at p = 2 and p = 3
   (test-spatial-mcar.R).
 
-## 0.0.24 (2026-06-08)
+# tulpa 0.0.24 (2026-06-08)
 
 * feat(spatial): `spatial(graph, ~ 1 + x | cell)` (a single bar `|`) builds
   correlated areal varying-coefficient fields -- a separable multivariate CAR
@@ -8953,7 +11894,7 @@ CRAN-preparation release.
   case); general `p > 2` fits through the same path with a coarser raw
   log-Cholesky grid.
 
-## 0.0.23 (2026-06-08)
+# tulpa 0.0.23 (2026-06-08)
 
 * feat(temporal): `temporal(formula = ~ 1 + x || time, structure = "rw1")`
   declares inline temporally varying-coefficient fields in a `tulpa()` model
@@ -8975,7 +11916,7 @@ CRAN-preparation release.
   inline-field fitters share one engine (`.bar_field_fit_core`) and one bar
   column-expansion helper, so the two paths cannot drift.
 
-## 0.0.22 (2026-06-08)
+# tulpa 0.0.22 (2026-06-08)
 
 * feat(spatial): `spatial(graph, ~ ... || cell, proper = TRUE)` builds proper
   CAR varying-coefficient fields, where each field's precision is
@@ -8992,7 +11933,7 @@ CRAN-preparation release.
   single `|` with `proper = TRUE` (correlated proper CAR) remains a separate
   model.
 
-## 0.0.21 (2026-06-08)
+# tulpa 0.0.21 (2026-06-08)
 
 * perf/fix(nested-laplace): the sparse sum-to-zero large-field inner solve now
   takes the exact block-Schur Newton step instead of escalating a
@@ -9014,7 +11955,7 @@ CRAN-preparation release.
   `max|dmode| = max|dlogmarg| = max|dQ| = 0` at a 412-cell field) and locked by a
   direct block-Schur-vs-dense-LLT log-determinant + step unit test.
 
-## 0.0.20 (2026-06-08)
+# tulpa 0.0.20 (2026-06-08)
 
 * feat(spatial): `spatial(graph, formula = ~ 1 + time || cell)` declares areal
   varying-coefficient fields inline in a `tulpa()` model formula, the way a
@@ -9037,7 +11978,7 @@ CRAN-preparation release.
   `proper = TRUE` (reserved). The bare `spatial(col)` areal-naming term and the
   `spatial =` constructor path are unchanged.
 
-## 0.0.19 (2026-06-08)
+# tulpa 0.0.19 (2026-06-08)
 
 * feat(progress): the nested-Laplace outer-grid progress line now shows the
   active outer-thread count, e.g. `... | 0.06s/cells | 28 threads`, whenever the
@@ -9051,7 +11992,7 @@ CRAN-preparation release.
   `threads` argument carrying the same field. Serial loops leave the count at 1
   and omit the field; their lines are byte-for-byte unchanged.
 
-## 0.0.18 (2026-06-08)
+# tulpa 0.0.18 (2026-06-08)
 
 * feat(spde): fractional-nu SPDE fields gain a fixed-hyperparameter NUTS path
   (#85, #87). The rational (BRASIL) approximation is sampled with the
@@ -9068,7 +12009,7 @@ CRAN-preparation release.
 * test(joint): the coupled-cell path composes a shared field with a per-group
   random effect (#86).
 
-## 0.0.17 (2026-06-07)
+# tulpa 0.0.17 (2026-06-07)
 
 * docs(vignettes): correctness pass against the current API. Corrected the
   nested-fit `logLik()` / `compare_models()` description (a nested fit returns the
@@ -9081,13 +12022,13 @@ CRAN-preparation release.
 * build: drop the precompiled-header mechanism; each translation unit parses
   RcppEigen directly.
 
-## 0.0.16 (2026-06-07)
+# tulpa 0.0.16 (2026-06-07)
 
 * Tagged release of the grouped beta sufficient-statistic joint interface
   (`slog_y` / `slog_1my`, added in 0.0.15) so consumer packages can pin a
   released engine; consumed by tulpaObs `aggregate.pos`. No engine code change.
 
-## 0.0.15 (2026-06-07)
+# tulpa 0.0.15 (2026-06-07)
 
 * feat(laplace): the joint nested-Laplace engine accepts optional grouped beta
   sufficient statistics on a built-in `beta` arm. When an arm carries `slog_y` /
@@ -9102,7 +12043,7 @@ CRAN-preparation release.
   `laplace_family_link.h` are the single source. This is the engine backing for
   tulpaObs's `aggregate.pos` cover-arm reduction (gcol33/tulpaObs#49).
 
-## 0.0.14 (2026-06-06)
+# tulpa 0.0.14 (2026-06-06)
 
 * refactor: remove structural duplication flagged by a code-rot scan, with no
   change in behavior. `.is_multi_block_prior` is now a single predicate (the
@@ -9114,7 +12055,7 @@ CRAN-preparation release.
   follow the dominant `log_prior_*` naming (`log_prior_car_proper`,
   `log_prior_sigma2_pc`), retiring a dead wrapper.
 
-## 0.0.13 (2026-06-06)
+# tulpa 0.0.13 (2026-06-06)
 
 * fix(check): clears every `R CMD check --as-cran` ERROR and WARNING. The
   joint-NUTS fractional-nu test now asserts the rejection at the fit call --
@@ -9129,7 +12070,7 @@ CRAN-preparation release.
   rejected ("created and used with differing settings") and re-parsed in every
   translation unit -- restoring the PCH speedup (cold compile ~70s -> ~61s).
 
-## 0.0.12 (2026-06-06)
+# tulpa 0.0.12 (2026-06-06)
 
 * feat(progress): unified iteration progress + ETA across every fitting loop
   -- the C++ outer grids (nested-Laplace, joint, sparse SPDE), the NUTS
@@ -9147,7 +12088,7 @@ CRAN-preparation release.
   top-level fit ticks.
 * docs(api): document `tulpa_profile()`, the inner sparse-Laplace phase timer.
 
-## 0.0.11 (2026-06-06)
+# tulpa 0.0.11 (2026-06-06)
 
 * feat(samplers): thread random-effect, areal-spatial, and temporal latent
   structure through the model-agnostic ModelData sampler kernels --
@@ -9171,7 +12112,7 @@ CRAN-preparation release.
   multi-RE fit and the sampler builder. Continuous spatial (gp / nngp / hsgp),
   CAR_proper, and SPDE fields keep their dedicated paths.
 
-## 0.0.10 (2026-06-05)
+# tulpa 0.0.10 (2026-06-05)
 
 * Fix a data race in the threaded sparse joint outer-grid nested-Laplace driver
   (`run_multi_block_nested_laplace_joint_sparse_impl`). The cell-coupling
@@ -9188,7 +12129,7 @@ CRAN-preparation release.
   220-region BYM2 beta-cover fit is identical serial vs `n_threads_outer = 6` to
   ~1e-10.
 
-## 0.0.9 (2026-06-03)
+# tulpa 0.0.9 (2026-06-03)
 
 * feat(offset): thread `offset()` terms through the SPDE, spatial-Laplace, and
   ModelData-sampler paths of `tulpa()` (gcol33/tulpa#72). A fixed log-exposure /
@@ -9288,7 +12229,7 @@ CRAN-preparation release.
   to `>= 3` axes; `"grid"` always forces the tensor product. (Previously the
   default engaged the CCD at `>= 3` axes.)
 
-## 0.0.8 (2026-06-02)
+# tulpa 0.0.8 (2026-06-02)
 
 * feat(nested-laplace): CCD outer integration for the joint multi-block path
   (gcol33/tulpa#59). `control$integration = "ccd"` (default for >= 3
@@ -9324,7 +12265,7 @@ CRAN-preparation release.
   closed-form / gradient unit tests only; the default still runs the full
   recovery suite.
 
-## 0.0.7 (2026-06-01)
+# tulpa 0.0.7 (2026-06-01)
 
 * feat: grid-cell / per-unit **checkpoint/resume across every fitter with an
   expensive outer loop** (gcol33/tulpa#50). A killed or rebooted fit reloads the
@@ -9365,7 +12306,7 @@ CRAN-preparation release.
   sub-floor decline also covers `tulpa_nested_laplace()`, `tulpa_re_cov_nested()`
   and `fit_spde()` through the shared PSIS cores.
 
-## 0.0.6
+# tulpa 0.0.6
 
 * `tulpa_re_cov_nested()` documents its outer accuracy-diagnostic controls
   `diagnose_k` (default `TRUE`) and `k_samples` (default 200) in the help page.
@@ -9375,7 +12316,7 @@ CRAN-preparation release.
   model-adapter home in tulpaObs (`ms_abun`); the generic engine retains the
   structure-agnostic `make_site`/`make_group` equivalence checks.
 
-## 0.0.5
+# tulpa 0.0.5
 
 * feat(nested-laplace): fits now record wall-clock runtime on the returned
   object as `fit$timing` (gcol33/tulpa#48). A named numeric of seconds carrying
@@ -9480,7 +12421,7 @@ CRAN-preparation release.
   is assembled into the joint Hessian (`tulpa_register_cell_coupling` C
   callable, default `"separable"` always available).
 
-## 0.0.2
+# tulpa 0.0.2
 
 * feat: `tulpa_re_aghq()` -- a callback-driven adaptive Gauss-Hermite refinement
   of a grouped random-effect covariance. Generalizes `agq_fit()` (intercept-only
@@ -9495,7 +12436,7 @@ CRAN-preparation release.
   exact-marginal log-likelihood, with SEs from the marginal Hessian. Recovery
   tests in `tests/testthat/test-re-aghq.R`.
 
-## 0.0.3 (2026-05-28)
+# tulpa 0.0.3 (2026-05-28)
 
 * feat(nested-laplace): `tulpa_nested_laplace_joint()` now reports the outer
   Pareto-k-hat accuracy diagnostic (`$pareto_k`, `$pareto_k_is_ess`) over its
@@ -9848,7 +12789,7 @@ CRAN-preparation release.
   `[beta (p)] [re (n_re_groups)] [w_mesh (n_mesh)]`.
   `TULPA_ABI_VERSION` bumped **13 → 14**; downstream packages must rebuild.
 
-## 2026-05-13 — ABI v13: Phase D — delete legacy ratio path
+# tulpa 2026-05-13 — ABI v13: Phase D — delete legacy ratio path
 
 Closes the tulpaRatio migration tracker (gcol33/tulpa#15). After v12
 gated the legacy ratio body of `compute_log_post_impl<T>` behind a
@@ -9943,7 +12884,7 @@ Downstream rebuild notes:
 * `tulpaGlmm` Day-22+ already targets the generic path; rebuild
   against v13.
 
-## 2026-05-12 — ABI v12: generic-layout safety in compute_log_post_impl + ESS port
+# tulpa 2026-05-12 — ABI v12: generic-layout safety in compute_log_post_impl + ESS port
 
 * `TULPA_ABI_VERSION` bumped **11 → 12**. Downstream packages must
   rebuild against the v12 headers.
@@ -9987,7 +12928,7 @@ Downstream rebuild notes:
   call `tulpa::get_ess_fn()(...)` end-to-end on a generic-layout
   `ModelData` without segfaulting.
 
-## 2026-05-12 — ABI v11: caller-supplied inv-mass diagonal for NUTS
+# tulpa 2026-05-12 — ABI v11: caller-supplied inv-mass diagonal for NUTS
 
 * `TULPA_ABI_VERSION` bumped **10 → 11**. Downstream packages must
   rebuild against the v11 headers.
@@ -10018,7 +12959,7 @@ Downstream rebuild notes:
   `tulpaRatio` need to be reinstalled against v11 — both already
   updated to pass `nullptr` for the new parameter (no logic change).
 
-## 2026-05-11 — NNGP Laplace: full off-diagonal precision scatter
+# tulpa 2026-05-11 — NNGP Laplace: full off-diagonal precision scatter
 
 * `laplace_mode_gp` (and the spatial-only / ST-combo NNGP entries in
   `nested_laplace.cpp`) now assemble the **full NNGP precision matrix**
@@ -10056,7 +12997,7 @@ Downstream rebuild notes:
   Downstream packages must rebuild against this commit to pick up the
   new behaviour (no source changes required).
 
-## 2026-05-11 — nested-Laplace ST family: 5 more indexed × indexed combos
+# tulpa 2026-05-11 — nested-Laplace ST family: 5 more indexed × indexed combos
 
 * Adds five additional joint spatial × temporal nested-Laplace shims,
   built on the same `run_two_indexed_nested_laplace` driver and joint
@@ -10081,7 +13022,7 @@ Downstream rebuild notes:
   resolved via `R_GetCCallable` at first use; downstream packages
   rebuilt against ABI v9 pick them up automatically.
 
-## 2026-05-11 — nested-Laplace joint spatial × temporal (ICAR × AR1)
+# tulpa 2026-05-11 — nested-Laplace joint spatial × temporal (ICAR × AR1)
 
 * New shim `tulpa_nested_laplace_st_icar_ar1` for joint nested-Laplace
   inference with an ICAR spatial field AND an AR1 temporal field in the
@@ -10101,7 +13042,7 @@ Downstream rebuild notes:
 * `TULPA_ABI_VERSION` bumped 8 → 9. Downstream packages must be rebuilt
   against this header set.
 
-## 2026-05-11 — nested-Laplace HSGP returns modes + store_Q
+# tulpa 2026-05-11 — nested-Laplace HSGP returns modes + store_Q
 
 * `tulpa_nested_laplace_hsgp` now sets `store_modes = 1` (was 0) and
   gained a `store_Q` flag matching the rest of the nested-Laplace family.
@@ -10121,7 +13062,7 @@ Downstream rebuild notes:
 * `TULPA_ABI_VERSION` bumped 7 → 8. Downstream packages (tulpaGlmm,
   tulpaObs) must be rebuilt against the updated headers.
 
-## 2026-05-11 — nested-Laplace BYM2 returns modes + store_Q
+# tulpa 2026-05-11 — nested-Laplace BYM2 returns modes + store_Q
 
 * `tulpa_nested_laplace_bym2` now sets `store_modes = 1` (was 0) and
   gained a `store_Q` flag matching the rest of the nested-Laplace family.
@@ -10141,7 +13082,7 @@ Downstream rebuild notes:
 * `TULPA_ABI_VERSION` bumped 6 → 7. Downstream packages (tulpaGlmm,
   tulpaObs) must be rebuilt against the updated headers.
 
-## 2026-05-11 — nested-Laplace store_Q on RW1/RW2/AR1/CAR_proper
+# tulpa 2026-05-11 — nested-Laplace store_Q on RW1/RW2/AR1/CAR_proper
 
 * `tulpa_nested_laplace_rw1`, `tulpa_nested_laplace_rw2`,
   `tulpa_nested_laplace_ar1`, and `tulpa_nested_laplace_car_proper` now
@@ -10157,7 +13098,7 @@ Downstream rebuild notes:
 * `TULPA_ABI_VERSION` bumped 5 → 6. Downstream packages (tulpaGlmm,
   tulpaObs) must be rebuilt against the updated headers.
 
-## 2026-05-06 — Takahashi partial inverse as a registered C-callable
+# tulpa 2026-05-06 — Takahashi partial inverse as a registered C-callable
 
 * New free function `tulpa::takahashi_partial_inverse_dense(n, Lp, Li, Lx,
   Z_out)` in `sparse_cholesky.{h,cpp}` runs the Takahashi recursion on a
@@ -10177,7 +13118,7 @@ Downstream rebuild notes:
   packages that want the new shim need only rebuild against the updated
   `sparse_solver_api.h`.
 
-## 2026-05-05 — multi-term + slope REs on the spec-Laplace path
+# tulpa 2026-05-05 — multi-term + slope REs on the spec-Laplace path
 
 * `tulpa_laplace_spec_dense` (and its public C ABI shim) now accepts the
   full multi-term, multi-coefficient RE structure populated by `populate_re`

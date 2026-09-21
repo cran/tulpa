@@ -14,7 +14,13 @@
 #   grid        numeric              the per-axis candidate values (the outer
 #                                   integration nodes on this axis).
 #   log_prior   function(x) | NULL   optional log-prior density on the axis.
-#                                   `NULL` -> flat (zero log-prior).
+#                                   `NULL` -> flat. On an axis with an
+#                                   `atom_mass` it describes the continuum
+#                                   only.
+#   log_prior_coord "integration"|"natural"  which coordinate `log_prior` is a
+#                                   density on. Default "integration", which is
+#                                   what a zero contribution (the flat default)
+#                                   is flat on.
 #   log_scale   logical(1)           does the axis live naturally on a log
 #                                   scale (sigma, tau, lengthscale, ...)?
 #                                   Drives geometric vs arithmetic spacing in
@@ -25,6 +31,20 @@
 #                                   points to the open interior.
 #   refinable   logical(1)           opt in to adaptive-grid refinement and the
 #                                   var-of-means consistency pass on this axis.
+#   extend      logical(1)           may those passes place a node PAST the
+#                                   outermost declared node? `FALSE` confines
+#                                   them to the span the declared nodes cover,
+#                                   so the axis is refined more finely and never
+#                                   widened. Read only when `refinable`.
+#   slab_bounds numeric(2) | NULL    fixed support of the continuum prior. The
+#                                   measure is normalised over it, so it is a
+#                                   prior choice and refinement may not leave
+#                                   it. NULL means the node span is the support
+#                                   (legacy, data-dependent).
+#   atom_mass   numeric(1) | NULL    prior probability of a zero level on a
+#                                   log-scale axis (a point mass outside the
+#                                   log continuum). Required when the grid
+#                                   carries a 0; NULL otherwise.
 
 #' Describe one outer-grid hyperparameter axis
 #'
@@ -40,31 +60,79 @@
 #'   Cartesian product across axes.
 #' @param log_prior Optional `function(x)` returning the scalar log prior
 #'   density at axis value `x`. `NULL` (default) is a flat / improper prior
-#'   (zero log-prior contribution).
+#'   (zero log-prior contribution). `log_prior_coord` says which coordinate the
+#'   function is a density on.
+#' @param log_prior_coord One of `"integration"` (default) or `"natural"`,
+#'   naming the coordinate `log_prior` is a density on. The contribution is
+#'   added to the cell's `log_marginal`, which the integrator weights by cell
+#'   widths measured on the axis's INTEGRATION coordinate (`log x` on a
+#'   `log_scale` axis), so `"integration"` is carried through as written and is
+#'   what the flat default's zero contribution is flat on. `"natural"` declares
+#'   a density on `x` itself -- a PC prior, `dexp`, `dgamma` -- and the engine
+#'   adds the change of variables `log(x)` on a `log_scale` axis. Every path
+#'   that meets a declared density carries it across in one place
+#'   (`.hyper_prior_carry()`). Inert on a linear axis, where the two
+#'   coordinates coincide (gcol33/tulpa#623).
 #' @param log_scale Logical. Does the axis live naturally on a log scale
 #'   (`sigma`, `tau`, `lengthscale`, ...)? Drives geometric vs arithmetic
 #'   spacing in refinement and log-axis quantile fits. Default `FALSE`.
 #' @param bounds Numeric vector of length 2 giving the natural support
 #'   `(lower, upper)` of the axis, e.g. `c(0, Inf)` for `sigma`, `c(0, 1)`
-#'   for a BYM2 mixing coefficient. `NULL` (default) is unbounded.
+#'   for a BYM2 mixing coefficient. `NULL` (default) is unbounded. A finite
+#'   endpoint is treated as OPEN: it is the value the parameterisation
+#'   degenerates at, so refinement clamps new points to the interior and the
+#'   axis's quadrature cells and reported support are closed strictly inside
+#'   it rather than half a node step past the outermost node.
+#' @param slab_bounds Numeric `c(lower, upper)`, or `NULL` (default). Fixed
+#'   support of the continuum part of the prior. A flat measure on a log axis is
+#'   improper, so the truncation bounds are what make it a proper density and
+#'   they are therefore a prior choice: the weights normalise over `slab_bounds`
+#'   and refinement is not allowed to move outside it. `NULL` leaves the node
+#'   span acting as the support, which makes the prior depend on where
+#'   refinement put the outermost node.
+#' @param atom_mass Numeric in `[0, 1)`, or `NULL` (default). Prior probability
+#'   of the zero level on a log-scale axis. A `0` is a point mass, not a point
+#'   of the log continuum, so its prior share has to be declared rather than
+#'   inherited from the node count; the continuum nodes then share
+#'   `1 - atom_mass` by quadrature weight. Required when `grid` contains a `0`
+#'   on a `log_scale` axis. A `log_prior` on such an axis is a density on the
+#'   continuum: it is not evaluated at the zero level and it shapes the
+#'   continuum's share without moving the declared split, so `atom_mass` is
+#'   the prior probability the fit integrates whatever the density is
+#'   (gcol33/tulpa#624, gcol33/tulpa#626).
 #' @param refinable Logical. When `TRUE`, the axis participates in the
 #'   adaptive-grid and var-of-means consistency passes (when those are
 #'   enabled at the driver level). Spatial prior amplitudes (`sigma`) are
 #'   typically left at the user-specified grid (`refinable = FALSE`); the
 #'   copy coefficient `alpha` and per-arm dispersion `phi` typically opt in.
 #'   Default `FALSE`.
+#' @param extend Logical. On a refinable axis, may the passes place a node
+#'   beyond the outermost value in `grid`? `TRUE` (default) lets refinement
+#'   follow the posterior out past the declared span, which is what an axis the
+#'   engine placed wants. `FALSE` confines every new node to the interior of the
+#'   declared span: the axis is integrated more finely over exactly the range
+#'   given, and a mode outside it shows up as mass at the edge instead of moving
+#'   the range. Inert when `refinable = FALSE`.
 #'
 #' @return An object of class `tulpa_hyper_axis_spec` (a validated list with
-#'   the six fields above).
+#'   the fields listed above).
 #'
 #' @seealso [tulpa_hyper_grid()].
 #' @keywords internal
 #' @export
 hyper_axis_spec <- function(name, grid, log_prior = NULL,
                             log_scale = FALSE, bounds = NULL,
-                            refinable = FALSE) {
+                            refinable = FALSE, atom_mass = NULL,
+                            slab_bounds = NULL,
+                            log_prior_coord = c("integration", "natural"),
+                            extend = TRUE) {
+  log_prior_coord <- match.arg(log_prior_coord)
   if (!is.character(name) || length(name) != 1L || !nzchar(name)) {
     stop("`name` must be a non-empty character string.", call. = FALSE)
+  }
+  if (length(extend) != 1L || is.na(suppressWarnings(as.logical(extend)))) {
+    stop(sprintf("Axis '%s': `extend` must be a single TRUE or FALSE.", name),
+         call. = FALSE)
   }
   grid <- as.numeric(grid)
   if (length(grid) < 1L || any(!is.finite(grid))) {
@@ -95,13 +163,33 @@ hyper_axis_spec <- function(name, grid, log_prior = NULL,
            call. = FALSE)
     }
   }
+  if (!is.null(atom_mass)) {
+    atom_mass <- as.numeric(atom_mass)
+    if (length(atom_mass) != 1L || !is.finite(atom_mass) ||
+        atom_mass < 0 || atom_mass >= 1) {
+      stop(sprintf("Axis '%s': `atom_mass` must be a single value in [0, 1).",
+                   name), call. = FALSE)
+    }
+  }
+  if (!is.null(slab_bounds)) {
+    slab_bounds <- as.numeric(slab_bounds)
+    if (length(slab_bounds) != 2L || !all(is.finite(slab_bounds)) ||
+        slab_bounds[1L] >= slab_bounds[2L]) {
+      stop(sprintf("Axis '%s': `slab_bounds` must be finite `c(lower, upper)` ",
+                   name), "with lower < upper.", call. = FALSE)
+    }
+  }
   out <- list(
-    name      = name,
-    grid      = grid,
+    name        = name,
+    grid        = grid,
+    atom_mass   = atom_mass,
+    slab_bounds = slab_bounds,
     log_prior = log_prior,
+    log_prior_coord = log_prior_coord,
     log_scale = log_scale,
     bounds    = bounds,
-    refinable = isTRUE(refinable)
+    refinable = isTRUE(refinable),
+    extend    = isTRUE(as.logical(extend))
   )
   class(out) <- c("tulpa_hyper_axis_spec", "list")
   out

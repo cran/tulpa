@@ -122,8 +122,10 @@
 #' w <- numeric(Tt); w[1:2] <- rnorm(2)
 #' for (t in 3:Tt) w[t] <- 0.5 * w[t-1] + 0.3 * w[t-2] + rnorm(1, 0, 0.4)
 #' d <- data.frame(t = seq_len(Tt), y = w + rnorm(Tt, 0, 0.3))
+#' # `phi` is the gaussian residual VARIANCE, here the 0.3 the series was
+#' # simulated with. Left unsupplied the fit conditions on 1 and says so.
 #' fit <- tulpa(y ~ latent(temporal_ar2(d$t)), data = d, family = "gaussian",
-#'              mode = "nested_laplace")
+#'              phi = 0.3^2, mode = "nested_laplace")
 #' }
 #' @export
 temporal_ar2 <- function(time_idx, n_times = NULL,
@@ -210,11 +212,17 @@ temporal_ar <- function(time_idx, p = 2L, n_times = NULL,
   init <- c(0, atanh(psi_init))
   names(init) <- c("log_tau", paste0("atanh_psi", seq_len(p)))
 
-  tgmrf(
+  blk <- tgmrf(
     Q       = Q_fun,
     prior   = prior_fun,
     init    = init,
     obs_idx = time_idx,
     name    = name %||% paste0("ar", p)
   )
+  # Tagged so temporal() (R/temporal_rtr_posteriors.R) can find this block among
+  # `object$blocks` and read it as a temporal field -- an AR(p) block built here
+  # is always temporal (one time index, no spatial graph), unlike a bare tgmrf().
+  class(blk) <- c("tulpa_temporal_latent_block", class(blk))
+  blk$n_times <- n_times
+  blk
 }

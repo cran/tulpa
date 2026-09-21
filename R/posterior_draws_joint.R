@@ -41,8 +41,9 @@
 #' @return A numeric matrix `[n x length(idx)]` of latent draws, one row per
 #'   draw, columns named `x<idx>`. Carries `attr(., "draws_kind") = "iid"`
 #'   (consistent with the draws-provenance gate), `attr(., "cells")` -- the
-#'   outer-grid cell index each row was drawn from -- and
-#'   `attr(., "scope") = "latent"`.
+#'   outer-grid cell index each row was drawn from -- `attr(., "theta")`, the
+#'   hyperparameter half of the same rows continuized within each row's own cell
+#'   ([tulpa_hyper_draws()]) -- and `attr(., "scope") = "latent"`.
 #'
 #' @details
 #' The constrained draw at cell `k` uses the sparse Cholesky of the stored
@@ -150,7 +151,7 @@ tulpa_posterior_draws.tulpa_nested_laplace_joint <- function(fit, idx = NULL,
     colnames(out) <- paste0("x", idx)
     attr(out, "draws_kind") <- "iid"
     attr(out, "scope") <- "latent"
-    out
+    .nl_attach_hyper_draws(out, fit)
 }
 
 # Field sum-to-zero constraint columns for a joint latent layout. Returns a
@@ -172,6 +173,7 @@ tulpa_posterior_draws.tulpa_nested_laplace_joint <- function(fit, idx = NULL,
     if (!is.null(fs) && !is.null(layout$block_start) &&
         !is.null(layout$block_size)) {
         types  <- layout$field_block_types %||% rep("icar", length(fs))
+        nflds  <- layout$field_n_fields %||% rep(1L, length(fs))
         bstart <- layout$block_start
         bsize  <- layout$block_size
         for (i in seq_along(fs)) {
@@ -188,6 +190,18 @@ tulpa_posterior_draws.tulpa_nested_laplace_joint <- function(fit, idx = NULL,
                 # freedom and under-disperses the field draws.
                 nu <- as.integer(sz / 2L)
                 cols[[length(cols) + 1L]] <- s0 + seq_len(nu)
+            } else if (type == "mcar") {
+                # A separable MCAR block stores p coupled fields field-major
+                # (field a at offset a * n_units); each field has its own
+                # near-null constant direction, so each gets its own
+                # sum-to-zero group rather than one group over the whole
+                # p * n_units block (gcol33/tulpa#797).
+                p_fields <- as.integer(nflds[i])
+                n_units  <- as.integer(sz) %/% p_fields
+                for (a in seq_len(p_fields)) {
+                    off <- s0 + (a - 1L) * n_units
+                    cols[[length(cols) + 1L]] <- off + seq_len(n_units)
+                }
             } else {
                 cols[[length(cols) + 1L]] <- s0 + seq_len(as.integer(sz))
             }

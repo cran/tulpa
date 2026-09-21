@@ -4,7 +4,10 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <cstdint>
+#include <limits>
 #include <random>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -51,6 +54,75 @@ std::unique_ptr<::tulpa_progress::GridProgress> make_nuts_progress(int total, in
   gp->set_width(width > 0 ? width : 1);
   return gp;
 }
+
+// =====================================================================
+// What makes two fits different, folded into a chain fingerprint.
+//
+// The response lives behind ModelData::model_response_data, an opaque pointer
+// owned by the model package, so no field-by-field fold of ModelData reaches
+// it -- and a fingerprint over the DIMENSIONS alone accepts a resume onto a
+// different data set of the same shape and returns the earlier fit's draws
+// under the new data's name (gcol33/tulpa#683). What IS reachable is the
+// quantity the chains sample: the log posterior. Evaluated at engine-fixed
+// probe positions it reads the response through the likelihood the fit will
+// use, the designs and offsets through eta, and every prior hyperparameter
+// ModelData carries -- so the fold covers the TARGET rather than a list of
+// fields that has to be remembered and extended.
+//
+// The probes are chain 0's init plus perturbations of it drawn from the
+// engine's own splitmix64, never R's stream, so requesting a checkpoint moves
+// no draw. The perturbed ones are what make the DESIGN visible: at beta = 0 the
+// design drops out of eta, so a changed X does not move the value at the init
+// alone.
+//
+// Returns false when the model carries no generic LikelihoodSpec (a FullGradFn
+// ModelData, whose target is a consumer closure): nothing about it is reachable
+// from here, and the caller says so rather than writing a fingerprint that
+// looks like it covers the data.
+// =====================================================================
+namespace {
+
+constexpr int    kChainCkptProbes    = 3;
+constexpr double kChainCkptProbeStep = 0.37;
+
+bool fold_target_identity(tulpa::Fingerprint& fp,
+                          const std::vector<double>& q0,
+                          const ModelData& data,
+                          const ParamLayout& layout) {
+  if (data.n_processes == 0 || data.likelihood_spec == nullptr) return false;
+
+  std::vector<double> q = q0;
+  std::uint64_t s = 0x9E3779B97F4A7C15ULL;
+  bool any_finite = false;
+
+  for (int b = 0; b < kChainCkptProbes; b++) {
+    if (b > 0) {
+      for (std::size_t i = 0; i < q.size(); i++) {
+        s += 0x9E3779B97F4A7C15ULL;
+        std::uint64_t z = s;
+        z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+        z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+        z = z ^ (z >> 31);
+        const double u = static_cast<double>(z >> 11) * (1.0 / 9007199254740992.0);
+        q[i] = q0[i] + kChainCkptProbeStep * (2.0 * u - 1.0);
+      }
+    }
+    double lp = std::numeric_limits<double>::quiet_NaN();
+    try {
+      lp = compute_log_post(q, data, layout);
+    } catch (const std::exception&) {
+      // A probe the target rejects still separates two models: the position is
+      // fixed, so "rejected here" is itself a property of the fit.
+      lp = std::numeric_limits<double>::quiet_NaN();
+    }
+    const bool finite = std::isfinite(lp);
+    fp.fold_pod(finite);
+    if (finite) { fp.fold_pod(lp); any_finite = true; }
+  }
+  return any_finite;
+}
+
+}  // namespace
 
 // =====================================================================
 // Pure-C++ across-chain core (OpenMP). Per-chain initial position and
@@ -159,25 +231,21 @@ std::vector<HMCResultCpp> run_hmc_parallel_chains_cpp(
   // return so it does not leak into the next fit.
   GradientModeFitScope grad_mode_scope;
 
-  // Runtime gradient check on chain 0's init: compare the active gradient
-  // against numerical BEFORE spawning parallel chains. Single-threaded here,
-  // so the R API and g_gradient_mode mutation are safe; the decision then
-  // applies to every chain.
-  if (g_gradient_mode != GradientMode::NUMERICAL) {
-    bool grad_ok = verify_gradient_runtime(q_init_per_chain[0], data, layout, 1e-4);
-    if (!grad_ok) {
-      g_gradient_mode = GradientMode::NUMERICAL;
-      REprintf("[tulpa] Falling back to numerical gradients for all chains.\n");
-    }
-  }
+  // Runtime gradient check on chain 0's init, BEFORE spawning parallel chains:
+  // single-threaded here, so the R API and the mode mutation are safe, and the
+  // decision then applies to every chain. The per-chain gate inside
+  // run_hmc_chain_cpp sees the flag this sets and re-checks nothing.
+  ensure_gradient_verified(q_init_per_chain[0], data, layout);
 
   std::vector<HMCResultCpp> cpp_results(n_chains);
 
   // Per-chain checkpoint/resume. A chain is the checkpoint
   // unit: deterministic in (seed, chain_id, data, settings), so a resumed chain
   // is bit-for-bit identical to the uninterrupted one. The fingerprint folds the
-  // sampler settings, the seed, the per-chain init + metric, and the latent /
-  // data dimensions, so a resume onto a file from a different fit errors. Done
+  // sampler settings, the seed, the per-chain init + metric, the latent / data
+  // dimensions, and -- through fold_target_identity above -- the target itself,
+  // so a resume onto a file from a different fit errors whether the difference
+  // is in the settings, the shape or the data. Done
   // chains are loaded SERIALLY here (has()/get() are unsynchronized reads); the
   // parallel loop then skips them and only the missing chains run + save()
   // (save() is mutex-guarded).
@@ -200,6 +268,13 @@ std::vector<HMCResultCpp> run_hmc_parallel_chains_cpp(
     fp.fold_pod(data.N);
     for (const auto& q : q_init_per_chain)   fp.fold_vec(q);
     for (const auto& m : inv_metric_per_chain) fp.fold_vec(m);
+    if (!fold_target_identity(fp, q_init_per_chain[0], data, layout)) {
+      REprintf("[tulpa] WARNING: this model's target is not reachable from the "
+               "engine (no generic LikelihoodSpec), so its checkpoint "
+               "fingerprint covers the sampler settings and dimensions only.\n"
+               "  A resume against different data of the same shape cannot be "
+               "detected here; use one checkpoint file per data set.\n");
+    }
     ckpt.reset(new tulpa::ChainCheckpoint(
         checkpoint_path, fp.value(), tulpa::chain_checkpoint_keys(n_chains)));
     for (int c = 0; c < n_chains; c++) {
@@ -215,8 +290,8 @@ std::vector<HMCResultCpp> run_hmc_parallel_chains_cpp(
   std::unique_ptr<::tulpa_progress::GridProgress> shared_progress;
   if (!g_active_grid_progress) {
     shared_progress = make_nuts_progress(n_iter * n_chains, n_chains);
-    if (shared_progress) g_active_grid_progress = shared_progress.get();
   }
+  ActiveGridProgressScope progress_scope(shared_progress.get());
 
   // Thread-safe autodiff: each chain creates its own tape via TapeScope (RAII),
   // so all gradient modes (N, A, A_t, H) run in parallel.
@@ -254,10 +329,7 @@ std::vector<HMCResultCpp> run_hmc_parallel_chains_cpp(
       }
     }
     if (chain_failed.load()) {
-      if (shared_progress) {
-        g_active_grid_progress->finish();
-        g_active_grid_progress = nullptr;
-      }
+      if (shared_progress) shared_progress->finish();
       Rcpp::stop("NUTS chain failed: %s",
                  chain_err.empty() ? "unknown error" : chain_err.c_str());
     }
@@ -287,10 +359,7 @@ std::vector<HMCResultCpp> run_hmc_parallel_chains_cpp(
   }
 #endif
 
-  if (shared_progress) {
-    g_active_grid_progress->finish();
-    g_active_grid_progress = nullptr;
-  }
+  if (shared_progress) shared_progress->finish();
 
   if (verbose && n_chains > 1) {
     // Per-chain verbose is off for a multi-chain run; report per-chain now.

@@ -432,7 +432,7 @@ quantity and stores it on the fit. <code>logLik()</code> returns it.</p>
 <span id="cb2-4"><a href="#cb2-4" tabindex="-1"></a>df <span class="ot">&lt;-</span> <span class="fu">data.frame</span>(<span class="at">y =</span> y0, <span class="at">x =</span> x)</span>
 <span id="cb2-5"><a href="#cb2-5" tabindex="-1"></a></span>
 <span id="cb2-6"><a href="#cb2-6" tabindex="-1"></a>fit <span class="ot">&lt;-</span> <span class="fu">tulpa</span>(y <span class="sc">~</span> x, <span class="at">data =</span> df, <span class="at">family =</span> <span class="st">&quot;gaussian&quot;</span>,</span>
-<span id="cb2-7"><a href="#cb2-7" tabindex="-1"></a>             <span class="at">mode =</span> <span class="st">&quot;laplace&quot;</span>, <span class="at">phi =</span> <span class="fl">0.8</span>)</span>
+<span id="cb2-7"><a href="#cb2-7" tabindex="-1"></a>             <span class="at">mode =</span> <span class="st">&quot;laplace&quot;</span>, <span class="at">phi =</span> <span class="fl">0.8</span><span class="sc">^</span><span class="dv">2</span>)</span>
 <span id="cb2-8"><a href="#cb2-8" tabindex="-1"></a><span class="fu">logLik</span>(fit)</span></code></pre></div>
 <p>The <code>logLik</code> object carries two attributes worth knowing.
 <code>df</code> is the number of fixed effects the fit estimated, and
@@ -476,13 +476,13 @@ intercept on <code>g</code>, conditioning on the random-effect standard
 deviation. The fourth adds the second covariate <code>z</code>. Each fit
 is a single Laplace solve.</p>
 <div class="sourceCode" id="cb5"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb5-1"><a href="#cb5-1" tabindex="-1"></a>m0 <span class="ot">&lt;-</span> <span class="fu">tulpa</span>(y <span class="sc">~</span> <span class="dv">1</span>, <span class="at">data =</span> dat, <span class="at">family =</span> <span class="st">&quot;gaussian&quot;</span>,</span>
-<span id="cb5-2"><a href="#cb5-2" tabindex="-1"></a>            <span class="at">mode =</span> <span class="st">&quot;laplace&quot;</span>, <span class="at">phi =</span> <span class="fl">0.8</span>)</span>
+<span id="cb5-2"><a href="#cb5-2" tabindex="-1"></a>            <span class="at">mode =</span> <span class="st">&quot;laplace&quot;</span>, <span class="at">phi =</span> <span class="fl">0.8</span><span class="sc">^</span><span class="dv">2</span>)</span>
 <span id="cb5-3"><a href="#cb5-3" tabindex="-1"></a>m1 <span class="ot">&lt;-</span> <span class="fu">tulpa</span>(y <span class="sc">~</span> x, <span class="at">data =</span> dat, <span class="at">family =</span> <span class="st">&quot;gaussian&quot;</span>,</span>
-<span id="cb5-4"><a href="#cb5-4" tabindex="-1"></a>            <span class="at">mode =</span> <span class="st">&quot;laplace&quot;</span>, <span class="at">phi =</span> <span class="fl">0.8</span>)</span>
+<span id="cb5-4"><a href="#cb5-4" tabindex="-1"></a>            <span class="at">mode =</span> <span class="st">&quot;laplace&quot;</span>, <span class="at">phi =</span> <span class="fl">0.8</span><span class="sc">^</span><span class="dv">2</span>)</span>
 <span id="cb5-5"><a href="#cb5-5" tabindex="-1"></a>m2 <span class="ot">&lt;-</span> <span class="fu">tulpa</span>(y <span class="sc">~</span> x <span class="sc">+</span> (<span class="dv">1</span> <span class="sc">|</span> g), <span class="at">data =</span> dat, <span class="at">family =</span> <span class="st">&quot;gaussian&quot;</span>,</span>
-<span id="cb5-6"><a href="#cb5-6" tabindex="-1"></a>            <span class="at">mode =</span> <span class="st">&quot;laplace&quot;</span>, <span class="at">sigma_re =</span> <span class="fl">0.7</span>, <span class="at">phi =</span> <span class="fl">0.8</span>)</span>
+<span id="cb5-6"><a href="#cb5-6" tabindex="-1"></a>            <span class="at">mode =</span> <span class="st">&quot;laplace&quot;</span>, <span class="at">sigma_re =</span> <span class="fl">0.7</span>, <span class="at">phi =</span> <span class="fl">0.8</span><span class="sc">^</span><span class="dv">2</span>)</span>
 <span id="cb5-7"><a href="#cb5-7" tabindex="-1"></a>m3 <span class="ot">&lt;-</span> <span class="fu">tulpa</span>(y <span class="sc">~</span> x <span class="sc">+</span> z <span class="sc">+</span> (<span class="dv">1</span> <span class="sc">|</span> g), <span class="at">data =</span> dat, <span class="at">family =</span> <span class="st">&quot;gaussian&quot;</span>,</span>
-<span id="cb5-8"><a href="#cb5-8" tabindex="-1"></a>            <span class="at">mode =</span> <span class="st">&quot;laplace&quot;</span>, <span class="at">sigma_re =</span> <span class="fl">0.7</span>, <span class="at">phi =</span> <span class="fl">0.8</span>)</span></code></pre></div>
+<span id="cb5-8"><a href="#cb5-8" tabindex="-1"></a>            <span class="at">mode =</span> <span class="st">&quot;laplace&quot;</span>, <span class="at">sigma_re =</span> <span class="fl">0.7</span>, <span class="at">phi =</span> <span class="fl">0.8</span><span class="sc">^</span><span class="dv">2</span>)</span></code></pre></div>
 <p>Pull the evidence from each and lay it side by side. The differences
 between adjacent rungs are what to read: each is the evidence gained by
 adding one true piece.</p>
@@ -531,7 +531,7 @@ intercept; the extra term <code>w</code> is independent of
 <code>y</code> by construction.</p>
 <div class="sourceCode" id="cb8"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb8-1"><a href="#cb8-1" tabindex="-1"></a>dat<span class="sc">$</span>w <span class="ot">&lt;-</span> <span class="fu">rnorm</span>(n)</span>
 <span id="cb8-2"><a href="#cb8-2" tabindex="-1"></a>m4 <span class="ot">&lt;-</span> <span class="fu">tulpa</span>(y <span class="sc">~</span> x <span class="sc">+</span> z <span class="sc">+</span> w <span class="sc">+</span> (<span class="dv">1</span> <span class="sc">|</span> g), <span class="at">data =</span> dat, <span class="at">family =</span> <span class="st">&quot;gaussian&quot;</span>,</span>
-<span id="cb8-3"><a href="#cb8-3" tabindex="-1"></a>            <span class="at">mode =</span> <span class="st">&quot;laplace&quot;</span>, <span class="at">sigma_re =</span> <span class="fl">0.7</span>, <span class="at">phi =</span> <span class="fl">0.8</span>)</span>
+<span id="cb8-3"><a href="#cb8-3" tabindex="-1"></a>            <span class="at">mode =</span> <span class="st">&quot;laplace&quot;</span>, <span class="at">sigma_re =</span> <span class="fl">0.7</span>, <span class="at">phi =</span> <span class="fl">0.8</span><span class="sc">^</span><span class="dv">2</span>)</span>
 <span id="cb8-4"><a href="#cb8-4" tabindex="-1"></a><span class="fu">c</span>(<span class="at">full =</span> <span class="fu">round</span>(<span class="fu">as.numeric</span>(<span class="fu">logLik</span>(m3)), <span class="dv">2</span>),</span>
 <span id="cb8-5"><a href="#cb8-5" tabindex="-1"></a>  <span class="at">plus_noise =</span> <span class="fu">round</span>(<span class="fu">as.numeric</span>(<span class="fu">logLik</span>(m4)), <span class="dv">2</span>),</span>
 <span id="cb8-6"><a href="#cb8-6" tabindex="-1"></a>  <span class="at">gain =</span> <span class="fu">round</span>(<span class="fu">as.numeric</span>(<span class="fu">logLik</span>(m4)) <span class="sc">-</span> <span class="fu">as.numeric</span>(<span class="fu">logLik</span>(m3)), <span class="dv">2</span>))</span></code></pre></div>
@@ -598,9 +598,9 @@ criterion ranks them on the same scale; what you lose is the clean
 reading of one term’s contribution, since the difference now bundles
 together everything that changed between the two specifications.</p>
 <div class="sourceCode" id="cb11"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb11-1"><a href="#cb11-1" tabindex="-1"></a>mx <span class="ot">&lt;-</span> <span class="fu">tulpa</span>(y <span class="sc">~</span> x, <span class="at">data =</span> dat, <span class="at">family =</span> <span class="st">&quot;gaussian&quot;</span>,</span>
-<span id="cb11-2"><a href="#cb11-2" tabindex="-1"></a>            <span class="at">mode =</span> <span class="st">&quot;laplace&quot;</span>, <span class="at">phi =</span> <span class="fl">0.8</span>)</span>
+<span id="cb11-2"><a href="#cb11-2" tabindex="-1"></a>            <span class="at">mode =</span> <span class="st">&quot;laplace&quot;</span>, <span class="at">phi =</span> <span class="fl">0.8</span><span class="sc">^</span><span class="dv">2</span>)</span>
 <span id="cb11-3"><a href="#cb11-3" tabindex="-1"></a>mz <span class="ot">&lt;-</span> <span class="fu">tulpa</span>(y <span class="sc">~</span> z, <span class="at">data =</span> dat, <span class="at">family =</span> <span class="st">&quot;gaussian&quot;</span>,</span>
-<span id="cb11-4"><a href="#cb11-4" tabindex="-1"></a>            <span class="at">mode =</span> <span class="st">&quot;laplace&quot;</span>, <span class="at">phi =</span> <span class="fl">0.8</span>)</span>
+<span id="cb11-4"><a href="#cb11-4" tabindex="-1"></a>            <span class="at">mode =</span> <span class="st">&quot;laplace&quot;</span>, <span class="at">phi =</span> <span class="fl">0.8</span><span class="sc">^</span><span class="dv">2</span>)</span>
 <span id="cb11-5"><a href="#cb11-5" tabindex="-1"></a><span class="fu">compare_models</span>(<span class="at">x_only =</span> mx, <span class="at">z_only =</span> mz, <span class="at">criterion =</span> <span class="st">&quot;loglik&quot;</span>)</span></code></pre></div>
 <p>The <code>x</code>-only model wins, which fits the simulation:
 <code>x</code> carries the larger true coefficient, so it explains more
@@ -855,8 +855,8 @@ mean one thing. To compare across random-effect variances, integrate
 them through the nested-Laplace path instead of fixing them by
 hand.</li>
 <li><strong>Know what conditioning on a hyperparameter costs.</strong>
-When you pass <code>sigma_re = 0.7</code> or <code>phi = 0.8</code>, the
-marginal likelihood is the evidence given that value, not integrated
+When you pass <code>sigma_re = 0.7</code> or <code>phi = 0.8^2</code>,
+the marginal likelihood is the evidence given that value, not integrated
 over it. The Gaussian random-effect offsets and the fixed effects are
 integrated out; the variance and the residual scale are held. That is
 exactly the right object for a ladder where you want each rung to differ

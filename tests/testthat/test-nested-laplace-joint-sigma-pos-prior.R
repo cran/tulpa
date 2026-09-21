@@ -8,22 +8,45 @@
 # A regularizing hyperprior on alpha -- PC (`pc.prec`) or half-normal --
 # tightens the upper tail of the weakly-identified marginal without
 # biasing the modal cell when the data identifies it. This test fits the
-# D7 Cell B-like fixture 30 times with and without the prior and asserts:
+# D7 Cell B-like fixture 50 times with and without the prior and asserts:
 #
-#   (1) the flat-prior baseline carries the documented small-n_pos
-#       upward bias on alpha (sanity check that the fixture exercises
-#       the regime tulpa#22 targets),
-#   (2) the documented-default pc.prec(U=2.0, alpha=0.01) cuts the
-#       alpha geometric bias meaningfully (target on this fixture:
-#       <= 9%; calibrated for the (sigma, alpha) reparam, where U is the
-#       upper end of plausible alpha values rather than the truth itself
-#       -- the prior test sweep dated 2026-05-20 found U=1.0 overshrinks
-#       past truth and inflates the cross-axis sigma by ~+13%, so the
-#       recommended default on the alpha domain shifted to U=2.0),
-#   (3) a stronger half_normal(scale=0.5) gives at least 15% relative
-#       reduction vs flat,
+#   (1) with no prior_alpha the axis's own slab leaves the alpha median
+#       close to truth,
+#   (2) the documented-default pc.prec(U=4.0, alpha=0.01) keeps the
+#       alpha geometric bias small without over-shrinking past truth,
+#   (3) half_normal(scale=1.0) does the same,
 #   (4) the regularizer on alpha does not corrupt the well-identified
-#       donor-arm amplitude sigma (cross-axis coupling check).
+#       donor-arm amplitude sigma (cross-axis coupling check),
+#   (5) a prior whose rate is below the slab's shrinks less than the slab.
+#
+# What U means here is set by the measure the alpha axis carries with no
+# prior, and that is not flat: with no prior_alpha the copy scale takes the
+# engine's own exponential slab, rate read off the declared grid by putting
+# 5 % of the prior above its largest node. This fixture's grid reaches
+# alpha = 2.0, so the slab is lambda = 1.50 -- the strength of a PC prior at
+# U = 3.07. A prior_alpha REPLACES that slab, so it shrinks harder than the
+# default only once its own lambda = -log(a)/U beats 1.50, which is what the
+# crossing below measures. That is why the recommended U is not "the upper
+# end of plausible alpha" alone.
+# Swept on this fixture's own 50 seeds
+# (dev_notes/issue733/sweep_alpha_prior_measured.R), alpha geometric bias
+# against truth 1.0, with the coupled donor sigma against its truth of 0.6:
+#
+#   flat   -0.018 (sigma 0.651)   pc U=1   -0.209 (0.753)   hn 0.5 -0.172 (0.728)
+#   pc U=8 +0.088 (0.612)         pc U=2   -0.090 (0.685)   hn 1   +0.018 (0.637)
+#   pc U=4 +0.022 (0.637)         pc U=0.5 -0.351 (0.843)   hn 2   +0.118 (0.599)
+#
+# The median is read under the fit's cell measure (gcol33/tulpa#733), which is
+# where the slab density and the atom's declared mass live; read without it, the
+# same fits put the no-prior arm at +0.088, the reading the earlier table
+# (flat +0.056, U=4 +0.049) was taken under.
+#
+# Monotone in U, crossing truth near U ~ 3.6, and the over-shrinking arms
+# reproduce tulpa#22's cross-axis mechanism exactly: pulling alpha below 1
+# lifts the coupled sigma above 0.6, up to 0.94 at U=0.25. The defaults
+# moved from U=8 / scale=2 to U=4 / scale=1 when the joint driver's priors
+# stopped being integrated in the wrong coordinate (gcol33/tulpa#625); the
+# earlier numbers were calibrated against a realised prior of pi(a)/a.
 #
 # Skipped on CRAN: 30 joint BYM2 fits x 3 prior settings cost ~30-40s.
 
@@ -128,9 +151,9 @@ test_that("alpha hyperprior gently reduces small-n_pos bias without corrupting s
         sim <- .simulate_d7_pp(seeds[i])
         f_flat <- .fit_pp(sim, adj, prior_alpha = NULL)
         f_pc   <- .fit_pp(sim, adj,
-                          prior_alpha = list("pc.prec", c(8.0, 0.01)))
+                          prior_alpha = list("pc.prec", c(4.0, 0.01)))
         f_hn   <- .fit_pp(sim, adj,
-                          prior_alpha = list("half_normal", 2.0))
+                          prior_alpha = list("half_normal", 1.0))
         alpha_flat[i] <- f_flat$theta_median[["alpha"]]
         alpha_pc[i]   <- f_pc$theta_median[["alpha"]]
         alpha_hn[i]   <- f_hn$theta_median[["alpha"]]
@@ -147,30 +170,38 @@ test_that("alpha hyperprior gently reduces small-n_pos bias without corrupting s
     gb_hn   <- geom_bias(alpha_hn,   1.0)
 
     info_str <- sprintf(
-        "geom_bias alpha: flat=%.3f pc.prec(U=8)=%.3f half_normal(2)=%.3f | mean sigma: flat=%.3f pc=%.3f",
+        "geom_bias alpha: flat=%.3f pc.prec(U=4)=%.3f half_normal(1)=%.3f | mean sigma: flat=%.3f pc=%.3f",
         gb_flat, gb_pc, gb_hn, mean(sig_flat), mean(sig_pc)
     )
 
-    # (1) Sanity: the fixture exercises the small-n_pos regime, so the flat
-    #     baseline carries a small upward bias on alpha (measured ~0.09).
-    expect_gt(gb_flat, 0.02, label = info_str)
+    # (1) The axis's own exponential slab (lambda = 1.50) already holds the
+    #     median near truth on this fixture (measured -0.018).
+    expect_lt(abs(gb_flat), 0.05, label = info_str)
 
-    # (2) The recommended default pc.prec(U=8, alpha=0.01) shrinks the bias
-    #     toward zero (measured ~0.03) without over-shrinking past the truth.
+    # (2) The recommended default pc.prec(U=4, alpha=0.01) shrinks the bias
+    #     small (measured 0.022) without over-shrinking past the truth.
     #     A too-small U drives the alpha median below 1 and, through the
-    #     alpha * sigma copy axis, inflates the coupled donor sigma; U=8 keeps
+    #     alpha * sigma copy axis, inflates the coupled donor sigma; U=4 keeps
     #     alpha on the correct side of the truth.
     expect_lt(abs(gb_pc), 0.09, label = info_str)   # bias stays small
     expect_gt(gb_pc, -0.05, label = info_str)       # no over-shrink past truth
 
-    # (3) half_normal(scale = 2.0) is likewise gentle: it regularizes the tail
-    #     without over-shrinking (measured ~0.06 bias).
+    # (3) half_normal(scale = 1.0) is likewise gentle: it regularizes the tail
+    #     without over-shrinking (measured 0.018 bias).
     expect_lt(abs(gb_hn), 0.12, label = info_str)
     expect_gt(gb_hn, -0.05, label = info_str)
 
+    # (5) What U means is set by the slab a prior_alpha replaces: at U=4 the
+    #     PC rate is -log(0.01) / 4 = 1.15, below the slab's 1.50, so it
+    #     shrinks LESS than the no-prior axis (measured +0.022 against -0.018).
+    #     Both fits are deterministic on these seeds, so this is an exact
+    #     comparison. It fails if the slab stops being what a missing prior
+    #     means, or if a prior_alpha stops replacing it.
+    expect_gt(gb_pc, gb_flat, label = info_str)
+
     # (4) The alpha regularizer leaves the well-identified donor amplitude
-    #     sigma near its truth of 0.6 (measured ~0.64 under pc.prec(U=8)); the
-    #     flat baseline recovers sigma to ~0.62.
+    #     sigma near its truth of 0.6 (measured 0.637 under pc.prec(U=4)); the
+    #     no-prior baseline recovers sigma to 0.651.
     expect_lt(abs(mean(sig_pc) - 0.6),   0.12, label = info_str)
     expect_lt(abs(mean(sig_flat) - 0.6), 0.10, label = info_str)
 })

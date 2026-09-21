@@ -68,25 +68,6 @@ SigmaReState update_sigma_re_negbin_hc(
 }
 
 
-// Center random effects (soft sum-to-zero constraint)
-// This prevents RE from absorbing intercept and inflating sigma_re
-void center_random_effects(NumericVector& re, NumericVector& beta) {
-  int J = re.size();
-  double re_mean = 0.0;
-  for (int j = 0; j < J; j++) {
-    re_mean += re[j];
-  }
-  re_mean /= J;
-
-  // Absorb RE mean into intercept
-  beta[0] += re_mean;
-
-  // Center RE
-  for (int j = 0; j < J; j++) {
-    re[j] -= re_mean;
-  }
-}
-
 // The PG-NB augmentation samples beta / eta on the Zhou (2012) log-odds scale,
 // where the mean is mu = r * exp(eta). tulpa's neg_binomial_2 family is the NB2
 // mean scale mu = exp(eta_nb2) (R/family_loglik.R, .mean_log), shared by the
@@ -102,6 +83,33 @@ static inline void store_beta_nb2(Rcpp::NumericMatrix& beta_draws, int row,
   const int p = beta.size();
   beta_draws(row, 0) = beta[0] + std::log(r);   // intercept on the NB2 mean scale
   for (int j = 1; j < p; j++) beta_draws(row, j) = beta[j];
+}
+
+// The dispersion's support: both r updates reject a proposal outside it, so the
+// Gamma(shape, rate) prior on r is truncated to [PG_NB_R_LOWER, PG_NB_R_UPPER].
+constexpr double PG_NB_R_LOWER = 0.1;
+constexpr double PG_NB_R_UPPER = 500.0;
+
+// log p(r) under that truncated Gamma, normalized on the support.
+static double negbin_log_prior_r(double r, double shape, double rate) {
+  if (r < PG_NB_R_LOWER || r > PG_NB_R_UPPER) return R_NegInf;
+  const double scale = 1.0 / rate;
+  const double mass = R::pgamma(PG_NB_R_UPPER, shape, scale, 1, 0) -
+                      R::pgamma(PG_NB_R_LOWER, shape, scale, 1, 0);
+  return pg_log_gamma(r, shape, rate) - std::log(mass);
+}
+
+// The NB log-likelihood through the shared GLMM family density. The kernel's
+// eta is on the Zhou log-odds scale, mu = r exp(eta), so the NB2 log-mean the
+// family density reads is eta + log(r).
+static double negbin_log_lik_family(const IntegerVector& y,
+                                    const NumericVector& eta, double r) {
+  const double log_r = std::log(r);
+  double ll = 0.0;
+  for (int i = 0; i < y.size(); i++) {
+    ll += glmm_elt(GLMMFamily::NegBin, eta[i] + log_r, y[i], 0.0, r).l;
+  }
+  return ll;
 }
 
 // Log-likelihood of the NB given eta (linear predictor) and r.
@@ -180,7 +188,7 @@ JointRBeta0Result update_r_beta0_joint(
   // beta_0 carries no bound: the Gibbs step that draws it does not either, so
   // a box here would leave this move rejecting from a state it calls
   // off-support.
-  if (r_prop < 0.1 || r_prop > 500.0) {
+  if (r_prop < PG_NB_R_LOWER || r_prop > PG_NB_R_UPPER) {
     return result;
   }
 
@@ -238,7 +246,7 @@ double update_r_negbin(
   double log_r_prop = R::rnorm(log_r_current, proposal_sd);
   double r_prop = std::exp(log_r_prop);
 
-  if (r_prop < 0.1 || r_prop > 500.0) {
+  if (r_prop < PG_NB_R_LOWER || r_prop > PG_NB_R_UPPER) {
     return r_current;
   }
 
@@ -322,7 +330,7 @@ List pg_negbin_gibbs(
   }
   if (n_groups < 0) Rcpp::stop("`n_groups` must be >= 0; got %d.", n_groups);
   if (n_groups > 0) pg_check_index(group, N, n_groups, "group");
-  // The random-effect centring, the moment initializer and the compensating
+  // The random-effect level move, the moment initializer and the compensating
   // (r, beta_0) move all write beta[0] as the intercept.
   pg_require_intercept(X, "negative-binomial");
   const int n_save = tulpa::pg_n_save(n_iter, n_warmup, thin);
@@ -333,6 +341,7 @@ List pg_negbin_gibbs(
   NumericMatrix re_draws(n_save, n_groups);
   NumericVector sigma_draws(n_save);
   NumericVector r_draws(n_save);
+  NumericVector log_prob_draws(n_save);
   NumericMatrix eta_draws;
   if (store_eta) {
     eta_draws = NumericMatrix(n_save, N);
@@ -444,9 +453,16 @@ List pg_negbin_gibbs(
         re = re_new;
       }
 
-      // Center random effects to prevent absorbing intercept
-      // This is critical for correct sigma_re estimation
-      center_random_effects(re, beta);
+      // The block's level shared with the intercept, drawn from its
+      // conditional (the iid prior is proper, so it is not removed).
+      {
+        double prec_field = 0.0, lin_field = 0.0;
+        pg_iid_level_terms(re.begin(), n_groups, sigma_re, prec_field, lin_field);
+        const double c = pg_draw_intercept_level(beta[0], prior_beta_sd,
+                                                 prec_field, lin_field);
+        beta[0] += c;
+        for (int g = 0; g < n_groups; g++) re[g] -= c;
+      }
 
       // Recompute X_beta since beta[0] may have changed
       tulpa_parallel_for(team, N, [&](int i) {
@@ -505,6 +521,14 @@ List pg_negbin_gibbs(
       }
       sigma_draws[save_idx] = sigma_re;
       r_draws[save_idx] = r;
+      log_prob_draws[save_idx] =
+          negbin_log_lik_family(y, eta, r) +
+          pg_log_normal_iid(beta.begin(), p, prior_beta_sd) +
+          negbin_log_prior_r(r, prior_r_shape, prior_r_rate) +
+          (n_groups > 0
+               ? pg_log_normal_iid(re.begin(), n_groups, sigma_re) +
+                 pg_log_halfcauchy(sigma_re, prior_sigma_scale)
+               : 0.0);
 
       if (store_eta) {
         const double log_r = std::log(r);
@@ -527,13 +551,15 @@ List pg_negbin_gibbs(
     }
   }
 
-  return List::create(
+  List out = List::create(
     Named("beta") = beta_draws,
     Named("re") = re_draws,
     Named("sigma_re") = sigma_draws,
     Named("r") = r_draws,
     Named("eta") = eta_draws
   );
+  out["log_prob"] = log_prob_draws;
+  return out;
 }
 
 // ---------------------------------------------------------------------
@@ -596,6 +622,7 @@ List pg_negbin_gibbs_spatial(
   NumericVector sigma_re_draws(n_save);
   NumericVector tau_draws(n_save);
   NumericVector r_draws(n_save);
+  NumericVector log_prob_draws(n_save);
   NumericMatrix eta_draws;
   if (store_eta) {
     eta_draws = NumericMatrix(n_save, N);
@@ -710,7 +737,10 @@ List pg_negbin_gibbs_spatial(
                         omega.begin(), kappa.begin(), offset_spatial.begin(),
                         sum_omega_s.begin(), sum_resid_s.begin());
 
-    // Sample spatial effects with ICAR prior
+    // Sample spatial effects with ICAR prior. The field's level is the
+    // intercept's, so each site carries that prior through the field mean.
+    PgInterceptLevel level(beta[0], 0.0, prior_beta_sd, 1.0, spatial.begin(),
+                           n_spatial_units);
     for (int s = 0; s < n_spatial_units; s++) {
       // ICAR: phi_s | phi_{-s} ~ N(mean of neighbors, 1/(tau * n_neighbors))
       const int e0 = adj.row_ptr[s];
@@ -728,16 +758,18 @@ List pg_negbin_gibbs_spatial(
       // Combine ICAR prior with data likelihood
       double prior_prec_s = tau * n_neigh;
       double post_prec = sum_omega_s[s] + prior_prec_s;
-      double post_mean = (sum_resid_s[s] + prior_prec_s * neighbor_mean) / post_prec;
-      double post_sd = 1.0 / std::sqrt(post_prec);
+      double post_mean_num = sum_resid_s[s] + prior_prec_s * neighbor_mean;
+      level.add(spatial[s], post_prec, post_mean_num);
 
-      spatial[s] = R::rnorm(post_mean, post_sd);
+      const double x_new =
+          R::rnorm(post_mean_num / post_prec, 1.0 / std::sqrt(post_prec));
+      level.moved(spatial[s], x_new);
+      spatial[s] = x_new;
     }
 
-    // Center spatial effects (sum-to-zero constraint along the ICAR's
-    // improper direction), absorbing the mean into the intercept so eta is
-    // unchanged and the move is exactly posterior-invariant — the same
-    // convention center_random_effects uses for the iid RE block.
+    // Center spatial effects along the ICAR's improper direction, absorbing
+    // the mean into the intercept so eta is unchanged. The iid block beside it
+    // is proper and is not centred.
     double spatial_mean = 0.0;
     for (int s = 0; s < n_spatial_units; s++) {
       spatial_mean += spatial[s];
@@ -797,6 +829,16 @@ List pg_negbin_gibbs_spatial(
       sigma_re_draws[save_idx] = sigma_re;
       tau_draws[save_idx] = tau;
       r_draws[save_idx] = r;
+      log_prob_draws[save_idx] =
+          negbin_log_lik_family(y, eta, r) +
+          pg_log_normal_iid(beta.begin(), p, prior_beta_sd) +
+          (n_re_groups > 0
+               ? pg_log_normal_iid(re.begin(), n_re_groups, sigma_re) +
+                 pg_log_halfcauchy(sigma_re, prior_sigma_re_scale)
+               : 0.0) +
+          pg_log_icar(spatial.begin(), adj, tau, 0.0) +
+          pg_log_gamma(tau, prior_tau_shape, prior_tau_rate) +
+          negbin_log_prior_r(r, prior_r_shape, prior_r_rate);
 
       if (store_eta) {
         const double log_r = std::log(r);
@@ -825,7 +867,8 @@ List pg_negbin_gibbs_spatial(
     Named("sigma_re") = sigma_re_draws,
     Named("tau") = tau_draws,
     Named("r") = r_draws,
-    Named("eta") = eta_draws
+    Named("eta") = eta_draws,
+    Named("log_prob") = log_prob_draws
   );
 }
 

@@ -486,7 +486,7 @@ sampler would be slow.</p>
 <span id="cb5-2"><a href="#cb5-2" tabindex="-1"></a>xL <span class="ot">&lt;-</span> <span class="fu">rnorm</span>(nL)</span>
 <span id="cb5-3"><a href="#cb5-3" tabindex="-1"></a>dL <span class="ot">&lt;-</span> <span class="fu">data.frame</span>(<span class="at">y =</span> <span class="fl">0.5</span> <span class="sc">+</span> <span class="fl">1.2</span> <span class="sc">*</span> xL <span class="sc">+</span> <span class="fu">rnorm</span>(nL, <span class="at">sd =</span> <span class="fl">0.8</span>), <span class="at">x =</span> xL)</span>
 <span id="cb5-4"><a href="#cb5-4" tabindex="-1"></a>fit_big <span class="ot">&lt;-</span> <span class="fu">tulpa</span>(y <span class="sc">~</span> x, <span class="at">data =</span> dL, <span class="at">family =</span> <span class="st">&quot;gaussian&quot;</span>, <span class="at">mode =</span> <span class="st">&quot;auto&quot;</span>,</span>
-<span id="cb5-5"><a href="#cb5-5" tabindex="-1"></a>                 <span class="at">phi =</span> <span class="fl">0.8</span>)</span>
+<span id="cb5-5"><a href="#cb5-5" tabindex="-1"></a>                 <span class="at">phi =</span> <span class="fl">0.8</span><span class="sc">^</span><span class="dv">2</span>)</span>
 <span id="cb5-6"><a href="#cb5-6" tabindex="-1"></a><span class="fu">c</span>(<span class="at">backend =</span> fit_big<span class="sc">$</span>backend, <span class="at">tier =</span> fit_big<span class="sc">$</span>inference_tier)</span>
 <span id="cb5-7"><a href="#cb5-7" tabindex="-1"></a>fit_big<span class="sc">$</span>selection_reason</span></code></pre></div>
 <p>Here auto stepped down to the Laplace path. The reason names the
@@ -606,9 +606,12 @@ negative binomial responses, including the binomial areal spatial models
 that <code>mode = &quot;auto&quot;</code> selects it for. It samples the
 random-effect standard deviation rather than conditioning on a fixed
 <code>sigma_re</code>, which is why the spatial fit earlier reported a
-Gibbs backend. Its output carries the fixed effects in
-<code>$beta</code> and the field and variance components alongside.</p>
-<div class="sourceCode" id="cb11"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb11-1"><a href="#cb11-1" tabindex="-1"></a><span class="fu">round</span>(fit_auto<span class="sc">$</span>beta, <span class="dv">3</span>)</span></code></pre></div>
+Gibbs backend. It returns posterior draws, so the fixed effects come
+through <code>coef()</code> and the field and its precision are columns
+of the same draws matrix, named in <code>param_names</code>.</p>
+<div class="sourceCode" id="cb11"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb11-1"><a href="#cb11-1" tabindex="-1"></a><span class="fu">round</span>(<span class="fu">coef</span>(fit_auto), <span class="dv">3</span>)</span>
+<span id="cb11-2"><a href="#cb11-2" tabindex="-1"></a><span class="fu">tail</span>(fit_auto<span class="sc">$</span>param_names, <span class="dv">3</span>)</span>
+<span id="cb11-3"><a href="#cb11-3" tabindex="-1"></a><span class="fu">round</span>(fit_auto<span class="sc">$</span>means[<span class="fu">c</span>(<span class="st">&quot;log_tau_spatial&quot;</span>, <span class="st">&quot;phi_spatial[1]&quot;</span>)], <span class="dv">3</span>)</span></code></pre></div>
 <p>Gibbs is the right call when the family is conjugate-friendly under
 the Polya-Gamma scheme and you want an exact fit that samples the
 variance rather than fixing it. For a binomial areal field, auto takes
@@ -729,15 +732,15 @@ one. The samplers would track the true posterior spread through that
 drift, while the Gaussian approximation would keep reporting the
 symmetric interval its assumption forces on it. That is the moment the
 price of the sampler turns into a reason to pay it.</p>
-<p>The marginal likelihood ties the comparison back to model choice.
-<code>compare_models()</code> reads <code>logLik()</code> from each fit,
-which on the Laplace tier is the approximate log marginal
-likelihood.</p>
-<div class="sourceCode" id="cb18"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb18-1"><a href="#cb18-1" tabindex="-1"></a><span class="fu">compare_models</span>(<span class="at">laplace =</span> f_lap, <span class="at">pathfinder =</span> f_pf, <span class="at">criterion =</span> <span class="st">&quot;loglik&quot;</span>)</span></code></pre></div>
+<p>Laplace and Pathfinder do not report the same quantity under
+<code>logLik()</code>: the Laplace tier gives a log marginal likelihood
+and Pathfinder a mean log posterior. Their values are therefore not a
+model comparison, and <code>compare_models()</code> refuses to rank
+quantities on different scales.</p>
 <p>The <code>glance()</code> accessor surfaces the per-fit diagnostics
 that matter for the sampler tiers: the number of post-warmup draws, the
 acceptance rate, and the divergence count.</p>
-<div class="sourceCode" id="cb19"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb19-1"><a href="#cb19-1" tabindex="-1"></a><span class="fu">glance</span>(f_mala)[<span class="fu">c</span>(<span class="st">&quot;n_samples&quot;</span>, <span class="st">&quot;mean_accept&quot;</span>, <span class="st">&quot;n_divergent&quot;</span>)]</span></code></pre></div>
+<div class="sourceCode" id="cb18"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb18-1"><a href="#cb18-1" tabindex="-1"></a><span class="fu">glance</span>(f_mala)[<span class="fu">c</span>(<span class="st">&quot;n_samples&quot;</span>, <span class="st">&quot;mean_accept&quot;</span>, <span class="st">&quot;n_divergent&quot;</span>)]</span></code></pre></div>
 <p>An acceptance rate inside the healthy band and no divergences say the
 MALA chain mixed well, which is the prerequisite for trusting its
 intervals. Without that check, a Tier 1 fit is only nominally exact: a
@@ -801,15 +804,16 @@ purpose.</p>
 <div id="see-also" class="section level2">
 <h2>See also</h2>
 <ul>
-<li><code>inference_mode_info()</code> prints the full tier and backend
-map, with the R-callable and C-ABI-only backends tagged.</li>
-<li>The quickstart vignette covers the fitting workflow.</li>
-<li>The <code>tgmrf()</code> vignette runs the same tier ladder on a
+<li><p><code>inference_mode_info()</code> prints the full tier and
+backend map, with the R-callable and C-ABI-only backends
+tagged.</p></li>
+<li><p>The quickstart vignette covers the fitting workflow.</p></li>
+<li><p>The <code>tgmrf()</code> vignette runs the same tier ladder on a
 user-defined latent block, from nested Laplace through exact
-sampling.</li>
-<li><code>?mala</code>, <code>?pathfinder</code>,
+sampling.</p></li>
+<li><p><code>?mala</code>, <code>?pathfinder</code>,
 <code>?imh_laplace</code> for the low-level sampler interfaces that
-drive a <code>log_posterior</code> closure directly.</li>
+drive a <code>log_posterior</code> closure directly.</p></li>
 </ul>
 </div>
 

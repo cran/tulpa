@@ -778,6 +778,18 @@ recov_posterior_sbc <- function(model, n_seed, quantities = NULL,
   out
 }
 
+# What the proper-prior guard actually established.
+#
+# "verified over 0 probed simulations" asserts the opposite of what happened:
+# .sbc_check_proper_prior() returns early with n_probe = 0 when every scored
+# quantity is of the "rank" kind, having probed no truth at all, and "verified"
+# is the word that survives into a summary or a write-up (gcol33/tulpa#716).
+#' @keywords internal
+.sbc_premise_proper_prior <- function(guard) {
+  if (isTRUE((guard$n_probe %||% 0L) > 0L)) "verified"
+  else "not applicable (no non-rank quantity to probe)"
+}
+
 .sbc_check_proper_prior <- function(simulator, fitter, seed_off, n_sim,
                                     quantities, flat_prior) {
   n_probe <- max(2L, min(as.integer(n_sim), .SBC_PROBE_SEEDS))
@@ -1140,7 +1152,7 @@ sbc.character <- function(object = c("prior_predictive", "posterior"),
     args$truth <- "prior_draw"
     res <- do.call(recov_sbc, c(list(simulator = simulator, fitter = fit_fn),
                                 args))
-    premises <- list(proper_prior = "verified",
+    premises <- list(proper_prior = .sbc_premise_proper_prior(guard),
                      flat_prior = flat_prior,
                      n_probed = guard$n_probe)
   } else {
@@ -1216,11 +1228,17 @@ print.sbc <- function(x, ...) {
   cat("  CRPS: ", x$crps_role, "\n", sep = "")
   p <- x$premises
   if (!is.null(p$proper_prior)) {
-    cat(sprintf("  proper prior: %s over %d probed simulations%s\n",
-                p$proper_prior, p$n_probed,
-                if (length(p$flat_prior))
-                  sprintf("; flat prior asserted for %s",
-                          paste(p$flat_prior, collapse = ", ")) else ""))
+    flat <- if (length(p$flat_prior))
+      sprintf("; flat prior asserted for %s",
+              paste(p$flat_prior, collapse = ", ")) else ""
+    # No count where nothing was probed: "verified over 0 probed
+    # simulations" reads as a verification (gcol33/tulpa#716).
+    if (isTRUE(p$n_probed > 0L)) {
+      cat(sprintf("  proper prior: %s over %d probed simulations%s\n",
+                  p$proper_prior, p$n_probed, flat))
+    } else {
+      cat(sprintf("  proper prior: %s%s\n", p$proper_prior, flat))
+    }
   }
   if (!is.null(p$pooling)) {
     cat(sprintf("  pooling: %s; fresh groups: %s\n", p$pooling, p$fresh_groups))
@@ -1282,6 +1300,17 @@ print.sbc_summary <- function(x, ...) {
   invisible(x)
 }
 
+# The p-value and band verdict annotating one panel. It has to read the SAME
+# sample the panel draws: the fold is the read that catches a symmetric
+# dispersion error the raw ECDF cancels, so a folded panel carrying the raw
+# verdict reports "inside" over a curve visibly outside the band, which is
+# exactly the case the fold exists for.
+.sbc_panel_note <- function(r, i, folded) {
+  p  <- if (folded) r$p_unif_folded[i] else r$p_unif[i]
+  ok <- if (folded) r$inside_folded[i] else r$inside[i]
+  sprintf("p = %.3g%s", p, if (ok) "" else ", outside band")
+}
+
 #' @param x An `sbc` result.
 #' @param arm,quantity Optional character vectors selecting which panels to
 #'   draw. Default draws every (arm, quantity).
@@ -1314,8 +1343,7 @@ plot.sbc <- function(x, arm = NULL, quantity = NULL, folded = FALSE, ...) {
     graphics::title(main = sprintf("%s / %s%s", r$arm[i], r$quantity[i],
                                    if (folded) " (folded)" else ""),
                     line = 1.9, cex.main = 1)
-    graphics::mtext(sprintf("p = %.3g%s", r$p_unif[i],
-                            if (r$inside[i]) "" else ", outside band"),
+    graphics::mtext(.sbc_panel_note(r, i, folded),
                     side = 3, line = 0.5, cex = 0.75)
     graphics::polygon(c(at, rev(at)),
                       c(band$ecdf_lo - at, rev(band$ecdf_hi - at)),

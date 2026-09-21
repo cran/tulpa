@@ -86,14 +86,18 @@ OGD_PARTS <- list(
   tulpa:::.nl_within_cell_mode(fit$within_cell_requested)
 }
 
-# `domains` is consumed only by a `moment_rule` support (a central-composite
-# design's interval comes from its moments on the axis's own coordinate), and the
-# driver passes NULL otherwise. Mirrored here so the dump carries the argument the
-# fit passed, not a superset of it.
-.ogd_domains <- function(fit, support) {
-  if (!identical(support, "moment_rule")) return(NULL)
-  tulpa:::.joint_axis_domains(fit)
-}
+# The per-axis reporting geometry the fit's own read was taken with: the domain
+# each axis's continuum is partitioned on, and the coordinate of a declared
+# point mass that is not part of it (`.joint_axis_geometry()`).
+#
+# Carried WHATEVER the support, because every driver passes it whatever the
+# support: a moment rule needs it to form its interval at all, and a density
+# read needs it to mirror its outer cell edges in the axis's own coordinate.
+# Withholding it on a density grid made the round trip read a geometry the fit
+# never used -- on a copy fit with a zero `alpha` node the rebuild reproduced
+# the pre-gcol33/tulpa#854 numbers (ci_lo -0.111425 against the fit's 0) and so
+# would have certified that fix as absent.
+.ogd_geometry <- function(fit) tulpa:::.joint_axis_geometry(fit)
 
 # A per-cell list off the fit, held to describing the SAME grid the rest of the
 # dump does. NULL passes through rather than erroring: the per-cell fixed-effect
@@ -153,8 +157,9 @@ outer_grid_dump <- function(fit, file = NULL) {
          "not dumpable.", call. = FALSE)
   }
   support <- .ogd_support(fit)
-  # `refining_axis` tags the cells a mode-tracked refinement pass pinned to one
-  # axis; the per-axis read drops the foreign ones, so it is part of the state.
+  geom    <- .ogd_geometry(fit)
+  # `refining_axis` tags the cells a mode-tracked refinement pass placed on one
+  # axis; the cell measure is built from it, so it is part of the state.
   refining <- fit$refining_axis %||% rep("", nrow(tg))
   # The per-cell fixed-effect mode and marginal precision the coefficient read is
   # marginalized from. Both are O(n_fixed^2) per cell and flat in the latent
@@ -172,7 +177,8 @@ outer_grid_dump <- function(fit, file = NULL) {
     refining_axis = as.character(refining),
     axis_names   = colnames(tg),
     axis_tags    = tulpa:::.joint_axis_tags_raw(fit),
-    axis_domains = .ogd_domains(fit, support),
+    axis_domains = geom$domain,
+    axis_atoms   = geom$atom,
     support      = support,
     within       = .ogd_within(fit),
     probs        = OGD_PROBS,
@@ -253,6 +259,7 @@ outer_grid_rebuild <- function(dump, weights = NULL, joint_grid = NULL) {
     .ogd_coords(dump, joint_grid), dump$log_marginal, dump$refining_axis,
     probs = dump$probs, weights = as.numeric(w),
     support = dump$support, domains = dump$axis_domains,
+    atoms = dump$axis_atoms,
     within = dump$within %||% tulpa:::.nl_within_cell_mode(NULL))
 }
 
@@ -382,17 +389,14 @@ outer_grid_read_diff <- function(a, b) {
   out
 }
 
-# Which cells the per-axis read of axis `ax` uses. Mirrors the mask in
-# `.nl_axis_quantiles()`: a cell a refinement pass pinned to a FOREIGN axis holds
-# this axis at one non-varying value, so including it oversamples that value.
-# The mirror is not trusted -- `outer_grid_noise_floor()` reads every axis
-# uncoarsened as well, and the round-trip test asserts that read equals
-# `outer_grid_rebuild()`, which fails the moment the two masks drift apart.
+# Which cells the per-axis read of axis `j` uses. Mirrors `.nl_axis_quantiles()`
+# reading measured weights, which sums every cell: each carries its own box's
+# mass, refinement slice cells included. The mirror is not trusted --
+# `outer_grid_noise_floor()` reads every axis uncoarsened as well, and the
+# round-trip test asserts that read equals `outer_grid_rebuild()`, which fails
+# the moment the two reads drift apart.
 .ogd_axis_use <- function(dump, j) {
-  ax <- dump$axis_names[j]
-  keep <- dump$refining_axis == "" | dump$refining_axis == ax |
-    dump$refining_axis == paste0("consistency_", ax)
-  keep & is.finite(dump$joint_grid[, j])
+  is.finite(dump$joint_grid[, j])
 }
 
 # One axis's read off a coarsened version of its own atom set.
@@ -425,8 +429,10 @@ outer_grid_read_diff <- function(a, b) {
     ws <- ws / sum(ws)
   }
   dm <- if (length(dump$axis_domains) < j) NA_character_ else dump$axis_domains[[j]]
+  at <- if (length(dump$axis_atoms) < j) NA_real_ else dump$axis_atoms[[j]]
   tulpa:::.nl_summary_quantile(v, ws, dump$probs, dm, dump$support,
-                               dump$within %||% tulpa:::.nl_within_cell_mode(NULL))
+                               dump$within %||% tulpa:::.nl_within_cell_mode(NULL),
+                               at)
 }
 
 # Every axis at one coarsening, in the shape `outer_grid_rebuild()` returns.
@@ -510,13 +516,16 @@ outer_grid_weight_report <- function(dump, weights = NULL, floor = NULL,
 # The shared measurement fixture                                              #
 # --------------------------------------------------------------------------- #
 
-# Three crossed iid blocks on one gaussian arm, each with its own pinned
-# geometric `sigma_grid`, so the outer grid is a tensor of a size the caller
-# chooses and is identical from run to run. Every file that scores a candidate
-# read against this harness -- the box-mass rule, the barycentre place rule, the
-# descriptor plane -- fits the same model, so it is built once here rather than
-# copied into each.
-ogd_fixture_sim <- function(sd_true, seed = 4242L, G = 30L, N = 600L) {
+# Three crossed iid blocks on one arm, each with its own pinned geometric
+# `sigma_grid`, so the outer grid is a tensor of a size the caller chooses and
+# is identical from run to run. Every file that scores a candidate read against
+# this harness -- the box-mass rule, the barycentre place rule, the descriptor
+# plane -- fits the same model, so it is built once here rather than copied into
+# each. `family` is the arm: `"gaussian"` adds residual noise of SD 0.5 to the
+# linear predictor, `"binomial"` draws one Bernoulli trial at its inverse logit.
+ogd_fixture_sim <- function(sd_true, seed = 4242L, G = 30L, N = 600L,
+                            family = c("gaussian", "binomial"), phi = 0.25) {
+  family <- match.arg(family)
   set.seed(seed)
   grp <- lapply(seq_along(sd_true), function(k) sample.int(G, N, replace = TRUE))
   X <- cbind(1, stats::rnorm(N))
@@ -524,28 +533,39 @@ ogd_fixture_sim <- function(sd_true, seed = 4242L, G = 30L, N = 600L) {
   for (k in seq_along(sd_true)) {
     eta <- eta + stats::rnorm(G, 0, sd_true[k])[grp[[k]]]
   }
-  list(y = eta + stats::rnorm(N, 0, 0.5), X = X, grp = grp, N = N, G = G,
-       sd_true = sd_true)
+  # `phi` is the residual variance in the doors' own convention; the generator
+  # draws at the SD the doors hand the kernel for it, so the fit below is the
+  # model the data came from.
+  y <- switch(family,
+              gaussian = eta + stats::rnorm(N, 0, .phi_to_kernel("gaussian", phi)),
+              binomial = stats::rbinom(N, 1L, stats::plogis(eta)))
+  list(y = y, X = X, grp = grp, N = N, G = G, sd_true = sd_true,
+       family = family, phi = if (identical(family, "gaussian")) phi else 1)
 }
 
-# `within_cell` is STATED, not inherited (gcol33/tulpa#599). Every other input
-# to these measurements is pinned -- the seed, the grid, the integration rule --
-# and the within-cell construction is the one that was not, so a change to
-# `.NL_DIAG$within_cell` silently re-targeted what the recorded numbers measure.
-# The default here is the engine's own shipped read, so the rules are scored
-# against what a user gets; a file wanting the other read passes it and says so.
+# `within_cell` and `hyperprior` are STATED, not inherited (gcol33/tulpa#599).
+# Every other input to these measurements is pinned -- the seed, the grid, the
+# integration rule -- and a construction the engine defaults silently
+# re-targets what the recorded numbers measure when that default changes. The
+# defaults here are the engine's own, so the rules are scored against what a
+# user gets; a file whose experiment is about another read or another prior
+# passes it and says so.
 ogd_fixture_fit <- function(sim, levels, spread = 3,
-                            within_cell = "box_uniform") {
+                            within_cell = "box_uniform",
+                            hyperprior = "proper") {
   prior <- lapply(seq_along(sim$grp), function(k) {
     s <- sim$sd_true[k]
     list(type = "iid", obs_idx = list(sim$grp[[k]]), n_units = sim$G,
          sigma_grid = exp(seq(log(s / spread), log(s * spread),
                               length.out = levels)))
   })
+  family <- sim$family %||% "gaussian"
   suppressWarnings(tulpa_nested_laplace_joint(
     responses = list(a = list(y = sim$y, n_trials = rep(1L, sim$N), X = sim$X,
-                              family = "gaussian", phi = 0.25)),
+                              family = family,
+                              phi = sim$phi)),
     prior = prior,
+    hyperprior = hyperprior,
     control = list(n_threads = 1L, diagnose_k = FALSE, max_iter = 100L,
                    tol = 1e-8, integration = "grid",
                    within_cell = within_cell)))

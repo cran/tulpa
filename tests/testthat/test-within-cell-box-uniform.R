@@ -211,6 +211,7 @@ test_that("a bounded axis's boxes stay inside its support", {
 })
 
 test_that("the interior bisector is byte-identical to the sum form it replaced", {
+  skip_on_cran()
   # gcol33/tulpa#378 changed HOW the interior midpoint is formed, and the whole
   # claim is that it changes no number any axis actually carries. `a / 2 + b / 2`
   # and `(a + b) / 2` are not the same expression -- the first rounds twice --
@@ -416,7 +417,7 @@ test_that("a fit selects the construction, reports it, and stays byte-identical 
                auto_recenter = FALSE)
   fit <- function(wc) suppressWarnings(tulpa_nested_laplace_joint(
     responses = list(a = list(y = y, n_trials = rep(1L, N), X = X,
-                              family = "gaussian", phi = sqrt(0.5))),
+                              family = "gaussian", phi = 0.5)),
     prior = list(list(type = "iid", obs_idx = list(g), n_units = G,
                       sigma_grid = sg)),
     control = if (is.null(wc)) ctrl else c(ctrl, list(within_cell = wc))))

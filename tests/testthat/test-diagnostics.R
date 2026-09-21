@@ -1,6 +1,5 @@
 # The diagnostics() front door: draws provenance selects which reliability
-# question a fit is asked, and the two superseded entry points keep returning
-# exactly what they always did.
+# question a fit is asked.
 #
 # The routing is the contract worth pinning. A fit whose draws are i.i.d. must
 # NOT come back with a chain-mixing verdict: split-Rhat sits at ~1 and ESS ~
@@ -72,6 +71,69 @@ test_that("an unrecognised provenance kind fails loudly", {
   expect_error(diagnostics(fit), "Unknown draws provenance")
 })
 
+test_that("a chain-stamped fit with no draws says so instead of returning NULL silently", {
+  fit <- structure(list(backend = "gibbs", draws_kind = "chain"),
+                   class = "tulpa_fit")
+  expect_message(res <- diagnostics(fit), "stamped as an MCMC chain")
+  expect_null(res)
+})
+
+# --------------------------------------------------------------------------- #
+# What the reliability table says it describes                                 #
+# --------------------------------------------------------------------------- #
+
+test_that("every backend emitting i.i.d. draws has a reliability scope entry", {
+  iid <- names(Filter(function(e) identical(e$emits, "iid"), BACKEND_REGISTRY))
+  expect_true(all(iid %in% names(.APPROX_SCOPE)),
+              info = paste(setdiff(iid, names(.APPROX_SCOPE)), collapse = ", "))
+  for (nm in names(.APPROX_SCOPE)) {
+    e <- .APPROX_SCOPE[[nm]]
+    expect_true(is.character(e$title) && nzchar(e$title), info = nm)
+    expect_true(is.character(e$scope) && nzchar(e$scope), info = nm)
+    expect_true(all(e$layers %in% c("outer", "inner")), info = nm)
+  }
+})
+
+test_that("the header and scope follow the backend, not a nested-Laplace default", {
+  set.seed(14)
+  draws <- matrix(rnorm(400), ncol = 2, dimnames = list(NULL, c("b0", "b1")))
+  shell <- function(backend, ...) {
+    structure(list(draws = draws, draws_kind = "iid", backend = backend, ...),
+              class = "tulpa_fit")
+  }
+  for (b in c("smc", "vi", "pathfinder", "ep")) {
+    tab <- diagnostics(shell(b))
+    out <- paste(capture.output(print(tab)), collapse = "\n")
+    expect_match(out, .APPROX_SCOPE[[b]]$title, fixed = TRUE, info = b)
+    expect_no_match(out, "Nested-Laplace|OUTER-integration|latent-field|outer PSIS",
+                    info = b)
+    expect_identical(attr(tab, "scope_backend"), b)
+    expect_length(attr(tab, "scope_layers"), 0L)
+    expect_true(is.na(attr(tab, "reliability")))
+  }
+
+  nested <- diagnostics(shell("re_cov_nested", weights = rep(0.25, 4),
+                              pareto_k = 0.3, pareto_k_is_ess = 300,
+                              pareto_k_scope = "outer"))
+  out <- paste(capture.output(print(nested)), collapse = "\n")
+  expect_match(out, "RE-covariance nested-Laplace OUTER-integration", fixed = TRUE)
+  expect_match(out, "random-effect covariance Sigma", fixed = TRUE)
+  expect_match(attr(nested, "reliability"), "outer integration good")
+
+  # A fit with no registered backend is described by the layers it carries.
+  expect_output(print(diagnostics(.diag_iid_fit())), "Nested-Laplace OUTER")
+})
+
+test_that("a zero-row draws matrix is read as no draws", {
+  fit <- structure(list(draws = matrix(numeric(0), 0L, 2L,
+                                       dimnames = list(NULL, c("a", "b"))),
+                        draws_kind = "iid", backend = "agq",
+                        means = c(a = 0, b = 1)),
+                   class = "tulpa_fit")
+  expect_message(res <- diagnostics(fit), "carries no posterior draws")
+  expect_null(res)
+})
+
 # --------------------------------------------------------------------------- #
 # Argument pass-through                                                        #
 # --------------------------------------------------------------------------- #
@@ -88,33 +150,4 @@ test_that("pars restricts both routes", {
   expect_equal(diagnostics(.diag_chain_fit(p = 3L), pars = "b")$parameter, "b")
   expect_equal(diagnostics(.diag_iid_fit(), pars = c("a", "c"))$parameter,
                c("a", "c"))
-})
-
-# --------------------------------------------------------------------------- #
-# Superseded entry points                                                      #
-# --------------------------------------------------------------------------- #
-
-test_that("both deprecated names warn", {
-  # "warning" defeats deprecate_warn()'s once-per-session throttle, so the
-  # signal is asserted rather than depending on test execution order.
-  old <- options(lifecycle_verbosity = "warning")
-  on.exit(options(old), add = TRUE)
-  expect_warning(mcmc_diagnostics(.diag_chain_fit()), "deprecated")
-  expect_warning(laplace_diagnostics(.diag_iid_fit()), "deprecated")
-})
-
-test_that("both deprecated names return exactly the diagnostics() value", {
-  old <- options(lifecycle_verbosity = "quiet")
-  on.exit(options(old), add = TRUE)
-  ch <- .diag_chain_fit(); ap <- .diag_iid_fit()
-  expect_equal(mcmc_diagnostics(ch), diagnostics(ch))
-  expect_equal(laplace_diagnostics(ap), diagnostics(ap))
-})
-
-test_that("the deprecated names still route by provenance, not by their name", {
-  old <- options(lifecycle_verbosity = "quiet")
-  on.exit(options(old), add = TRUE)
-  # mcmc_diagnostics() on an i.i.d. fit must still yield the reliability table,
-  # which is the behaviour that made the old name wrong in the first place.
-  expect_s3_class(mcmc_diagnostics(.diag_iid_fit()), "laplace_diagnostics")
 })

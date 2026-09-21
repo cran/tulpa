@@ -19,6 +19,7 @@ fit_spde(
   n_re_groups = 0L,
   sigma_re = 1,
   mode = c("laplace", "nuts"),
+  hyperprior = c("proper", "flat"),
   control = list()
 )
 }
@@ -44,7 +45,17 @@ integrate over range and sigma.}
 \item{nested_laplace}{Logical. If TRUE (default when range/sigma are NULL),
 use nested Laplace approximation over hyperparameters.}
 
-\item{phi}{Dispersion parameter (negbin only).}
+\item{phi}{Dispersion passed to the family, held fixed. One convention at
+every door: for \code{gaussian} / \code{lognormal} this is the residual VARIANCE
+(the SD is \code{sqrt(phi)}), for \code{neg_binomial_2} the size, \code{gamma} the
+shape, \code{beta} the precision, \code{t} the scale; \code{binomial} and \code{poisson}
+ignore it. The compiled kernels parameterize the two variance families by
+the residual SD and are handed \code{sqrt(phi)} at the boundary.
+
+Defaulted, it conditions at 1 and says so with a warning, since for a
+family that reads a dispersion that is a modelling choice rather than a
+neutral value. \code{fit$phi_estimated} records whether the value on the fit
+was estimated or conditioned on.}
 
 \item{offset}{Optional fixed additive term on the linear predictor
 (\verb{eta = offset + X beta + A w}), length \code{length(y)}; \code{NULL} -> no offset.}
@@ -64,6 +75,14 @@ fixed, the Matern hyperparameters). \code{mode = "nuts"} does not support an
 \code{offset} or a random-effect term, and its sampler knobs pass via \code{control}
 (see \code{\link[=tulpa_nuts_spde]{tulpa_nuts_spde()}}); it returns that sampler's draws object.}
 
+\item{hyperprior}{\code{"proper"} (default) or \code{"flat"}, the prior the nested
+integration puts on \verb{(range, sigma)}. \code{"proper"} carries the spec's PC
+range and PC sigma priors. \code{"flat"} keeps only the anchors the spec was
+given explicitly (\code{prior_range} / \code{prior_sigma} passed to
+\code{\link[=spatial_spde]{spatial_spde()}}); an axis whose anchor was defaulted carries no density,
+is named in \code{log_hyperprior_declined} as \code{"flat_hyperprior"}, and the
+evidence declines. Not read by \code{mode = "nuts"}, where \code{"flat"} errors.}
+
 \item{control}{A named list of numerical / tuning knobs (statistical
 arguments stay in the signature above). Recognized entries:
 \itemize{
@@ -81,8 +100,14 @@ Hessian-based design. \code{"grid"} uses a rectangular grid in
 Pareto-\eqn{\hat{k}} accuracy diagnostic (\verb{$pareto_k}) by importance
 sampling the joint \verb{(range, sigma)} posterior on the log scale against
 the Gaussian proposal that orients the integration. See \code{\link[=tulpa_psis]{tulpa_psis()}}.
-\item \code{k_samples}: importance draws for \code{diagnose_k}. Default 200, each
-one extra batched SPDE marginal evaluation.
+\item \code{k_samples}: importance draws for \code{diagnose_k}. Default 500, each
+one extra batched SPDE marginal evaluation. It is a precision knob:
+the GPD tail size is held at the fraction the default budget implies,
+so a larger budget sharpens the same k-hat rather than moving it to a
+deeper quantile of the weight distribution (gcol33/tulpa#631).
+\item \code{k_tail_points}: expert override for that tail size, in upper-tail
+order statistics. Silently capped at 20\% of the draws, beyond which
+body ratios enter the tail and bias the shape.
 \item \code{mode_find}: tuning for the outer \verb{(range, sigma)} mode-find under
 \code{method = "ccd"}, as \code{list(factr =, ndeps =, maxit =)}; supply any
 subset. \code{ndeps} is the central-difference step for \code{optim()}'s
@@ -112,6 +137,11 @@ A list with:
 \item \code{spatial}: the spatial specification (for prediction)
 \item \code{pareto_k}, \code{pareto_k_is_ess}: outer Pareto-\eqn{\hat{k}} and its
 importance-sampling ESS (\code{NA} when \code{diagnose_k = FALSE})
+\item \code{pareto_k_proposal_source}, \code{pareto_k_first_pass}: which proposal
+family the reported k-hat came from (several candidates are scored and
+the best kept), and the k-hat of the first pass -- the proposal exactly
+as placed, before refinement. A large gap says the placement is poor
+even where the verdict is fine.
 \item \code{nested}: nested Laplace results (if used)
 }
 }

@@ -38,7 +38,10 @@ inline Rcpp::NumericVector nl_unwrap_x_init(
 }
 
 // The arguments every cpp_nested_laplace_* grid entry declares, under the names
-// it declares them under. The runners below read the drivers' inputs from here.
+// it declares them under: the response and design, the inner Newton budget, the
+// warm start, the checkpoint, the diagnostics and their probe indices, the
+// debias / CILA requests, and the outer-grid cheap-pass screening knobs.
+// The runners below read the drivers' inputs from here.
 struct NlEntryInputs {
     Rcpp::NumericVector y;
     Rcpp::IntegerVector n_trials;
@@ -58,11 +61,28 @@ struct NlEntryInputs {
     Rcpp::Nullable<Rcpp::IntegerVector> skew_idx = R_NilValue;
     Rcpp::Nullable<Rcpp::List>          debias   = R_NilValue;
     Rcpp::Nullable<Rcpp::List>          cila     = R_NilValue;
-    // Carried only by the entries that take one. It moves every cell's mode, so
-    // it enters the checkpoint fingerprint.
+    // Per-observation offset on the linear predictor. It moves every cell's
+    // mode, so it enters the checkpoint fingerprint.
     Rcpp::Nullable<Rcpp::NumericVector> offset   = R_NilValue;
+    // Outer-grid cheap-pass screening. A positive tolerance makes the driver
+    // rank the lattice with a short warm-started inner Newton of
+    // `screen_iters` steps per cell and skip the full solve on cells whose
+    // screened weight falls below it; zero runs every cell. The screen skips
+    // the per-row fitted-variance pass, which `compute_fitted_var` also
+    // controls for the full solve on every driver.
+    double prune_tol          = 0.0;
+    int    screen_iters       = CHEAP_SCREEN_ITERS;
+    bool   compute_fitted_var = true;
+    // Per-cell log hyperprior + log cell measure the screen ranks with, in the
+    // grid's cell order (see run_nested_laplace_grid); NULL ranks on the
+    // kernel's log-marginal alone.
+    Rcpp::Nullable<Rcpp::NumericVector> screen_log_offset = R_NilValue;
 
     int N() const { return static_cast<int>(y.size()); }
+    std::vector<double> screen_offset() const {
+        if (screen_log_offset.isNull()) return std::vector<double>();
+        return Rcpp::as<std::vector<double>>(screen_log_offset);
+    }
     int p() const { return X.ncol(); }
 };
 
@@ -96,6 +116,61 @@ struct NlEntryRun {
     {}
 };
 
+// Per-cell linear predictor at each cell's mode, for a single-arm fit run
+// through the joint driver (nngp / hsgp / spde / the spatiotemporal entries,
+// and cpp_nested_laplace_joint_multi). The multi-block driver fills
+// `fitted_eta` itself; this one reads the same quantity through the joint
+// driver's own eta accumulator, so the arm's offset, every block kind and each
+// cell's block scaling are the ones the inner solve used.
+//
+// Two kinds of cell report NaN rows rather than a number: one whose block
+// preparation fails at its coordinate, and one the cheap screen pruned, which
+// was never solved. A pruned cell's `modes` row is not missing but ZERO -- the
+// grid runner allocates the matrix zeroed and a skipped cell never writes into
+// it -- so the predicate is the cell's own `log_marginal`, which the screen
+// leaves at -Inf, and not the mode row's contents. Both kinds carry zero outer
+// weight, so the mixture these rows feed never draws them; writing NaN keeps a
+// row that is not a linear predictor from reading as one.
+inline void nl_attach_fitted_eta_single_arm(
+    Rcpp::List& out,
+    const std::vector<JointArm>& arms,
+    const std::vector<ParsedArm>& parsed,
+    const std::vector<LatentBlock>& blocks
+) {
+    if (arms.size() != 1 || !out.containsElementNamed("modes")) return;
+    Rcpp::NumericMatrix modes = out["modes"];
+    const int ng = modes.nrow();
+    const int N  = arms[0].N;
+    const int B  = static_cast<int>(blocks.size());
+    Rcpp::NumericVector log_marginal =
+        out.containsElementNamed("log_marginal")
+        ? Rcpp::as<Rcpp::NumericVector>(out["log_marginal"])
+        : Rcpp::NumericVector();
+    const bool have_lm = (log_marginal.size() == ng);
+    Rcpp::NumericMatrix fitted_eta(ng, N);
+    std::vector<Rcpp::NumericVector> etas(1, Rcpp::NumericVector(N));
+    std::vector<std::vector<double>> d_eff(B, std::vector<double>(1, 0.0));
+    std::vector<double> basis_scratch;
+    std::vector<std::pair<int, double>> multi_scratch;
+    for (int k = 0; k < ng; k++) {
+        bool ok = !have_lm || R_finite(log_marginal[k]);
+        for (int b = 0; ok && b < B; b++) {
+            if (blocks[b].prep && !blocks[b].prep(k)) { ok = false; break; }
+            const double s = blocks[b].arm_scale ? blocks[b].arm_scale(0, k) : 1.0;
+            d_eff[b][0] = s * blocks[b].d_fac_at(k);
+        }
+        if (!ok) {
+            for (int i = 0; i < N; i++) fitted_eta(k, i) = NA_REAL;
+            continue;
+        }
+        Rcpp::NumericVector x = modes(k, Rcpp::_);
+        compute_eta_joint_sparse_dispatch(x, etas, arms, parsed, blocks, k,
+                                          d_eff, basis_scratch, multi_scratch);
+        for (int i = 0; i < N; i++) fitted_eta(k, i) = etas[0][i];
+    }
+    out["fitted_eta"] = fitted_eta;
+}
+
 // LatentBlock outer-grid driver (icar / bym2 / car_proper / temporal).
 inline Rcpp::List nl_run_multi_block_entry(
     const NlEntryInputs& in,
@@ -112,11 +187,14 @@ inline Rcpp::List nl_run_multi_block_entry(
         blocks,
         in.family, in.phi, in.max_iter, in.tol, in.n_threads,
         /*store_modes=*/true, in.x_init,
-        in.store_Q, /*n_threads_outer=*/1, /*prune_tol=*/0.0,
+        in.store_Q, /*n_threads_outer=*/1, in.prune_tol,
         /*ext_spec=*/nullptr, /*ext_response=*/nullptr,
         /*progress=*/nullptr, run.ckpt.get(),
         in.compute_skew, run.skew_idx_ptr,
-        run.debias_req.ptr, run.cila_req.ptr
+        run.debias_req.ptr, run.cila_req.ptr,
+        in.screen_iters, in.compute_fitted_var,
+        tulpa::as_offset_vec(in.offset, in.N()),
+        in.screen_offset()
     );
     nl_attach_axes(out, out_axes);
     return out;
@@ -144,7 +222,7 @@ inline Rcpp::List nl_run_joint_sparse_entry(
         /*prep_at_grid=*/nullptr,
         /*tile_ids=*/std::vector<int>(),
         /*tile_pilot_cells=*/std::vector<int>(),
-        /*prune_tol=*/0.0,
+        in.prune_tol,
         /*cell_coupling_spec=*/nullptr,
         /*coupled_arms=*/std::vector<int>(),
         /*cell_rows=*/std::vector<std::vector<std::vector<int>>>(),
@@ -154,8 +232,10 @@ inline Rcpp::List nl_run_joint_sparse_entry(
         /*progress=*/nullptr, run.ckpt.get(),
         /*x_init_per_cell=*/std::vector<double>(),
         in.compute_skew, run.skew_idx_ptr,
-        /*fixed_block=*/nullptr, run.debias_req.ptr, run.cila_req.ptr
+        /*fixed_block=*/nullptr, run.debias_req.ptr, run.cila_req.ptr,
+        in.screen_iters, in.compute_fitted_var, in.screen_offset()
     );
+    nl_attach_fitted_eta_single_arm(out, arms, parsed, blocks);
     nl_attach_axes(out, out_axes);
     return out;
 }
@@ -166,7 +246,7 @@ inline Rcpp::List nl_run_joint_sparse_entry(
 // every grid entry declares them under. Member-by-member assignment in one
 // token sequence: an entry binds its own `max_iter` to `max_iter` and has no
 // way to bind it to `n_threads`, and a member added to NlEntryInputs is filled
-// at every entry at once. `offset` is assigned by the entries that carry one.
+// at every entry at once.
 #define TULPA_NL_ENTRY_INPUTS                                              \
     ([&]() {                                                               \
         tulpa::NlEntryInputs nl_in_;                                       \
@@ -188,6 +268,10 @@ inline Rcpp::List nl_run_joint_sparse_entry(
         nl_in_.skew_idx        = skew_idx;                                 \
         nl_in_.debias          = debias;                                   \
         nl_in_.cila            = cila;                                     \
+        nl_in_.prune_tol          = prune_tol;                             \
+        nl_in_.screen_iters       = screen_iters;                          \
+        nl_in_.compute_fitted_var = compute_fitted_var;                    \
+        nl_in_.offset             = offset_nullable;                               nl_in_.screen_log_offset  = screen_log_offset;                     \
         return nl_in_;                                                     \
     }())
 

@@ -115,6 +115,23 @@ extern GradientMode g_gradient_mode;
 void set_gradient_mode(GradientMode mode);
 GradientMode get_gradient_mode();
 
+// Has the active gradient been verified against the numerical one for the fit
+// currently in scope? Travels with GradientModeFitScope below, so the check
+// runs once per fit however many chains that fit runs.
+extern bool g_gradient_verified;
+
+// Runs the check unless it has already run for this fit, or unless the caller
+// is inside an across-chain OpenMP region (where the enclosing producer has
+// already run it on the main thread and an Rcpp warning would be unsafe). On a
+// mismatch it flips g_gradient_mode to NUMERICAL for the rest of the fit and
+// warns. Every NUTS entry reaches this through run_hmc_chain_cpp, so no door
+// can start a trajectory on an unverified gradient (gcol33/tulpa#684).
+void ensure_gradient_verified(
+    const std::vector<double>& q_init,
+    const ModelData& data,
+    const ParamLayout& layout
+);
+
 // Scopes a warmup gradient-check fallback to a single fit. A failed check flips
 // g_gradient_mode to NUMERICAL so every chain of THIS fit uses the safe path;
 // this guard restores the entry mode on scope exit so the fallback does not leak
@@ -123,8 +140,13 @@ GradientMode get_gradient_mode();
 // therefore preserved.
 struct GradientModeFitScope {
     GradientMode saved;
-    GradientModeFitScope() : saved(g_gradient_mode) {}
-    ~GradientModeFitScope() { g_gradient_mode = saved; }
+    bool saved_verified;
+    GradientModeFitScope()
+        : saved(g_gradient_mode), saved_verified(g_gradient_verified) {}
+    ~GradientModeFitScope() {
+        g_gradient_mode = saved;
+        g_gradient_verified = saved_verified;
+    }
     GradientModeFitScope(const GradientModeFitScope&) = delete;
     GradientModeFitScope& operator=(const GradientModeFitScope&) = delete;
 };
@@ -167,6 +189,30 @@ const std::string& get_integrator_name();
 // in parallel and the heartbeat file is the parallel/detached channel. nullptr
 // -> no progress. Defined in hmc_nuts_parallel.cpp.
 extern ::tulpa_progress::GridProgress* g_active_grid_progress;
+
+// Owns `g_active_grid_progress` for a scope. The reporter itself is a local
+// unique_ptr in the frame that built it, so clearing the global only on the
+// normal exit path leaves it pointing at a destroyed object whenever a chain
+// leaves by an exception -- Rcpp::stop from a model's log-posterior, a
+// Cholesky failure in a non-centered field transform, bad_alloc from a
+// per-chain buffer. The next NUTS run in the process then reads a non-null
+// pointer, skips building its own reporter, and ticks freed memory once per
+// iteration. Tying the global's lifetime to a destructor closes every exit at
+// once, including ones added later.
+//
+// Declare it AFTER the unique_ptr it points into, so the global is cleared
+// before the object it names is destroyed.
+struct ActiveGridProgressScope {
+    explicit ActiveGridProgressScope(::tulpa_progress::GridProgress* p)
+        : owned_(p != nullptr) {
+        if (owned_) g_active_grid_progress = p;
+    }
+    ~ActiveGridProgressScope() { if (owned_) g_active_grid_progress = nullptr; }
+    ActiveGridProgressScope(const ActiveGridProgressScope&) = delete;
+    ActiveGridProgressScope& operator=(const ActiveGridProgressScope&) = delete;
+private:
+    bool owned_;
+};
 
 // Build a progress reporter for a NUTS run from the scoped `tulpa.nl_progress`
 // R option. MUST be called on the main thread (it reads an R option). Returns

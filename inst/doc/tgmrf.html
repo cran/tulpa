@@ -725,7 +725,7 @@ iid-fit counterpart of Rhat. The nested-Laplace fit reports
 <code>$pareto_k</code> and <code>$pareto_k_is_ess</code>: the integrator
 fits a Gaussian proposal to the hyperparameter posterior,
 importance-samples it (<code>control$k_samples</code>, default
-<code>200L</code>, each one extra inner solve), and fits a generalised
+<code>500L</code>, each one extra inner solve), and fits a generalised
 Pareto tail to the importance ratios. A <span class="math inline">\(\hat{k} &lt; 0.7\)</span> means the Gaussian grid
 characterises the hyperparameter posterior well and the nested
 integration is reliable. A <span class="math inline">\(\hat{k} \geq
@@ -747,9 +747,9 @@ to NUTS. The NUTS fit reports <code>$mean_accept</code> plus
 <code>$tree_depth</code> per draw and the adapted <code>$epsilon</code>;
 draws repeatedly hitting <code>max_depth</code> indicate a step size
 that is too small for the posterior geometry. Both produce a
-<code>$draws</code> matrix you can feed to
-<code>mcmc_diagnostics(fit)</code> for Rhat and effective sample size,
-or to <code>check_diagnostics(fit)</code> for a pass/fail summary. The
+<code>$draws</code> matrix you can feed to <code>diagnostics(fit)</code>
+for Rhat and effective sample size, or to
+<code>check_diagnostics(fit)</code> for a pass/fail summary. The
 cleanest single check is to run the structured-tier fit, read its
 Pareto-<span class="math inline">\(\hat{k}\)</span>, and only reach for
 the MCMC tiers when the diagnostic says the Gaussian approximation is
@@ -784,7 +784,7 @@ only if cells fail to converge. <code>control$n_threads</code> (default
 <code>1L</code>) sets OpenMP threads inside each inner solve, useful
 when <code>n_latent</code> is large. <code>control$diagnose_k</code>
 (default <code>TRUE</code>) and <code>control$k_samples</code> (default
-<code>200L</code>) control the Pareto-<span class="math inline">\(\hat{k}\)</span> computation; set
+<code>500L</code>) control the Pareto-<span class="math inline">\(\hat{k}\)</span> computation; set
 <code>diagnose_k = FALSE</code> to skip the extra inner solves when you
 do not need the accuracy gate. The <code>bounds</code> you set on the
 block itself define the grid extent and the hard wall for IMH and NUTS.
@@ -906,12 +906,13 @@ approximation is biased, without rewriting anything.</p>
 <div id="what-tgmrf-does-not-require" class="section level2">
 <h2>What <code>tgmrf()</code> does not require</h2>
 <ul>
-<li>No gradient code. The score in <code>z</code> is closed-form from
-<code>Q</code>.</li>
-<li>No Hessian code. The Hessian in <code>z</code> is just
-<code>-Q</code>.</li>
-<li>No autodiff. Hyperparameter gradients are finite-difference.</li>
-<li>No C++. The R closure path reaches every tier.</li>
+<li><p>No gradient code. The score in <code>z</code> is closed-form from
+<code>Q</code>.</p></li>
+<li><p>No Hessian code. The Hessian in <code>z</code> is just
+<code>-Q</code>.</p></li>
+<li><p>No autodiff. Hyperparameter gradients are
+finite-difference.</p></li>
+<li><p>No C++. The R closure path reaches every tier.</p></li>
 </ul>
 <p>The <code>tgmrf_cpp()</code> constructor offers a templated-C++
 backend with the same S3 contract for cases where the R-to-C boundary on
@@ -928,14 +929,15 @@ identically.</p>
 <div id="see-also" class="section level2">
 <h2>See also</h2>
 <ul>
-<li><code>?tgmrf</code>: constructor reference.</li>
-<li><code>?tgmrf_cpp</code>: compiled-C++ backend with the same S3
-contract.</li>
-<li><code>?tulpa_nested_laplace</code>: Tier-2 grid integrator.</li>
-<li><code>?tulpa_tgmrf_imh</code>, <code>?tulpa_tgmrf_nuts</code>,
-<code>?tulpa_tgmrf_vi</code>: adapter family.</li>
-<li><code>inst/examples/tgmrf_periodic_ar1.R</code>: runnable script
-form of this vignette.</li>
+<li><p><code>?tgmrf</code>: constructor reference.</p></li>
+<li><p><code>?tgmrf_cpp</code>: compiled-C++ backend with the same S3
+contract.</p></li>
+<li><p><code>?tulpa_nested_laplace</code>: Tier-2 grid
+integrator.</p></li>
+<li><p><code>?tulpa_tgmrf_imh</code>, <code>?tulpa_tgmrf_nuts</code>,
+<code>?tulpa_tgmrf_vi</code>: adapter family.</p></li>
+<li><p><code>inst/examples/tgmrf_periodic_ar1.R</code>: runnable script
+form of this vignette.</p></li>
 </ul>
 </div>
 

@@ -32,22 +32,21 @@
 # Draw a response of one built-in family at a given linear predictor. Shared by
 # every simulator below so the response law has one definition.
 #
-# `phi` is ALWAYS the parameterization the fitters' own door takes, which for
-# every fitter in this file is a DIRECT door (`tulpa_nested_laplace()`,
-# `tulpa_nested_laplace_joint()`) and therefore the kernel convention: for
-# gaussian and lognormal that is the residual SD, variance `phi^2`
-# (`R/nested_laplace_joint.R`, `@param phi_grid`). `tulpa()` is the door that
-# takes the residual VARIANCE and converts at its boundary with
-# `.phi_to_kernel()`; nothing in this file goes through it.
+# `phi` is ALWAYS the parameterization the fitters' own door takes, and since
+# `657f179` that is one convention at every door: for gaussian and lognormal the
+# residual VARIANCE, converted to the SD the kernel wants inside the door
+# itself. So `cfg$phi` reaches the simulator and the fitter as the same number
+# meaning the same thing, and the ONE conversion is the engine's own
+# `.phi_to_kernel()`, which `sbc_draw_y()` asks for the SD its `rnorm()` wants
+# rather than restating it.
 #
-# So the draw applies NO conversion of its own: `cfg$phi` reaches the simulator
-# and the fitter as the same number meaning the same thing, and a crossing
-# between the two conventions has nowhere to enter (gcol33/tulpa#332, which was
-# a `sqrt(phi)` here fitting against a `phi` at the door -- half the residual
-# variance, and a slope interval narrow by sqrt(2)). The convention itself is
-# pinned against the engine by the test at the end of this file, so a change on
-# the door's side fails loudly here instead of silently rescaling every gaussian
-# fixture.
+# A crossing between the two conventions is what gcol33/tulpa#332 was -- half
+# the residual variance, and a slope interval narrow by sqrt(2) -- and what
+# gcol33/tulpa#661 was again from the other side, when the doors moved to the
+# variance and this file was left describing the SD. The convention is pinned
+# against the engine by the test at the end of this file, which is what caught
+# it: a change on the door's side fails loudly here instead of silently
+# rescaling every gaussian fixture.
 #
 # The law itself lives in `sbc_draw_y()` (helper-sbc.R section 9) beside its own
 # log density, so the SBC fixtures simulate from the same parameterization they
@@ -170,12 +169,13 @@ recov_fit_joint_ccd <- function(d, sg, family, cfg) {
 #
 # `levels` selects the base-grid resolution off `sg`: four levels by default,
 # and `sg` itself at seven. `phi` is the arm's residual scale, which the joint
-# door reads as the gaussian residual SD (variance `phi^2`) -- passing something
-# other than `cfg$phi` is what lets a fit be scored against a twin whose
-# assumed residual scale is the simulator's.
+# door reads as the gaussian residual VARIANCE -- passing something other than
+# `cfg$phi` is what lets a fit be scored against a twin whose assumed residual
+# scale is not the simulator's. `hyperprior` is the outer prior the fit states.
 recov_fit_joint_coarse <- function(d, sg, family, cfg, local_ccd = NULL,
                                    phi = cfg$phi, levels = 4L,
-                                   diagnose_k = FALSE, within_cell = NULL) {
+                                   diagnose_k = FALSE, within_cell = NULL,
+                                   hyperprior = "proper") {
   sgc <- if (levels >= length(sg)) sg else
     exp(seq(log(min(sg)), log(max(sg)), length.out = levels))
   suppressWarnings(tulpa_nested_laplace_joint(
@@ -184,6 +184,7 @@ recov_fit_joint_coarse <- function(d, sg, family, cfg, local_ccd = NULL,
                               family = family, phi = phi)),
     prior = lapply(d$regions, function(g)
       list(type = "iid", obs_idx = list(g), n_units = d$nr, sigma_grid = sgc)),
+    hyperprior = hyperprior,
     control = c(list(max_iter = 100L, tol = 1e-8, n_threads = 1L,
                      diagnose_k = diagnose_k, integration = "grid",
                      local_ccd = local_ccd, skew_correct = TRUE),
@@ -195,14 +196,23 @@ recov_fit_joint_local_ccd <- function(d, sg, family, cfg) {
   recov_fit_joint_coarse(d, sg, family, cfg, local_ccd = TRUE)
 }
 
-# The same coarse fit with the two residual-scale conventions crossed: the arm
-# is handed `cfg$phi^2`, the residual VARIANCE, where the door reads an SD. That
-# is exactly the gcol33/tulpa#332 defect, on data the corrected fixture also
-# simulates, so it is the negative control the coverage gate is scored against
-# -- a fit at the wrong residual scale must fail the gate the corrected one
-# passes, or the gate is not sensitive to the thing it grades.
+# The same coarse fit with the two residual-scale conventions crossed, kept
+# runnable as the negative control the coverage gate's floor is scored against:
+# a fit at the wrong residual scale must fail the gate the corrected one passes,
+# or the gate is not sensitive to the thing it grades.
+#
+# The crossing is the gcol33/tulpa#332 one: the KERNEL reads the generator's
+# number unconverted, so a gaussian arm simulated at residual variance `v` is
+# fitted at SD `v`, variance `v^2` -- a quarter at 0.5, which is what narrows
+# the slope's interval by sqrt(2). The door value that produces that kernel read
+# is the inverse of the door's own conversion, `.phi_to_registry()`, so the arm
+# states the defect rather than a convention. Handing the door
+# `.phi_to_kernel(cfg$phi)` instead is a different defect at 0.5 -- variance
+# sqrt(0.5), too WIDE by 0.5^(-1/4) -- which widens the slope and costs no
+# coverage.
 recov_fit_joint_phi_crossed <- function(d, sg, family, cfg) {
-  recov_fit_joint_coarse(d, sg, family, cfg, phi = cfg$phi^2)
+  recov_fit_joint_coarse(d, sg, family, cfg,
+                         phi = .phi_to_registry(family, cfg$phi))
 }
 
 # Fit n_seed data sets for one family; return per-coefficient mean estimate,
@@ -338,21 +348,22 @@ recov_sweep <- function(family, cfg, n_seed, seed_off, fit_fn = recov_fit_single
 
 # Per-family identified regimes (RE SD recoverable, link well-determined).
 # phi is supplied at its true value in the DIRECT door's own parameterization --
-# gaussian residual SD, negbin dispersion, gamma / beta shape -- the one
+# gaussian residual variance, negbin dispersion, gamma / beta shape -- the one
 # `recov_draw_y()` draws from unchanged. The nested driver takes phi as fixed;
 # this is a beta + RE-SD recovery.
 #
-# `RESID_SD` is the gaussian residual SD every gaussian fixture in this file
-# runs at, written as the root of the variance it corresponds to so the number
-# says which quantity it is. 0.5 is the residual VARIANCE these fixtures have
-# always simulated at; before gcol33/tulpa#332 the same 0.5 was handed to the
-# door, which reads an SD, and every gaussian fit assumed a quarter.
-RESID_SD <- sqrt(0.5)
+# `RESID_VAR` is the residual VARIANCE every gaussian fixture in this file runs
+# at, which is the door's own convention, so it is handed over unconverted. 0.5
+# is what these fixtures have always simulated at: before gcol33/tulpa#332 it
+# was handed to a door reading an SD and every gaussian fit assumed a quarter,
+# and between `657f179` and gcol33/tulpa#661 its root was handed to a door
+# reading the variance and every gaussian fit assumed twice.
+RESID_VAR <- 0.5
 
 CFG <- list(
   poisson        = list(nr = 60L, spr = 10L, ntr = 1L,  beta = c( 0.3, 0.6), su = 0.5, phi = 1.0),
   binomial       = list(nr = 60L, spr = 10L, ntr = 10L, beta = c(-0.2, 0.7), su = 0.5, phi = 1.0),
-  gaussian       = list(nr = 60L, spr = 10L, ntr = 1L,  beta = c(-0.2, 0.7), su = 0.7, phi = RESID_SD),
+  gaussian       = list(nr = 60L, spr = 10L, ntr = 1L,  beta = c(-0.2, 0.7), su = 0.7, phi = RESID_VAR),
   neg_binomial_2 = list(nr = 60L, spr = 10L, ntr = 1L,  beta = c( 0.3, 0.6), su = 0.5, phi = 3.0),
   gamma          = list(nr = 60L, spr = 10L, ntr = 1L,  beta = c( 0.3, 0.6), su = 0.5, phi = 3.0),
   beta           = list(nr = 60L, spr = 10L, ntr = 1L,  beta = c( 0.0, 0.6), su = 0.5, phi = 6.0)
@@ -559,7 +570,7 @@ test_that("a CCD-integrated joint fit's hyperparameter interval covers at the no
   # d = 4 -- whatever the data. Reading the interval from the design's MOMENTS
   # puts it at nominal, and takes the width off the design.
   cfg <- list(nr = 40L, spr = 30L, ntr = 1L, beta = c(-0.2, 0.7), su = 0.7,
-              phi = RESID_SD)
+              phi = RESID_VAR)
   n_seed <- 40L
   for (extra in list(c(0.5, 0.35), c(0.5, 0.35, 0.25))) {
     R <- recov_sweep("gaussian", cfg, n_seed = n_seed, seed_off = 6100L,
@@ -607,7 +618,7 @@ test_that("joint fixed-effect intervals cover at the nominal rate", {
 # off. Everything else -- design, response, grid, inner solve -- is shared, so
 # the difference between the two tallies is the refinement's.
 LCCD_CFG <- list(nr = 40L, spr = 30L, ntr = 1L, beta = c(-0.2, 0.7), su = 0.7,
-                 phi = RESID_SD)
+                 phi = RESID_VAR)
 LCCD_SIM <- sim_re_crossed(c(0.5, 0.35, 0.25))
 
 test_that("local-CCD refinement engages on the four-axis joint recovery fixture", {
@@ -778,10 +789,9 @@ test_that("a locally CCD-refined outer grid covers as the grid it refined does",
 # diagnostic reading the coarse grid's Gaussian proposal correctly, on the axis
 # whose interval refinement sharpens fourfold -- an axis the slope does not read.
 #
-# WHAT THE SLOPE READS is the residual scale. `recov_draw_y()` used to draw
-# `rnorm(N, 0, sqrt(phi))`, the residual-VARIANCE convention `tulpa()` takes,
-# while every fitter here goes to a direct door reading `phi` as the residual SD
-# -- so a gaussian arm was fitted at a quarter of the variance it simulated, and
+# WHAT THE SLOPE READS is the residual scale. At gcol33/tulpa#332 the draw and
+# the door disagreed about which quantity `phi` was -- so a gaussian arm was
+# fitted at a quarter of the variance it simulated, and
 # every interval was narrow by sqrt(2) in whatever part of its variance the
 # residual carries. For the intercept that part is under one percent, its
 # posterior variance being the integrated RE-SD grid's: crossing the conventions
@@ -921,7 +931,8 @@ lccd_arm_read <- function(dm, arm, z = 1.96) {
 # All four arms over `n_seed` seeds at one base-grid resolution: per-arm sigma_1
 # coverage and mean width, and the same pair for each coefficient. One fit per
 # seed serves every arm.
-lccd_arm_sweep <- function(levels, n_seed, seed_off = 8100L) {
+lccd_arm_sweep <- function(levels, n_seed, seed_off = 8100L,
+                           hyperprior = "flat") {
   sg   <- exp(seq(log(0.2), log(1.5), length.out = 7))
   arms <- c("shipped", "mass", "location", "pair")
   p    <- length(LCCD_CFG$beta)
@@ -933,7 +944,8 @@ lccd_arm_sweep <- function(levels, n_seed, seed_off = 8100L) {
     d  <- LCCD_SIM(seed_off + s, "gaussian", LCCD_CFG$nr, LCCD_CFG$spr,
                    LCCD_CFG$ntr, LCCD_CFG$beta, LCCD_CFG$su, LCCD_CFG$phi)
     dm <- outer_grid_dump(recov_fit_joint_coarse(d, sg, "gaussian", LCCD_CFG,
-                                                 levels = levels))
+                                                 levels = levels,
+                                                 hyperprior = hyperprior))
     # The four arms are OUTER WEIGHT and PLACEMENT rules, and every number
     # below is a comparison between them. The within-cell read is held at
     # `chord` -- not the engine default since 0.0.188 (gcol33/tulpa#357) -- so
@@ -1012,9 +1024,11 @@ test_that("a weight rule and a placement rule reach different halves of the read
 })
 
 # MEASURED, 200 seeds (seed offset 8100, seeds 1-200), one fit per seed per
-# resolution, all four arms read off that fit. sigma_1 is the fit's own 95%
-# interval on block 1's SD, true value 0.7; the coefficients are read at 1.96
-# mixture SDs, nominal 0.95. Coverage counts of 200 and mean interval width:
+# resolution, all four arms read off that fit, under a flat outer prior
+# (`dev_notes/issue331/coverage331.R`, which also runs the proper one).
+# sigma_1 is the fit's own 95% interval on block 1's SD, true value 0.7; the
+# coefficients are read at 1.96 mixture SDs, nominal 0.95. Coverage counts of
+# 200 and mean interval width:
 #
 #                  4 levels (256)    5 levels (625)    6 levels (1296)
 #   sigma_1
@@ -1028,6 +1042,11 @@ test_that("a weight rule and a placement rule reach different halves of the read
 #   slope
 #     shipped      191   0.08533     191   0.08534     191   0.08534
 #     mass         191   0.08540     191   0.08538     191   0.08535
+#
+# Under the proper default prior every coverage count is unchanged except
+# location (128 / 128 / 115) and pair (172 / 175 / 150), and the sigma_1 widths
+# are shipped 1.0592 / 0.8763 / 0.6352, mass 1.1039 / 0.9091 / 0.6932, location
+# 0.5071 / 0.5221 / 0.2915 and pair 0.4692 / 0.4752 / 0.3421.
 #
 # COVERAGE ALONE IS THE WRONG STATISTIC HERE and the table is read two-sided:
 # the shipped arm is at or above nominal everywhere, so an arm earns promotion
@@ -1160,10 +1179,11 @@ test_that("the four-axis crossed fixture is where the box read is weakest", {
     d <- LCCD_SIM(8100L + s, "gaussian", LCCD_CFG$nr, LCCD_CFG$spr,
                   LCCD_CFG$ntr, LCCD_CFG$beta, LCCD_CFG$su, LCCD_CFG$phi)
     f <- recov_fit_joint_coarse(d, sg, "gaussian", LCCD_CFG, levels = 4L)
-    dm <- .nl_axis_domains(f)
+    geo <- .nl_axis_geometry(f)
     for (a in rownames(cov)) {
       q <- .nl_axis_quantiles(f$theta_grid, f$log_marginal, f$refining_axis,
-                              probs = probs, domains = dm, within = a)
+                              probs = probs, domains = geo$domain,
+                              atoms = geo$atom, within = a)
       lo <- vapply(seq_along(truth), function(j) as.numeric(q$ci_lo[[j]]),
                    numeric(1))
       hi <- vapply(seq_along(truth), function(j) as.numeric(q$ci_hi[[j]]),
@@ -1195,7 +1215,12 @@ test_that("the four-axis crossed fixture is where the box read is weakest", {
 # standard error is phi / sqrt(Sxx) under the SD convention and sqrt(phi / Sxx)
 # under the variance one. Three values of phi separate them, since the two
 # agree at phi = 1.
-test_that("both nested doors read a gaussian phi as the residual SD", {
+#
+# This is the pin the header note points at, and it fired: `657f179` moved both
+# doors to the variance and left this file, and every gaussian fixture in it,
+# describing the SD (gcol33/tulpa#661). The expectation is the variance
+# convention now, and it is the assertion -- not the door -- that says which.
+test_that("both nested doors read a gaussian phi as the residual variance", {
   skip_on_cran()
   set.seed(99L)
   N <- 600L
@@ -1215,7 +1240,7 @@ test_that("both nested doors read a gaussian phi as the residual SD", {
     for (f in list(recov_fit_single(d, sgt, "gaussian", cfg),
                    recov_fit_joint(d, sgt, "gaussian", cfg))) {
       se <- sqrt(diag(solve(f$grid_hessians[[1L]])))
-      expect_equal(se[[2L]], phi / sqrt(Sxx), tolerance = 1e-3)
+      expect_equal(se[[2L]], sqrt(phi / Sxx), tolerance = 1e-3)
     }
   }
 })

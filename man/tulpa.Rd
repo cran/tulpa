@@ -17,6 +17,7 @@ tulpa(
   phi2 = NULL,
   beta_prior = NULL,
   re_prior = NULL,
+  hyperprior = c("proper", "flat"),
   ziformula = NULL,
   zi_prior = NULL,
   warm_start = NULL,
@@ -48,9 +49,11 @@ because its intervals are conditional on that estimate rather than marginal
 over it.}
 
 \item{sigma_re}{Random-effect SDs to condition on: length 1 (recycled) or one
-per RE term. Defaults to 1 per term with a message. Ignored by the backends
-that determine the covariance themselves (\code{"eb"}, \code{re_cov_nested},
-\code{re_cov_gibbs}, \code{gibbs}, \code{agq}), which warn if it is supplied anyway.}
+per RE term. Defaults to 1 per term with a warning. Ignored by every
+backend that DETERMINES the RE scale itself -- by integrating it
+(\code{re_cov_nested}, \code{re_cov_gibbs}), sampling it (\code{gibbs} and the ModelData
+samplers, which carry \code{log_sigma_re} in the latent vector) or maximizing
+over it (\code{eb}, \code{agq}) -- and supplying it there warns.}
 
 \item{n_trials}{Binomial denominators (length \code{nrow(data)}), or \code{NULL}.}
 
@@ -62,10 +65,17 @@ row). Supported on the non-spatial Laplace path (\code{mode = "laplace"}) and
 the log-posterior samplers (\code{mala}, \code{imh_laplace}, \code{pathfinder}); other
 backends reject weights loudly.}
 
-\item{phi}{Dispersion/precision passed to the family (residual variance for
-gaussian and lognormal, size for neg_binomial_2, precision for beta,
-scale for t). The variance convention holds across every backend; the
-SD-parameterized compiled kernels receive \code{sqrt(phi)} at the boundary.}
+\item{phi}{Dispersion passed to the family, held fixed. One convention at
+every door: for \code{gaussian} / \code{lognormal} this is the residual VARIANCE
+(the SD is \code{sqrt(phi)}), for \code{neg_binomial_2} the size, \code{gamma} the
+shape, \code{beta} the precision, \code{t} the scale; \code{binomial} and \code{poisson}
+ignore it. The compiled kernels parameterize the two variance families by
+the residual SD and are handed \code{sqrt(phi)} at the boundary.
+
+Defaulted, it conditions at 1 and says so with a warning, since for a
+family that reads a dispersion that is a modelling choice rather than a
+neutral value. \code{fit$phi_estimated} records whether the value on the fit
+was estimated or conditioned on.}
 
 \item{estimate_phi}{Estimate the dispersion from the data instead of
 conditioning on \code{phi}, which then supplies the starting value. \code{log(phi)}
@@ -100,14 +110,25 @@ as \verb{$beta_prior}.}
 \item{re_prior}{Optional \code{list()} of random-effect / variance-component
 hyperpriors (statistical, so they live in the signature rather than in
 \code{control}). Recognised entries, each consumed by the backend that needs it:
-\code{hyperprior} (\code{"flat"} default or \code{"pc_lkj"}, \code{mode = "laplace"} random
-slopes and \code{mode = "eb"} -- see \code{\link[=tulpa_re_cov_nested]{tulpa_re_cov_nested()}}), \code{prior_sigma}
-(PC-prior anchor \code{c(U, alpha)} on a free RE covariance SD, used when
-\code{hyperprior = "pc_lkj"}), \code{eta} (LKJ concentration for a correlated RE
-covariance, same condition), \code{prior_df} / \code{prior_scale} (inverse-Wishart
-on the RE covariance, \code{control$re_cov = "gibbs"}), \code{prior_sigma_scale}
-(half-Cauchy scale on the RE SD for \code{mode = "gibbs"}), and \code{sigma_re_scale}
-(half-Cauchy scale on the RE / BYM2 SD for the ModelData samplers).}
+\code{prior_sigma} (PC-prior anchor \code{c(U, alpha)} on a free RE covariance SD,
+used when \code{hyperprior = "proper"}), \code{eta} (LKJ concentration for a
+correlated RE covariance, same condition), \code{prior_df} / \code{prior_scale}
+(inverse-Wishart on the RE covariance, \code{control$re_cov = "gibbs"}),
+\code{prior_sigma_scale} (half-Cauchy scale on the RE SD for \code{mode = "gibbs"}),
+and \code{sigma_re_scale} (half-Cauchy scale on the RE / BYM2 SD for the
+ModelData samplers).}
+
+\item{hyperprior}{The outer hyperparameter prior, \code{"proper"} (default) or
+\code{"flat"}, forwarded to every route that integrates or maximizes over
+hyperparameters: the nested-Laplace path (see \code{\link[=tulpa_nested_laplace]{tulpa_nested_laplace()}}),
+the SPDE path (\code{\link[=fit_spde]{fit_spde()}}), and the random-effect covariance routes
+(\code{mode = "laplace"} with random slopes, \code{\link[=tulpa_re_cov_nested]{tulpa_re_cov_nested()}};
+\code{mode = "eb"}, \code{\link[=tulpa_eb]{tulpa_eb()}}). \code{"proper"} is each route's normalised default
+(the PC prior on a scale, the PC range prior, PC + LKJ over a free
+covariance); \code{"flat"} folds none of the engine's own, so the fit reports no
+evidence. A density the call states applies under either. Every other
+backend carries priors of its own, and \code{"flat"} there is an error rather
+than a choice that silently does nothing.}
 
 \item{ziformula}{Optional one-sided formula for the zero-inflation
 probability, e.g. \code{~ 1} for a constant structural-zero rate or \code{~ x} to
@@ -175,14 +196,31 @@ Polya-Gamma samplers (Tier 1 exact); \code{mode = "auto"} picks this for a
 binomial \code{icar}/\code{bym2} field.
 }}
 
-\item{temporal}{Optional temporal field spec (\code{\link[=temporal_rw1]{temporal_rw1()}},
-\code{\link[=temporal_rw2]{temporal_rw2()}}, or \code{\link[=temporal_ar1]{temporal_ar1()}}), integrated by nested Laplace. A
-plain field routes the single-block temporal kernel; a \code{group_var} panel
-spec fits a separate walk per group sharing one hyperparameter; combined
-with an areal \code{spatial} field it forms an additive space-time joint prior.}
+\item{temporal}{Optional temporal field spec, integrated by nested Laplace
+for the discrete walks and sampled for the continuous ones:
+\code{\link[=temporal_rw1]{temporal_rw1()}}, \code{\link[=temporal_rw2]{temporal_rw2()}}, \code{\link[=temporal_ar1]{temporal_ar1()}} (nested Laplace);
+\code{\link[=temporal_gp]{temporal_gp()}} and \code{\link[=temporal_multiscale]{temporal_multiscale()}}, which are sampler-path only --
+their hyperparameters are sampled jointly with the field, so \code{mode = "auto"}
+routes them to the exact ModelData sampler. A plain field routes the
+single-block temporal kernel; a \code{group_var} panel spec fits a separate walk
+per group sharing one hyperparameter; combined with an areal \code{spatial}
+field it forms an additive space-time joint prior.}
 
-\item{control}{Optional list of backend tuning arguments (e.g. \code{n_iter},
-\code{warmup}, \code{epsilon} for \code{mala}; \code{n_draws} for \code{pathfinder}).}
+\item{control}{Optional list of backend tuning arguments. Each backend
+accepts its own set, checked at the door: \code{n_iter} / \code{warmup} / \code{epsilon}
+(\code{mala}), \code{n_draws} (\code{pathfinder}), \code{n_chains} / \code{max_treedepth} /
+\code{adapt_delta} / \code{mass_matrix} (\code{hmc}), the outer-grid knobs
+\code{?tulpa_nested_laplace} documents (\code{n_per_axis}, \code{prune}, \code{screen_iters},
+\code{diagnose_k}, \code{within_cell}, \code{checkpoint}, the \verb{progress*} family, ...),
+and \code{re_cov} (\code{"nested"} / \code{"gibbs"} / \code{"aghq"}), which selects the
+RE-covariance integrator on any random-effect model.
+
+One statistical knob lives here rather than in the signature: \code{marginal}
+(\code{mode = "eb"} only) turns on the marginal-Laplace covariance correction,
+which widens the reported intervals to account for the hyperparameter
+uncertainty EB conditions on. It is a formal argument of \code{\link[=tulpa_eb]{tulpa_eb()}} and
+is forwarded from \code{control} by \code{tulpa()} alone, so it has no meaning on any
+other backend and is refused there. See \code{\link[=tulpa_eb]{tulpa_eb()}}.}
 
 \item{...}{Reserved for future statistical arguments. Nothing is read from
 it today, so any entry errors: a stray name here is a misspelled argument
@@ -224,7 +262,7 @@ several terms together (\code{(1 + x | g) + (1 | h)}) -- each term becomes a
 covariance block, and any accompanying \code{(1 | g)} term is integrated as a 1x1
 block (nothing is silently conditioned at \code{sigma_re = 1}). \code{mode = "laplace"}
 routes to the nested-Laplace \code{Sigma} integrator (\code{\link[=tulpa_re_cov_nested]{tulpa_re_cov_nested()}},
-CCD design, flat-in-log hyperprior by default -- see \code{re_prior$hyperprior});
+CCD design, PC + LKJ hyperprior by default -- see \code{hyperprior});
 \code{control$re_cov = "gibbs"} switches to the exact
 Metropolis-within-Gibbs debias (\code{\link[=tulpa_re_cov_gibbs]{tulpa_re_cov_gibbs()}}), and
 \code{control$re_cov = "aghq"} keeps the nested integrator but replaces the
@@ -238,10 +276,12 @@ rather than conditioning on \code{sigma_re}; tune it via
 \code{re_prior$prior_sigma_scale} and a mean-zero \code{beta_prior}.
 \item \strong{Latent prior blocks} (\code{latent(tgmrf(...))}) route to the nested-Laplace
 path (Tier 2), which integrates over the block hyperparameters. \code{mode = "auto"} and \code{"structured"} select it automatically when latent blocks are
-present; \code{mode = "nested_laplace"} forces it. At most one random-intercept
-\code{(1 | g)} term may accompany the blocks (model richer grouping as an \code{iid}
-block). Joint multi-arm nested models cannot be expressed by a
-single-response formula -- call \code{\link[=tulpa_nested_laplace_joint]{tulpa_nested_laplace_joint()}} directly.
+present; \code{mode = "nested_laplace"} forces it. Several random-intercept
+\code{(1 | g)} terms may accompany the blocks; the one-term restriction belongs
+to the Polya-Gamma spatial Gibbs sampler (\code{mode = "gibbs"}), which updates
+one RE block alongside the field. Joint multi-arm nested models cannot be
+expressed by a single-response formula -- call
+\code{\link[=tulpa_nested_laplace_joint]{tulpa_nested_laplace_joint()}} directly.
 \item The ModelData sampler kernels (\code{"hmc"}, \code{"ess"}, \code{"sghmc"}, \code{"sgld"},
 \code{"mclmc"}, \code{"smc"}, \code{"vi"}) thread the full latent vector -- fixed effects,
 random effects (all forms), areal spatial (\code{icar} / \code{bym2}), and temporal

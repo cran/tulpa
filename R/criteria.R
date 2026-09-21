@@ -350,6 +350,14 @@ print.tulpa_criteria <- function(x, digits = 1, ...) {
 #' model. With `cdf_lower = NULL` the response is treated as continuous and the
 #' PIT is the draw-averaged CDF.
 #'
+#' Supplying `log_lik` switches to the **leave-one-out** PIT (as in INLA's
+#' `cpo$pit` or `loo::psis_loo()`'s LOO-PIT): each observation's CDF limits are
+#' averaged over draws with PSIS leave-one-out weights (from that
+#' observation's own pointwise log-likelihood) instead of equal weights, so
+#' the PIT does not use the observation to predict itself. A column whose
+#' importance ratio is not all finite falls back to the equal-weight average
+#' for that observation.
+#'
 #' @param cdf Posterior-predictive CDF at the observed value, `P(Y <= y)`. A
 #'   `[n_draws x n_obs]` matrix (averaged over draws here) or an `[n_obs]`
 #'   vector.
@@ -358,15 +366,50 @@ print.tulpa_criteria <- function(x, digits = 1, ...) {
 #' @param jitter If `TRUE` (default) and `cdf_lower` is `NULL`, add a tiny
 #'   uniform jitter to break ties from a discretized CDF; ignored when
 #'   `cdf_lower` is supplied (the interpolation already randomizes).
+#' @param log_lik Optional `[n_draws x n_obs]` matrix of the pointwise
+#'   log-likelihood at each draw. When supplied, the PIT is the
+#'   **leave-one-out** PIT: `cdf` / `cdf_lower` are reweighted by that
+#'   observation's PSIS leave-one-out weights instead of being column-averaged.
+#' @param tail_points Optional override for the PSIS tail size used by the
+#'   leave-one-out weighting (see [tulpa_psis()]); `NULL` uses the automatic
+#'   rule. Ignored unless `log_lik` is supplied.
+#' @param n_threads Number of threads for the leave-one-out weighting (one
+#'   observation per thread). Ignored unless `log_lik` is supplied.
 #' @return Numeric vector of length `n_obs` of PIT values in `[0, 1]`.
-#' @seealso [tulpa_criteria()]
+#' @seealso [tulpa_criteria()], [tulpa_psis()]
 #' @export
-tulpa_pit <- function(cdf, cdf_lower = NULL, jitter = TRUE) {
+tulpa_pit <- function(cdf, cdf_lower = NULL, jitter = TRUE, log_lik = NULL,
+                       tail_points = NULL, n_threads = 1L) {
   # A vector CDF is one draw; treat it as a 1-row matrix so the kernel's
   # column-mean recovers it. The randomization (runif) runs in cpp_tulpa_pit in
   # the same index order, so results are unchanged under a fixed seed.
   as_mat <- function(z) if (is.matrix(z)) z else matrix(as.numeric(z), 1L)
   cdfm <- as_mat(cdf)
+
+  if (!is.null(log_lik)) {
+    llm <- as_mat(log_lik)
+    if (nrow(llm) != nrow(cdfm)) {
+      stop("`log_lik` and `cdf` must have the same number of draws (rows).",
+           call. = FALSE)
+    }
+    if (ncol(llm) != ncol(cdfm)) {
+      stop("`log_lik` and `cdf` imply different numbers of observations.",
+           call. = FALSE)
+    }
+    clm <- if (is.null(cdf_lower)) cdfm else as_mat(cdf_lower)
+    if (ncol(clm) != ncol(cdfm)) {
+      stop("`cdf_lower` and `cdf` imply different numbers of observations.",
+           call. = FALSE)
+    }
+    tail_len <- .psis_tail_len(nrow(llm), tail_points)
+    pit <- cpp_psis_loo_pit(llm, clm, cdfm, as.integer(tail_len),
+                             as.integer(n_threads))
+    if (is.null(cdf_lower) && isTRUE(jitter)) {
+      pit <- pmin(1, pmax(0, pit + stats::runif(length(pit), 0, 1e-6)))
+    }
+    return(pit)
+  }
+
   if (!is.null(cdf_lower)) {
     clm <- as_mat(cdf_lower)
     if (ncol(clm) != ncol(cdfm)) {
@@ -384,35 +427,102 @@ tulpa_pit <- function(cdf, cdf_lower = NULL, jitter = TRUE) {
 # One-verb doors onto the criteria layer
 # ==============================================================================
 
-#' DIC and CPO
+#' DIC, CPO, WAIC and PSIS-LOO on a fit
 #'
 #' Generic front doors onto the two criteria [tulpa_criteria()] computes that
 #' the \pkg{loo} package owns no generic for. WAIC and PSIS-LOO have theirs
 #' (`loo::waic()`, `loo::loo()`), so a model package registers methods on
 #' those rather than on new names that would mask them.
 #'
+#' `pointwise_loglik()` is the one door onto the `[n_draws x n_obs]` matrix
+#' itself, the input every criterion above is computed from. [compare_models()]
+#' and [model_average()] call it (through an internal wrapper) rather than
+#' assuming the engine's own fit layout, so a model package that registers
+#' `pointwise_loglik.<its fit class>()` -- alongside its own `waic()` / `loo()`
+#' / `dic()` / `cpo()` methods -- reaches model comparison and averaging too.
+#'
 #' The default methods take a draws x observations pointwise log-likelihood
 #' matrix, the same input [tulpa_criteria()] takes. A model package registers a
 #' method taking its own fit object, builds the matrix from the posterior, and
 #' delegates here.
 #'
-#' @param object A pointwise log-likelihood matrix (draws x observations), or a
-#'   fitted model object a method is registered for.
+#' The `tulpa_fit` methods build that matrix from the fit itself, from the same
+#' source `compare_models(criterion = "waic")` reads: a `log_lik` the backend
+#' stored with its draws, else the family density evaluated at posterior draws
+#' of the in-sample linear predictor (sampler draws, the outer-grid mixture of a
+#' nested-Laplace fit, or Gaussian draws at the fixed-effect mode and
+#' covariance). The draws are pinned to a fixed internal seed, so repeated
+#' calls return the same numbers and leave the session RNG untouched.
+#' `dic()` plugs in the posterior mean of the linear predictor, so its
+#' `p_dic` counts effective parameters in the linear predictor's
+#' parameterization; where the fit stored its `log_lik` and carries no linear
+#' predictor draws, the DIC fields are `NA` and `dbar` is still reported.
+#' A fit with no pointwise log-likelihood (no stored response, a family that is
+#' not one built-in family name, or a linear predictor the fit cannot
+#' reproduce) is refused with an error naming the fit's class and the reason.
+#'
+#' `loo::waic()` and `loo::loo()` dispatch to the `tulpa_fit` methods once
+#' \pkg{loo} is loaded, and return \pkg{loo}'s own `waic` / `psis_loo` objects,
+#' so [loo::loo_compare()] reads them. On an MCMC chain fit `loo()` passes
+#' relative effective sample sizes computed over the fit's chains; on an i.i.d.
+#' or approximation fit the draws are independent and `r_eff` is 1.
+#'
+#' @param object,x A pointwise log-likelihood matrix (draws x observations), or
+#'   a fitted model object a method is registered for, such as a `tulpa_fit`.
 #' @param loglik_at_mean Length-`n_obs` vector of pointwise log-likelihoods at
 #'   the posterior mean of the parameters. Required for DIC's plug-in deviance;
 #'   without it the DIC fields are `NA`.
-#' @param ... Passed to [tulpa_criteria()] (e.g. `group`, `chunk_size`).
-#' @return A `tulpa_criteria` object.
+#' @param ndraws Number of posterior draws the matrix is evaluated at. Defaults
+#'   to all stored draws, or 400 on the draw-free Laplace tier; a smaller
+#'   number subsamples the stored ones. Read by the `tulpa_fit` method of
+#'   `pointwise_loglik()`, which is the door the criteria below reach the
+#'   matrix through.
+#' @param ... For `dic()` and `cpo()`, passed to [tulpa_criteria()] (e.g.
+#'   `group`, `chunk_size`). For `waic()` and `loo()`, passed to \pkg{loo}'s
+#'   matrix methods (e.g. `cores`, `save_psis`).
+#' @return `dic()` and `cpo()` return a `tulpa_criteria` object. `waic()`
+#'   returns a \pkg{loo} `waic` object and `loo()` a \pkg{loo} `psis_loo`
+#'   object.
 #' @seealso [tulpa_criteria()] for every criterion at once and for what the LOO
-#'   unit means.
+#'   unit means; [compare_models()] to rank several fits.
 #' @examples
 #' set.seed(1)
 #' y  <- rnorm(40)
 #' mu <- matrix(rnorm(200 * 40, sd = 0.2), 200, 40)
 #' ll <- dnorm(matrix(y, 200, 40, byrow = TRUE), mean = mu, log = TRUE)
 #' cpo(ll)
+#' \donttest{
+#' d <- data.frame(x = rnorm(120))
+#' d$y <- rpois(120, exp(0.4 + 0.6 * d$x))
+#' fit <- tulpa(y ~ x, data = d, family = "poisson", mode = "laplace")
+#' dic(fit)
+#' cpo(fit)$lpml
+#' if (requireNamespace("loo", quietly = TRUE)) loo::waic(fit)
+#' }
 #' @name criteria_doors
 NULL
+
+#' @rdname criteria_doors
+#' @export
+pointwise_loglik <- function(object, ...) {
+  UseMethod("pointwise_loglik")
+}
+
+#' @rdname criteria_doors
+#' @export
+pointwise_loglik.default <- function(object, ...) {
+  stop(sprintf(paste0("pointwise_loglik(): no method for an object of ",
+                      "class %s; a model package registers ",
+                      "pointwise_loglik.<its fit class>()."),
+               paste(class(object), collapse = "/")), call. = FALSE)
+}
+
+#' @rdname criteria_doors
+#' @export
+pointwise_loglik.tulpa_fit <- function(object, ndraws = NULL, ...) {
+  .tulpa_pointwise_loglik(object, ndraws = ndraws,
+                          caller = "pointwise_loglik()")
+}
 
 #' @rdname criteria_doors
 #' @export
@@ -423,7 +533,15 @@ dic <- function(object, ...) {
 #' @rdname criteria_doors
 #' @export
 dic.default <- function(object, loglik_at_mean = NULL, ...) {
+  .criteria_matrix_or_stop(object, "dic()")
   tulpa_criteria(object, criteria = "dic", loglik_at_mean = loglik_at_mean, ...)
+}
+
+#' @rdname criteria_doors
+#' @export
+dic.tulpa_fit <- function(object, ...) {
+  parts <- .tulpa_loglik_parts(object, caller = "dic()")
+  dic.default(parts$loglik, loglik_at_mean = parts$loglik_at_mean, ...)
 }
 
 #' @rdname criteria_doors
@@ -435,6 +553,156 @@ cpo <- function(object, ...) {
 #' @rdname criteria_doors
 #' @export
 cpo.default <- function(object, ...) {
+  .criteria_matrix_or_stop(object, "cpo()")
   tulpa_criteria(object, criteria = c("loo", "cpo", "lpml"),
                  pointwise = TRUE, ...)
+}
+
+#' @rdname criteria_doors
+#' @export
+cpo.tulpa_fit <- function(object, ...) {
+  cpo.default(.tulpa_pointwise_loglik(object, caller = "cpo()"), ...)
+}
+
+#' @rdname criteria_doors
+#' @exportS3Method loo::waic
+waic.tulpa_fit <- function(x, ...) {
+  loo::waic(.tulpa_pointwise_loglik(x, caller = "waic()"), ...)
+}
+
+#' @rdname criteria_doors
+#' @exportS3Method loo::loo
+loo.tulpa_fit <- function(x, ...) {
+  ll <- .tulpa_pointwise_loglik(x, caller = "loo()")
+  loo::loo(ll, r_eff = .tulpa_loglik_r_eff(x, ll), ...)
+}
+
+# The default doors take a pointwise log-likelihood; anything else reaching them
+# is an object no method is registered for, and is named as such.
+.criteria_matrix_or_stop <- function(object, caller) {
+  if (inherits(object, "tulpa_loglik") || is.function(object) ||
+      is.numeric(tryCatch(as.matrix(object), error = function(e) NULL))) {
+    return(invisible(NULL))
+  }
+  stop(sprintf(paste0("%s: `object` must be a numeric draws x observations ",
+                      "log-likelihood matrix, a tulpa_loglik, a column-block ",
+                      "generator, or a fit with a registered method; got an ",
+                      "object of class %s."),
+               caller, paste(class(object), collapse = "/")), call. = FALSE)
+}
+
+# The pointwise log-likelihood of a fit, [n_draws x n_obs], with the
+# log-likelihood at the posterior-mean predictors DIC reads (NULL where the
+# backend stored its `log_lik` directly). A stored `log_lik` wins, then the
+# two-process `log_lik_num` + `log_lik_denom`; a categorical fit evaluates the
+# log probability of each observed class at its stored parameter draws;
+# otherwise the built-in family density is evaluated at the fit's in-sample
+# linear-predictor draws. The draws are pinned to a fixed seed so a criteria
+# read is repeatable and RNG-neutral. A fit with no pointwise log-likelihood is
+# refused, naming its class and the reason.
+.tulpa_loglik_parts <- function(object, ndraws = NULL,
+                                caller = "pointwise log-likelihood") {
+  refuse <- function(why) {
+    backend <- if (is.list(object)) object[["backend"]]
+    stop(sprintf("%s: the fit of class %s%s has no pointwise log-likelihood: %s.",
+                 caller, paste(class(object), collapse = "/"),
+                 if (is.null(backend)) "" else sprintf(" (backend '%s')", backend),
+                 why), call. = FALSE)
+  }
+  if (!is.list(object)) refuse("it is not a fitted-model object")
+
+  draws <- object[["draws"]]
+  if (is.list(draws) && !is.data.frame(draws)) {
+    proc <- Filter(Negate(is.null), draws[c("log_lik_num", "log_lik_denom")])
+    ll <- draws[["log_lik"]] %||% (if (length(proc)) Reduce(`+`, proc))
+    if (!is.null(ll)) return(list(loglik = as.matrix(ll), loglik_at_mean = NULL))
+  }
+
+  # The response and the family, resolved the one way the predictive readers
+  # resolve them: flat on a `tulpa()` fit, on the arm of a one-arm joint fit
+  # (gcol33/tulpa#850). A fit with no single response process resolves neither
+  # and falls through to the refusals below, which name what is missing.
+  proc   <- tryCatch(.tulpa_response_process(object, caller),
+                     error = function(e) NULL)
+  y      <- proc$y      %||% object[["y"]]
+  family <- proc$family %||% object[["family"]]
+  if (is.null(y)) refuse("it stores no response `$y`")
+  if (inherits(object, "tulpa_categorical")) {
+    # The class probabilities are a function of the parameter vector through
+    # linear predictors (and, ordinal, the cutpoints), so the posterior-mean
+    # predictors are those of the posterior-mean parameter vector.
+    theta <- object[["draws"]]
+    if (!is.null(ndraws) && ndraws < nrow(theta)) {
+      .preserve_seed_in_frame()
+      set.seed(285603L)
+      theta <- theta[sample.int(nrow(theta), ndraws), , drop = FALSE]
+    }
+    return(list(
+      loglik = .categorical_loglik(object, theta),
+      loglik_at_mean = as.numeric(
+        .categorical_loglik(object, matrix(colMeans(theta), 1L)))))
+  }
+  if (!is.character(family) || length(family) != 1L) {
+    refuse(paste0("its family is not a single built-in family name, so there ",
+                  "is no engine density to evaluate at the draws"))
+  }
+  eta <- tryCatch(.tulpa_eta_draws(object, ndraws = ndraws,
+                                   synth_seed = 285603L),
+                  error = identity)
+  if (inherits(eta, "error")) {
+    refuse(paste0("its linear-predictor draws could not be formed (",
+                  conditionMessage(eta), ")"))
+  }
+  if (ncol(eta) != length(y)) {
+    refuse(sprintf(paste0("its linear predictor has %d columns for %d ",
+                          "responses"), ncol(eta), length(y)))
+  }
+  ll <- tryCatch(.tulpa_eta_loglik(object, eta), error = identity)
+  if (inherits(ll, "error")) {
+    refuse(paste0("the '", family, "' density could not be evaluated (",
+                  conditionMessage(ll), ")"))
+  }
+  zi <- attr(eta, "logit_zi")
+  at_mean <- .tulpa_eta_loglik(
+    object, matrix(colMeans(eta), 1L),
+    logit_zi = if (!is.null(zi)) matrix(colMeans(zi), 1L))
+  list(loglik = ll, loglik_at_mean = as.numeric(at_mean))
+}
+
+# The [n_draws x n_obs] matrix alone, for the criteria readers that do not
+# need the linear predictor.
+.tulpa_pointwise_loglik <- function(object, ndraws = NULL,
+                                    caller = "pointwise log-likelihood") {
+  .tulpa_loglik_parts(object, ndraws = ndraws, caller = caller)$loglik
+}
+
+# The fit's response log-density at each row of a [n_rows x n_obs] linear
+# predictor, against the stored response, trials and dispersion. On a
+# zero-inflated fit `logit_zi` is the structural-zero logit drawn with `eta`
+# (the "logit_zi" attribute .tulpa_eta_draws() attaches), and the density is the
+# mixture's.
+.tulpa_eta_loglik <- function(object, eta, logit_zi = attr(eta, "logit_zi")) {
+  S <- nrow(eta)
+  n <- ncol(eta)
+  proc <- .tulpa_response_process(object, "pointwise log-likelihood")
+  Y  <- matrix(as.numeric(proc$y), S, n, byrow = TRUE)
+  NT <- matrix(as.numeric(proc$n_trials %||% 1), S, n, byrow = TRUE)
+  # The same per-replicate dispersion posterior_predict() samples at, so a fit
+  # that integrated a dispersion axis scores its draws under the value each one
+  # was drawn at rather than under one scalar (gcol33/tulpa#825). A fit with no
+  # such axis gets its scalar back and the density is evaluated unchanged.
+  phi <- .tulpa_phi_draws(object, proc, attr(eta, "cells"), S)
+  PHI <- if (length(unique(phi)) == 1L) phi[1L] else matrix(phi, S, n)
+  ll <- .response_loglik(eta, logit_zi, Y, proc$family, n_trials = NT,
+                         phi = PHI, phi2 = proc$phi2)
+  dim(ll) <- dim(eta)
+  ll
+}
+
+# Relative effective sample sizes for PSIS-LOO. Rows of the pointwise matrix
+# are the fit's own draws in stored order whenever the fit carries draws, so on
+# an MCMC chain fit they are read per chain; independent draws have r_eff = 1.
+.tulpa_loglik_r_eff <- function(fit, ll) {
+  if (!.tulpa_is_chain(fit) || is.null(.fit_draws(fit))) return(1)
+  loo::relative_eff(exp(ll), chain_id = .tulpa_chain_id(fit, nrow(ll)))
 }

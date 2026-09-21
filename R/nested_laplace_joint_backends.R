@@ -41,7 +41,8 @@
              fixed_block_p = 0L,
              fixed_block_constraints = NULL,
              debias = NULL,
-             cila = NULL) {
+             cila = NULL,
+             screen_log_offset = NULL) {
         .joint_call_kernel_via_multi(backend_name, arms, prior, cp, grids,
                                       max_iter, tol, n_threads,
                                       x_init, store_Q, arm_names,
@@ -60,7 +61,8 @@
                                       fixed_block_constraints =
                                           fixed_block_constraints,
                                       debias = debias,
-                                      cila = cila)
+                                      cila = cila,
+                                      screen_log_offset = screen_log_offset)
     }
 }
 
@@ -175,7 +177,8 @@
                                           fixed_block_p = 0L,
                                           fixed_block_constraints = NULL,
                                           debias = NULL,
-                                          cila = NULL) {
+                                          cila = NULL,
+                                          screen_log_offset = NULL) {
     n_arms <- length(arms)
     blk <- prior; blk$type <- type
     .nl_check_block_fields(blk, "joint_single")
@@ -294,7 +297,8 @@
         fixed_block_p = as.integer(fixed_block_p),
         fixed_block_constraints = fixed_block_constraints,
         debias = debias,
-        cila = cila
+        cila = cila,
+        screen_log_offset = screen_log_offset
     )
     # Strip the C++-side theta_grid / axis_offsets -- the backend's
     # `theta_grid()` callback rebuilds them with the user-facing bare
@@ -318,20 +322,33 @@
 #      pruned). The kernel flags this in `prune_argmax_disagree`.
 #   2) cheap-vs-full gap collapse: the kept set's posterior collapses onto one
 #      cell (low quadrature ESS) AND the cheap screen badly mis-estimated that
-#      cell's log-marginal (`prune_cheap_full_gap` large relative to the spread
-#      of full log-marginals across kept cells). A large gap on the cell the
-#      whole posterior sits on means the screen could just as easily have
-#      ranked it below the threshold and pruned it.
+#      cell's log-marginal (`prune_cheap_full_gap` large relative to the margin
+#      the screen discarded cells by). A large gap on the cell the whole
+#      posterior sits on means the screen could just as easily have ranked it
+#      below the threshold and pruned it.
+#
+# What the gap is judged against is the screen's own CUT, `prune_log_gap_cut`:
+# the number of nats below the best cheap cell at which the tolerance started
+# dropping cells. An error larger than that cut is an error large enough to have
+# moved a dropped cell across it, which is exactly the failure the trigger is
+# for. The spread of the log-marginals across KEPT cells cannot serve: it is a
+# property of the set the gate is meant to validate, so on a steep surface it
+# makes the threshold enormous (a 340-nat mis-estimate judged small against a
+# 49000-nat threshold read off a 98000-nat kept spread) and the trigger cannot
+# bound the error on the set it discarded. A result carrying no cut -- an older
+# kernel, or a hand-built one -- falls back to the kept spread.
 #
 # `res` is the pruned kernel result (already carries the prune_* fields).
 # `resolve_full` is a zero-argument thunk re-running the SAME kernel call with
-# `prune_tol = 0` (the full grid). Returns either `res` (gate passed) or the
+# `prune_tol = 0` (the full grid). `fn` is the front door the fit came in
+# through, so the warning names the function whose `control` the reader set. Returns either `res` (gate passed) or the
 # full-grid result (gate tripped). When the gate trips, the returned result
 # carries `prune_fallback_triggered = TRUE` and `prune_fallback_reason`.
 .joint_prune_safety_gate <- function(res, resolve_full,
                                       gap_abs_floor = 5.0,
                                       gap_frac = 0.5,
-                                      ess_collapse_frac = 0.05) {
+                                      ess_collapse_frac = 0.05,
+                                      fn = "tulpa_nested_laplace_joint()") {
     # No prune ran (prune off, prune_tol = 0, or single-cell grid): nothing
     # to gate. The kernel only emits prune_mask when it actually screened.
     if (is.null(res$prune_mask)) return(res)
@@ -339,8 +356,16 @@
     disagree <- isTRUE(res$prune_argmax_disagree)
 
     # Gap-collapse trigger. Quadrature ESS over the kept (finite-weight)
-    # cells; "collapse" = ESS below a small fraction of the kept count.
+    # cells; "collapse" = ESS below a small fraction of the kept count. The ESS
+    # is of the posterior the screen ranked: the kernel's log-marginal with the
+    # offset it screened by (hyperprior + cell measure) in place of any
+    # hyperprior already folded in.
     lm   <- res$log_marginal
+    off  <- res$prune_screen_log_offset
+    if (length(off) == length(lm)) {
+        folded <- .nl_log_hyperprior_folded(res, length(lm))
+        lm <- lm - (if (is.null(folded)) 0 else folded) + off
+    }
     kept <- is.finite(lm)
     n_kept <- sum(kept)
     gap_collapse <- FALSE
@@ -350,7 +375,12 @@
         ess <- if (sum(w^2, na.rm = TRUE) > 0) (sum(w, na.rm = TRUE)^2) / sum(w^2, na.rm = TRUE) else 1
         lm_kept <- lm[kept]
         lm_spread <- if (n_kept > 1L) diff(range(lm_kept)) else 0
-        gap_thresh <- max(gap_abs_floor, gap_frac * lm_spread)
+        cut <- res$prune_log_gap_cut
+        gap_thresh <- if (length(cut) == 1L && is.finite(cut) && cut > 0) {
+            max(gap_abs_floor, cut)
+        } else {
+            max(gap_abs_floor, gap_frac * lm_spread)
+        }
         gap_collapse <- (ess <= max(1.0, ess_collapse_frac * n_kept)) &&
                         (res$prune_cheap_full_gap > gap_thresh)
     }
@@ -365,8 +395,8 @@
         "kept posterior collapses onto a cell whose cheap-vs-full log-marginal gap is large"
     }
     warning(sprintf(
-        "tulpa_nested_laplace_joint(): cheap-pass prune is unreliable for this fit (%s); falling back to the full grid. Set control$prune = FALSE to silence this, or leave it -- the full grid is correct.",
-        reason), call. = FALSE)
+        "%s: cheap-pass prune is unreliable for this fit (%s); falling back to the full grid. Set control$prune = FALSE to silence this, or leave it -- the full grid is correct.",
+        fn, reason), call. = FALSE)
 
     full <- resolve_full()
     full$prune_fallback_triggered <- TRUE

@@ -24,6 +24,8 @@ void update_spatial_icar(
     const IntegerVector& group,
     const PgAdjacency& adj,
     double tau,
+    double beta0,
+    double prior_beta_sd,
     NumericVector& phi,
     double& removed_mean
 ) {
@@ -33,6 +35,7 @@ void update_spatial_icar(
   std::vector<double> sum_omega(J, 0.0), sum_resid(J, 0.0);
   pg_accumulate_stats(N, group.begin(), J, omega.begin(), kappa.begin(),
                       offset.begin(), sum_omega.data(), sum_resid.data());
+  PgInterceptLevel level(beta0, 0.0, prior_beta_sd, 1.0, phi.begin(), J);
 
   // Single-site sweep. Each neighbour sum reads the current phi, so a
   // neighbour the sweep has already reached contributes its new value and one
@@ -53,12 +56,16 @@ void update_spatial_icar(
         prec = sum_omega[j] + PG_ICAR_ISOLATED_PREC;
         mean_num = sum_resid[j];
       } else {
+        level.moved(phi[j], 0.0);
         phi[j] = 0.0;
         continue;
       }
     }
+    level.add(phi[j], prec, mean_num);
 
-    phi[j] = R::rnorm(mean_num / prec, std::sqrt(1.0 / prec));
+    const double x_new = R::rnorm(mean_num / prec, std::sqrt(1.0 / prec));
+    level.moved(phi[j], x_new);
+    phi[j] = x_new;
   }
 
   // Component-level block update. Shifting every unit of one graph component
@@ -119,16 +126,7 @@ double update_tau_icar(
     double prior_rate
 ) {
   const int J = adj.n;
-
-  // phi' Q phi = sum_i n_i phi_i^2 - 2 sum_{i ~ j, j > i} phi_i phi_j
-  double quad_form = 0.0;
-  for (int i = 0; i < J; i++) {
-    quad_form += adj.degree(i) * phi[i] * phi[i];
-    for (int e = adj.row_ptr[i]; e < adj.row_ptr[i + 1]; e++) {
-      const int j = adj.col_idx[e];
-      if (j > i) quad_form -= 2.0 * phi[i] * phi[j];
-    }
-  }
+  const double quad_form = pg_icar_quad_form(phi.begin(), adj);
 
   const double post_shape = prior_shape + (J - adj.n_components) / 2.0;
   const double post_rate = prior_rate + quad_form / 2.0;
@@ -160,6 +158,8 @@ void update_spatial_bym2(
     double sigma_spatial,
     double rho,
     double scale_factor,
+    double beta0,
+    double prior_beta_sd,
     NumericVector& u,
     double& removed_mean
 ) {
@@ -184,6 +184,9 @@ void update_spatial_bym2(
 
   // Update phi_scaled (structured component with ICAR prior). phi_scaled has
   // unit marginal variance, so the ICAR precision is 1.
+  const double coef = sigma_spatial * sqrt_rho * scale_factor;
+  PgInterceptLevel level(beta0, 0.0, prior_beta_sd, coef,
+                         phi_scaled.begin(), J);
   for (int j = 0; j < J; j++) {
     const int n_j = adj.degree(j);
 
@@ -192,14 +195,17 @@ void update_spatial_bym2(
       neighbor_sum += phi_scaled[adj.col_idx[e]];
     }
 
-    const double coef = sigma_spatial * sqrt_rho * scale_factor;
     const double prior_prec = (n_j > 0) ? n_j : PG_ICAR_ISOLATED_PREC;
     const double data_prec = sum_omega[j] * coef * coef;
 
-    const double post_prec = prior_prec + data_prec;
-    const double post_mean_num = neighbor_sum + sum_resid[j] * coef;
+    double post_prec = prior_prec + data_prec;
+    double post_mean_num = neighbor_sum + sum_resid[j] * coef;
+    level.add(phi_scaled[j], post_prec, post_mean_num);
 
-    phi_scaled[j] = R::rnorm(post_mean_num / post_prec, std::sqrt(1.0 / post_prec));
+    const double x_new =
+        R::rnorm(post_mean_num / post_prec, std::sqrt(1.0 / post_prec));
+    level.moved(phi_scaled[j], x_new);
+    phi_scaled[j] = x_new;
   }
 
   // Centre phi_scaled (sum-to-zero on the structured component) and report the
@@ -253,12 +259,12 @@ double update_rho_bym2(
   int J = phi_scaled.size();
 
   // Evaluate the log-posterior on a grid over rho in (0, 1) and sample.
-  int n_grid = 20;
+  const int n_grid = PG_BYM2_RHO_GRID;
   NumericVector log_probs(n_grid);
   NumericVector rho_vals(n_grid);
 
   for (int k = 0; k < n_grid; k++) {
-    double rho = (k + 0.5) / n_grid;  // Avoid exact 0 and 1
+    double rho = pg_bym2_rho_node(k);
     rho_vals[k] = rho;
 
     double sqrt_rho = bym2_sd_structured(rho);
@@ -275,8 +281,7 @@ double update_rho_bym2(
       log_lik += -0.5 * sum_omega[j] * u_j * u_j + sum_resid[j] * u_j;
     }
 
-    // Beta prior: (alpha-1)*log(rho) + (beta-1)*log(1-rho)
-    double log_prior = (alpha - 1.0) * bym2_log_rho(rho) + (beta - 1.0) * bym2_log1m_rho(rho);
+    double log_prior = pg_bym2_rho_log_kernel(rho, alpha, beta);
 
     log_probs[k] = log_lik + log_prior;
   }
@@ -305,6 +310,15 @@ double update_rho_bym2(
   }
 
   return rho_vals[n_grid - 1];
+}
+
+double pg_bym2_rho_log_prior(double rho, double alpha, double beta) {
+  double m = R_NegInf;
+  for (int k = 0; k < PG_BYM2_RHO_GRID; k++) {
+    const double v = pg_bym2_rho_log_kernel(pg_bym2_rho_node(k), alpha, beta);
+    m = (m == R_NegInf) ? v : std::max(m, v) + std::log1p(std::exp(-std::abs(m - v)));
+  }
+  return pg_bym2_rho_log_kernel(rho, alpha, beta) - m;
 }
 
 // Update sigma_spatial from its Polya-Gamma full conditional given the

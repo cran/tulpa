@@ -36,10 +36,7 @@
 #'     present these take precedence over `sigma`; the off-diagonal enters both
 #'     the joint Hessian (mode finding) and the marginal fixed-effect SE.
 #' @param family Character: `"binomial"`, `"poisson"`, `"neg_binomial_2"`, `"gaussian"`
-#' @param phi Dispersion parameter. For `gaussian` / `lognormal` this is the
-#'   residual VARIANCE (matching the R-side family registry and [tulpa()]);
-#'   the SD-parameterized compiled kernels receive `sqrt(phi)` internally.
-#'   For `neg_binomial_2` the size, `beta` the precision, `t` the scale.
+#' @template phi
 #' @param phi2 Optional second dispersion: the Student-t degrees of freedom
 #'   (`family = "t"`; default 4 when `NULL`). Non-spatial path only.
 #' @param spatial Optional spatial specification (tulpa_spatial object)
@@ -152,12 +149,6 @@ tulpa_laplace <- function(y, n_trials, X,
   n_fixed <- ncol(X)
   family <- .canonical_family(family)
 
-  # tulpa_laplace's `phi` is the residual VARIANCE for gaussian / lognormal
-  # (the convention of the R-side registry, which builds H_beta below); the
-  # compiled kernels parameterize by the residual SD. Convert once here so the
-  # mode-finding and the Hessian describe the same model (the kernel expects the
-  # SD, not the variance).
-  phi_kernel <- .phi_to_kernel(family, phi)
   if (!is.null(phi2)) {
     .phi2_or_stop(family, phi2)
     if (!is.null(spatial)) {
@@ -198,6 +189,13 @@ tulpa_laplace <- function(y, n_trials, X,
   }
 
   if (is.null(n_trials)) n_trials <- rep(1L, n_obs)
+
+  # tulpa_laplace() is a front door in its own right and does not go through
+  # .validate_glm_design(), so it takes the finite guard here. Without it an NA
+  # in `n_trials` or the offset reached the kernel and came back as an all-zero
+  # coefficient vector with no warning (gcol33/tulpa#665).
+  .assert_finite_model_inputs(X, y, n_trials = n_trials, offset = offset,
+                              where = "tulpa_laplace")
 
   # The inner-layer probe and the subspace debias both read the live Cholesky
   # factor of the multi-RE spec solve, which the spatial kernels do not expose.
@@ -241,7 +239,7 @@ tulpa_laplace <- function(y, n_trials, X,
     }
     result <- dispatch_laplace_spatial(
       y, n_trials, X, re_idx, n_re_groups, sigma_re,
-      spatial, family, phi_kernel, max_iter, tol, n_threads, offset = offset,
+      spatial, family, phi, max_iter, tol, n_threads, offset = offset,
       weights = weights
     )
   } else {
@@ -302,7 +300,7 @@ tulpa_laplace <- function(y, n_trials, X,
       re_ngroups = re_ngroups,
       re_sigma_list = re_sigma_list,
       family = family,
-      phi = phi_kernel,
+      phi = .phi_to_kernel(family, phi),
       max_iter = as.integer(max_iter),
       tol = tol,
       n_threads = as.integer(n_threads),
@@ -384,7 +382,8 @@ tulpa_laplace <- function(y, n_trials, X,
           family = family, phi = phi,
           n_trials = n_trials, weights = weights, offset = offset,
           range_val = range_val, sigma_val = sigma_val,
-          re_idx = re_idx, n_re_groups = n_re_groups, sigma_re = sigma_re
+          re_idx = re_idx, n_re_groups = n_re_groups, sigma_re = sigma_re,
+          y = y
         ),
         error = function(e) {
           warning("Marginal H_beta (SPDE Schur) failed: ", conditionMessage(e),
@@ -401,7 +400,8 @@ tulpa_laplace <- function(y, n_trials, X,
           family = family, phi = phi,
           n_trials = n_trials, weights = weights, offset = offset,
           sigma2_gp = sigma2_val, phi_gp = phi_gp_val,
-          re_idx = re_idx, n_re_groups = n_re_groups, sigma_re = sigma_re
+          re_idx = re_idx, n_re_groups = n_re_groups, sigma_re = sigma_re,
+          y = y
         ),
         error = function(e) {
           warning("Marginal H_beta (NNGP Schur) failed: ", conditionMessage(e),
@@ -416,7 +416,8 @@ tulpa_laplace <- function(y, n_trials, X,
           family = family, phi = phi,
           n_trials = n_trials, weights = weights, offset = offset,
           tau = result$tau %||% 1.0, rho = result$rho %||% 0.5,
-          re_idx = re_idx, n_re_groups = n_re_groups, sigma_re = sigma_re
+          re_idx = re_idx, n_re_groups = n_re_groups, sigma_re = sigma_re,
+          y = y
         ),
         error = function(e) {
           warning("Marginal H_beta (CAR_proper Schur) failed: ",
@@ -430,7 +431,8 @@ tulpa_laplace <- function(y, n_trials, X,
           mode = result$mode, X = X, spatial = spatial,
           family = family, phi = phi,
           n_trials = n_trials, weights = weights, offset = offset,
-          re_idx = re_idx, n_re_groups = n_re_groups, sigma_re = sigma_re
+          re_idx = re_idx, n_re_groups = n_re_groups, sigma_re = sigma_re,
+          y = y
         ),
         error = function(e) {
           warning("Marginal H_beta (ICAR/CAR Schur) failed: ",
@@ -447,7 +449,8 @@ tulpa_laplace <- function(y, n_trials, X,
           family = family, phi = phi,
           n_trials = n_trials, weights = weights, offset = offset,
           sigma_spatial = 1.0, rho = 0.5,
-          re_idx = re_idx, n_re_groups = n_re_groups, sigma_re = sigma_re
+          re_idx = re_idx, n_re_groups = n_re_groups, sigma_re = sigma_re,
+          y = y
         ),
         error = function(e) {
           warning("Marginal H_beta (BYM2 Schur) failed: ",
@@ -464,7 +467,8 @@ tulpa_laplace <- function(y, n_trials, X,
           phi_basis = result$phi_basis, lambda_eig = result$lambda_eig,
           sigma2 = result$sigma2 %||% 1.0,
           lengthscale = result$lengthscale %||% 1.0,
-          re_idx = re_idx, n_re_groups = n_re_groups, sigma_re = sigma_re
+          re_idx = re_idx, n_re_groups = n_re_groups, sigma_re = sigma_re,
+          y = y
         ),
         error = function(e) {
           warning("Marginal H_beta (HSGP Schur) failed: ", conditionMessage(e),
@@ -485,7 +489,10 @@ tulpa_laplace <- function(y, n_trials, X,
     colnames(X_zi) %||% paste0("zi_", seq_len(p_zi))
   .finalize_fit(result, backend = "laplace",
                 n_fixed = n_fixed + p_zi,
-                fixed_names = c(colnames(X), zi_names))
+                fixed_names = c(colnames(X), zi_names),
+                data = list(y = y, n_trials = n_trials, model_matrix = X,
+                           family = family, offset = offset,
+                           phi = phi, phi2 = phi2))
 }
 
 
@@ -646,6 +653,15 @@ tulpa_laplace <- function(y, n_trials, X,
 #' length(y)` are enforced in one place -- otherwise a mismatched `n_trials`
 #' (`as.integer(NULL)` -> `integer(0)`) reaches the C++ kernel silently.
 #'
+#' The finite-input guard is enforced here too, which is what carries it to
+#' every door taking this bundle. Left to each door it was wired into three of
+#' them and not into `tulpa_nested_laplace()`, where an NA response is not
+#' rejected but absorbed: every grid cell returns `converged = FALSE` with
+#' `log_marginal = 0`, the softmax over those weights is uniform, a fit comes
+#' back, and the retention step then finds no `Q` on any cell and reports the
+#' user's own missing data to them as a package defect
+#' (gcol33/tulpa#613).
+#'
 #' @param y,X Response vector and design matrix.
 #' @param n_trials Binomial denominators, or `NULL` (defaults to 1 per row).
 #' @param where Caller name for the error message.
@@ -670,6 +686,7 @@ tulpa_laplace <- function(y, n_trials, X,
   if (anyNA(n_trials)) {
     stop(where, ": `n_trials` must be non-NA integers.", call. = FALSE)
   }
+  .assert_finite_model_inputs(X, y, n_trials = n_trials, where = where)
   list(N = N, n_trials = n_trials)
 }
 
@@ -759,6 +776,9 @@ dispatch_laplace_spatial <- function(y, n_trials, X, re_idx, n_re_groups,
   spatial_type <- spatial$type
   off_arg <- if (is.null(offset)) NULL else as.numeric(offset)
   wt_arg  <- if (is.null(weights)) NULL else as.numeric(weights)
+  # The two kernels called directly below take the SD for the variance
+  # families; the `laplace_*_at()` helpers convert at their own kernel call.
+  phi_kernel <- .phi_to_kernel(family, phi)
 
   if (spatial_type %in% c("icar", "car")) {
     adj <- spatial$adjacency
@@ -774,7 +794,7 @@ dispatch_laplace_spatial <- function(y, n_trials, X, re_idx, n_re_groups,
       adj_col_idx = as.integer(adj_sparse$col_idx),
       n_neighbors = as.integer(adj_sparse$n_neighbors),
       tau_spatial = 1.0,
-      family = family, phi = phi,
+      family = family, phi = phi_kernel,
       max_iter = as.integer(max_iter), tol = tol,
       n_threads = as.integer(n_threads),
       offset_nullable = off_arg,
@@ -795,7 +815,7 @@ dispatch_laplace_spatial <- function(y, n_trials, X, re_idx, n_re_groups,
       n_neighbors = as.integer(adj_sparse$n_neighbors),
       sigma_spatial = 1.0, rho = 0.5,
       scale_factor = spatial$scale_factor %||% 1.0,
-      family = family, phi = phi,
+      family = family, phi = phi_kernel,
       max_iter = as.integer(max_iter), tol = tol,
       n_threads = as.integer(n_threads),
       offset_nullable = off_arg,
@@ -865,7 +885,7 @@ dispatch_laplace_spatial <- function(y, n_trials, X, re_idx, n_re_groups,
 #' @param X Fixed-effects design matrix.
 #' @param spatial A `tulpa_spatial` object of type `"spde"`.
 #' @param family Distribution family.
-#' @param phi Dispersion parameter (negbin / gamma only).
+#' @template phi
 #' @param range Spatial range (NULL -> use `spatial$prior_range[1]`).
 #' @param sigma Marginal SD (NULL -> use `spatial$prior_sigma[1]`).
 #' @param max_iter Newton iterations.
@@ -922,7 +942,7 @@ laplace_spde_at <- function(y, n_trials, X, spatial,
       C0_diag = spatial$C0_diag,
       G1_x = spatial$G1_x, G1_i = spatial$G1_i, G1_p = spatial$G1_p,
       kappa = kappa, tau_spde = tau_spde,
-      family = family, phi = phi, alpha = alpha,
+      family = family, phi = .phi_to_kernel(family, phi), alpha = alpha,
       max_iter = as.integer(max_iter), tol = tol,
       n_threads = as.integer(n_threads),
       rational_poles_nullable = if (!rat$is_integer) rat$poles else NULL,
@@ -948,29 +968,31 @@ laplace_spde_at <- function(y, n_trials, X, spatial,
 }
 
 
-#' Map a spatial_gp covariance spec to the Laplace cov_type integer
+#' Map a spatial_gp covariance spec to the engine's cov_type code
 #'
-#' The Laplace NNGP kernel (`laplace_core.cpp`) supports three covariance
-#' functions: 0 = exponential, 1 = Matern(nu=1.5), 2 = Matern(nu=2.5).
-#' Anything else is rejected with a clear error rather than silently
-#' falling back to a different covariance.
+#' One code per kernel, read identically by every path that forms a covariance
+#' from it -- the Laplace NNGP scatter, the Polya-Gamma sweep, the exact-NUTS
+#' NNGP/SVC kernels and the field predictor (`tulpa::CovType` in
+#' `inst/include/tulpa/types.h`, dispatched by `cov_value` in
+#' `inst/include/tulpa/cov_kernel.h`): 0 = exponential, 1 = Matern(nu = 1.5),
+#' 4 = Matern(nu = 2.5). The smoothness travels IN the code, so no path has to
+#' read a `nu` beside it to know which kernel it is evaluating. Anything else is
+#' rejected here rather than silently fitted as a different covariance.
 #'
 #' @keywords internal
-gp_cov_type_for_laplace <- function(spatial) {
+gp_cov_type <- function(spatial) {
   cov <- spatial$cov %||% "exponential"
   if (cov == "exponential") return(0L)
   if (cov == "matern") {
     nu <- spatial$nu %||% 1.5
     if (isTRUE(all.equal(nu, 1.5))) return(1L)
-    if (isTRUE(all.equal(nu, 2.5))) return(2L)
-    stop("NNGP Laplace supports Matern with nu in {1.5, 2.5}; ",
+    if (isTRUE(all.equal(nu, 2.5))) return(4L)
+    stop("NNGP supports Matern with nu in {1.5, 2.5}; ",
          "got nu = ", format(nu), ". Set nu = 1.5 or 2.5.",
          call. = FALSE)
   }
   stop(sprintf(
-    "NNGP Laplace supports cov in {'exponential','matern'}; got '%s'. ",
-    cov),
-    "Use HMC for gaussian / spherical covariances.",
+    "NNGP supports cov in {'exponential','matern'}; got '%s'. ", cov),
     call. = FALSE)
 }
 
@@ -987,7 +1009,7 @@ gp_cov_type_for_laplace <- function(spatial) {
 #' @param X Fixed-effects design matrix.
 #' @param spatial A `tulpa_gp` spec, validated (i.e., `neighbor_info` populated).
 #' @param family Distribution family.
-#' @param phi Dispersion parameter (negbin / gamma only).
+#' @template phi
 #' @param sigma2_gp Marginal variance (NULL -> 1.0).
 #' @param phi_gp Range / decay parameter (NULL -> 1.0).
 #' @param max_iter Newton iterations.
@@ -1012,7 +1034,7 @@ laplace_gp_at <- function(y, n_trials, X, spatial,
   if (is.null(sigma2_gp)) sigma2_gp <- spatial$sigma2_gp %||% 1.0
   if (is.null(phi_gp))    phi_gp    <- spatial$phi_gp    %||% 1.0
 
-  cov_type <- gp_cov_type_for_laplace(spatial)
+  cov_type <- gp_cov_type(spatial)
   ni <- spatial$neighbor_info
   n_spatial <- spatial$n_spatial %||% nrow(spatial$unique_coords)
   nn <- spatial$nn %||% ncol(ni$nn_idx)
@@ -1042,7 +1064,7 @@ laplace_gp_at <- function(y, n_trials, X, spatial,
     phi_gp = phi_gp,
     cov_type = cov_type,
     family = family,
-    phi = phi,
+    phi = .phi_to_kernel(family, phi),
     max_iter = as.integer(max_iter),
     tol = tol,
     n_threads = as.integer(n_threads),
@@ -1095,7 +1117,7 @@ laplace_car_proper_at <- function(y, n_trials, X, spatial,
     adj_row_ptr = as.integer(csr$row_ptr), adj_col_idx = as.integer(csr$col_idx),
     n_neighbors = as.integer(csr$n_neighbors),
     tau_spatial = as.numeric(tau), rho = as.numeric(rho),
-    family = family, phi = phi,
+    family = family, phi = .phi_to_kernel(family, phi),
     max_iter = as.integer(max_iter), tol = tol, n_threads = as.integer(n_threads),
     offset_nullable = if (is.null(offset)) NULL else as.numeric(offset),
     weights_nullable = if (is.null(weights)) NULL else as.numeric(weights)
@@ -1141,7 +1163,7 @@ laplace_hsgp_at <- function(y, n_trials, X, spatial,
     n_re_groups = as.integer(n_re_groups), sigma_re = sigma_re,
     phi_basis = basis$phi_basis, lambda_eig = basis$lambda_eig,
     sigma2 = as.numeric(sigma2), lengthscale = as.numeric(lengthscale),
-    family = family, phi = phi,
+    family = family, phi = .phi_to_kernel(family, phi),
     max_iter = as.integer(max_iter), tol = tol, n_threads = as.integer(n_threads),
     offset_nullable = if (is.null(offset)) NULL else as.numeric(offset),
     weights_nullable = if (is.null(weights)) NULL else as.numeric(weights)

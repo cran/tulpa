@@ -78,7 +78,9 @@ mk_arm <- function(m, fam) {
   lin <- 0.2 + 0.5 * x + 0.8 * field[si]
   y   <- if (fam == "binomial") rbinom(m, 1L, plogis(lin)) else lin + rnorm(m, 0, 0.5)
   list(y = as.numeric(y), n_trials = rep(1L, m), X = cbind(1, x),
-       spatial_idx = si, family = fam, phi = if (fam == "gaussian") 0.5 else 1)
+       spatial_idx = si, family = fam,
+       # residual VARIANCE; the gaussian arm is simulated at residual SD 0.5
+       phi = if (fam == "gaussian") 0.5^2 else 1)
 }
 
 prior <- list(type = "icar", n_spatial_units = S,
@@ -367,11 +369,16 @@ arm2_beta | ... ]` latent layout carried on `fit$arm_layout`); `diagnose_skew
 - `tulpa_psis()` is the native Pareto-smoothed importance-sampling core the
   diagnostic is built on, callable directly on a vector of log importance
   ratios.
-- `mcmc_diagnostics()` is the chain-fit counterpart, the Rhat and ESS surface
-  for sampled fits.
-- `?laplace_diagnostics` documents `gamma_3` and the combined whole-fit
-  verdict `diagnostics()` reports when a fit carries posterior draws.
+- `diagnostics()` routes a chain fit to the Rhat and ESS surface for sampled
+  fits, and an i.i.d. approximation fit to this reliability table; see its
+  "Approximation reliability" sections for `gamma_3` and the combined
+  whole-fit verdict.
 - The inference-modes vignette runs the reliability ladder from a Laplace fit
   through an exact debias, and shows the k-hat on a random-effect covariance
   fit.
+- `vignette("sbc")` is the instrument this one screens for. Everything above
+  scores ONE fit; `sbc()` scores whether the backend's posteriors are
+  calibrated across the generative model, and the two verdicts have been
+  measured to disagree in both directions, so a clean band here is a screen
+  rather than a calibration result.
 ```

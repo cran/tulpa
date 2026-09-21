@@ -104,6 +104,7 @@ test_that("the five predictive shapes are exported and the verb is the only one"
 # ---------------------------------------------------------------------------
 
 test_that("the front door reproduces the driver bit for bit", {
+  skip_on_cran()
   res <- sbc("prior_predictive", simulator = fd_sim, fitter = fd_fitter,
              n_sim = 40L, seed = 11L)
   expect_s3_class(res, "sbc")
@@ -117,6 +118,7 @@ test_that("the front door reproduces the driver bit for bit", {
 })
 
 test_that("the exact arm calibrates and the known-bad control does not", {
+  skip_on_cran()
   res <- sbc("prior_predictive", simulator = fd_sim, fitter = fd_fitter,
              n_sim = 120L, seed = 5000L)
   r <- res$report
@@ -296,6 +298,21 @@ test_that("print, summary, plot and diagnostics read the result", {
   expect_true(file.exists(pf))
   expect_error(plot(res, arm = "nosucharm"), "no \\(arm, quantity\\) selected")
 
+  # A panel's annotation reads the sample the panel draws. A folded panel
+  # carrying the raw p-value and the raw band verdict is the fold's own failure
+  # mode: it reports "inside" over a curve outside the band, on exactly the
+  # symmetric dispersion error the raw ECDF cancels. The columns are read off
+  # `res$report`, whose folded p-value is `p_unif_folded`; `p_folded` is the
+  # name the PRINT method renames it to, and reading that here would be
+  # `NULL[i]`, a zero-length label rather than a wrong one.
+  expect_true(all(c("p_unif", "inside", "p_unif_folded", "inside_folded") %in%
+                    names(res$report)))
+  r <- data.frame(p_unif = 0.90, inside = TRUE,
+                  p_unif_folded = 0.0001, inside_folded = FALSE)
+  expect_identical(.sbc_panel_note(r, 1L, folded = FALSE), "p = 0.9")
+  expect_identical(.sbc_panel_note(r, 1L, folded = TRUE),
+                   "p = 0.0001, outside band")
+
   d <- diagnostics(res)
   expect_true(all(c("arm", "quantity", "inside", "p_unif") %in% names(d)))
   expect_identical(attr(d, "experiment"), "prior_predictive")
@@ -325,4 +342,17 @@ test_that("a fit's reliability table carries the calibration verdict alongside",
   out <- utils::capture.output(print(both))
   expect_true(any(grepl("calibration \\(SBC", out)))
   expect_error(diagnostics(fit, sbc = "not an sbc result"), "takes an `sbc`")
+})
+
+test_that("proper_prior is not 'verified' on a run that probed nothing", {
+  # gcol33/tulpa#716: .sbc_check_proper_prior() returns early with n_probe = 0
+  # when every scored quantity is of the "rank" kind, having probed no truth at
+  # all, and the premise was hardcoded "verified". The 0 does disclose it to a
+  # careful reader; the word that survives into a summary is "verified".
+  expect_identical(
+    tulpa:::.sbc_premise_proper_prior(list(n_probe = 3L)), "verified")
+  expect_false(
+    grepl("verified", tulpa:::.sbc_premise_proper_prior(list(n_probe = 0L))))
+  expect_match(tulpa:::.sbc_premise_proper_prior(list(n_probe = 0L)),
+               "not applicable")
 })

@@ -272,14 +272,17 @@
 # refining at all: the two rankings differ on 190 of the 468, and the gap
 # between their totals is under a tenth of what refining buys at all.
 # Through the one-cell harness on 24 four-axis fits (8 seeds x 3 budgets,
-# four-level base against a six-level reference) the two arms' endpoint reads
-# differ by
-# 0.7360 summed against a noise floor of 7.1268 and their widths by 1.4275
-# against 14.2302, above the floor in 0 of 24 configurations either way, so that
-# grid does not resolve the choice at all. The MEDIAN it does resolve, above the
-# floor in 14 of 24, and there the predicted-movement ranking scores 1.4059
-# against the weight ranking's 0.5772 and loses in 24 of 24. So the criterion
-# stands as it is, and the box ratio stays a per-cell reading.
+# four-level base against a six-level reference, flat outer prior, `chord` read)
+# the two arms' endpoint reads differ by 0.7602 summed against a noise floor of
+# 6.1914 and their widths by 1.7641 against 12.3249, above the floor in 0 of 24
+# configurations either way, so that grid does not resolve the choice on the
+# interval. The MEDIAN it does resolve, above the floor in 16 of 24, and there
+# the predicted-movement ranking scores 1.2976 against the weight ranking's
+# 0.5698 and is nearer the reference in none of the 16. Under the shipped
+# `box_uniform` read the grid resolves the endpoints in 2, the widths in 2 and
+# the median in 7 of 24, and the predicted-movement ranking is nearer in none of
+# them. So the criterion stands as it is, and the box ratio stays a per-cell
+# reading.
 #
 # Two further readings of the same measurement, both about `mode_gain`. It is
 # the unbounded quadratic gain and the box ratio is the truncated one, so their
@@ -1272,7 +1275,25 @@
          max_node_weight  = exp(max(lv) - lse))
 }
 
-# Greedy mutually-non-adjacent selection: take the highest-weight candidate, drop
+# What a candidate cell is ranked by before selection. `"weight"` is the cell's
+# integration weight. `"mass_moved"` is the mass the cell's midpoint atom is
+# predicted to misplace, `w_c |exp(log_box_ratio_c) - 1|`, off the same
+# three-point stencil as the box-mass rule (gcol33/tulpa#328); a cell whose box
+# ratio declines scores 0.
+.LCCD_RANKS <- c("weight", "mass_moved")
+
+.joint_local_ccd_rank_score <- function(rank, cands, w, curv) {
+    rank <- match.arg(rank, .LCCD_RANKS)
+    if (identical(rank, "weight")) return(w)
+    score <- rep(-Inf, length(w))
+    for (c in cands) {
+        lbr <- .joint_local_ccd_cell_box_mass(curv[[c]])$log_box_ratio
+        score[c] <- if (is.finite(lbr)) w[c] * abs(expm1(lbr)) else 0
+    }
+    score
+}
+
+# Greedy mutually-non-adjacent selection: take the highest-scoring candidate, drop
 # it and all its grid neighbours from contention, repeat up to `max_cells`. Keeps
 # refined node clouds from overlapping (adjacent peaked cells on one contiguous
 # blob are re-sampling the same mass; one recentred design captures it once).
@@ -1307,6 +1328,7 @@
 #                (full-coordinate matrix, colnames = colnames(joint_grid)), warm-
 #                started from `warm` (the refined cell's inner mode, or NULL).
 #   max_cells    cap on refined cells (hard cap on extra solve fan-out).
+#   rank         what candidates are ranked by for selection (`.LCCD_RANKS`).
 #   f0           CCD factorial-corner radius per whitened axis (INLA default 1.1).
 #   skew_max     a cell keeps its cloud only while `.joint_local_ccd_misfit()`'s
 #                `misfit` stays below this; above it the cell is put back as its
@@ -1326,7 +1348,8 @@
                                      dnode = NULL, latent_axes, tags,
                                      eval_nodes, max_cells = 8L, f0 = 1.1,
                                      verbose = FALSE, cov_blocks = NULL,
-                                     skew_max = .nl_diag("gamma3_ok")) {
+                                     skew_max = .nl_diag("gamma3_ok"),
+                                     rank = "weight") {
     if (is.null(tags)) return(NULL)
     latent_cols <- match(latent_axes, colnames(joint_grid))
     if (anyNA(latent_cols)) return(NULL)
@@ -1363,7 +1386,9 @@
     }
     if (length(cands) == 0L) return(NULL)
 
-    chosen <- .joint_local_ccd_select(cands, w, nb$up, nb$dn, max_cells)
+    chosen <- .joint_local_ccd_select(
+        cands, .joint_local_ccd_rank_score(rank, cands, w, curv),
+        nb$up, nb$dn, max_cells)
     if (length(chosen) == 0L) return(NULL)
 
     is_centre <- ccd$kind == "center"

@@ -38,10 +38,17 @@ tulpa_sample_glmm(
 \item{backend}{One of \code{"hmc"}, \code{"ess"}, \code{"sghmc"}, \code{"sgld"}, \code{"mclmc"},
 \code{"smc"}, \code{"vi"}.}
 
-\item{phi}{Dispersion/precision passed to the family (held fixed). The
-kernel parameterization: for \code{gaussian} / \code{lognormal} this is the residual
-SD (the \code{\link[=tulpa]{tulpa()}} front door passes \code{sqrt(phi)}, its \code{phi} being the
-variance); for \code{t} the scale.}
+\item{phi}{Dispersion passed to the family, held fixed. One convention at
+every door: for \code{gaussian} / \code{lognormal} this is the residual VARIANCE
+(the SD is \code{sqrt(phi)}), for \code{neg_binomial_2} the size, \code{gamma} the
+shape, \code{beta} the precision, \code{t} the scale; \code{binomial} and \code{poisson}
+ignore it. The compiled kernels parameterize the two variance families by
+the residual SD and are handed \code{sqrt(phi)} at the boundary.
+
+Defaulted, it conditions at 1 and says so with a warning, since for a
+family that reads a dispersion that is a modelling choice rather than a
+neutral value. \code{fit$phi_estimated} records whether the value on the fit
+was estimated or conditioned on.}
 
 \item{phi2}{Optional second dispersion: the Student-t degrees of freedom
 (\code{family = "t"}; default 4 when \code{NULL}).}
@@ -79,7 +86,17 @@ any other backend errors rather than sampling from the default start.}
 \code{sigma_beta}, \code{n_chains}, \code{max_treedepth}, \code{adapt_delta}, \code{epsilon}, \code{L},
 \code{batch_size}, \code{alpha}, \code{n_particles}, \code{n_mcmc_steps}, \code{ess_threshold},
 \code{vi_variant}, \code{vi_mc_samples}, \code{vi_max_iter}, \code{vi_max_grad_norm},
-\code{n_draws}, \code{verbose}, \code{mass_matrix}).
+\code{vi_tol_grad}, \code{vi_tol_rel_elbo}, \code{vi_patience},
+\code{n_draws}, \code{verbose}, \code{mass_matrix}, \code{checkpoint}).
+
+\code{checkpoint = list(path =, resume =)} is per-chain checkpoint/resume on
+the NUTS/HMC kernel only (a chain is the checkpoint unit, deterministic
+in seed + chain id + data + settings, so a resumed chain is bit-for-bit
+identical to the uninterrupted one): every chain appends its finished
+result to \code{path}, and \code{resume = TRUE} (the default) loads any finished
+chains from a prior run and fits only the rest; \code{resume = FALSE} starts
+over, removing any stale file first. Other backends refuse this key
+rather than silently drop it.
 
 \code{mass_matrix} selects the NUTS/HMC metric: \code{"diag"} (the default),
 \code{"dense"}, \code{"block_diag"}, or \code{"auto"}. Under \code{"auto"} the kernel reads the
@@ -97,6 +114,19 @@ least once -- the optimisation loop whose ELBO history is the fit's only
 record, and the reparameterisation average every gradient divides by -- so
 values below 1 are rejected. \code{vi_max_grad_norm} (default 10) is the
 gradient-norm clip applied before every Adam step.
+
+\code{vi_max_iter} is a ceiling; what ends a VI run is usually the stopping
+rule, which \code{vi_patience} (default 50), \code{vi_tol_rel_elbo} (default 0.01)
+and \code{vi_tol_grad} (default 1e-4) control. The loop stops when the ELBO
+gain across the last \code{vi_patience} iterations -- the mean of the window's
+second half minus the mean of its first -- falls to \code{vi_tol_rel_elbo}
+times the ELBO span the run has covered, or when the gradient norm falls
+below \code{vi_tol_grad}. Both the gain and its threshold are ELBO
+DIFFERENCES, so the arbitrary additive constant in an ELBO cancels.
+Setting \code{vi_tol_rel_elbo = 0} stops only on a window that is flat or
+falling. The fit reports \code{vi_iterations} and \code{converged_reason}
+(\code{"patience"}, \code{"gradient_norm"} or \code{"max_iter"}) so a run that stopped
+short of its budget can be told from one that used it.
 
 \code{epsilon} pins the step size on the stochastic-gradient backends: \code{"sghmc"}
 runs its warmup step-size adapter only when no \code{epsilon} is supplied, and

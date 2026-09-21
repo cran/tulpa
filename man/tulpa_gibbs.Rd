@@ -70,8 +70,22 @@ RNG; the Polya-Gamma kernels use R's RNG, so a seed makes the fit
 reproducible), \code{verbose} (default FALSE), \code{n_threads} (default 1).}
 }
 \value{
-List with beta draws, RE draws, sigma_re draws (plus the spatial
-field draws when \code{spatial} is supplied)
+A \code{tulpa_fit} holding one MCMC chain: \code{draws}, the
+\verb{[n_saved x n_param]} matrix of retained draws, with \code{chain_id},
+\code{n_chains}, \code{means} (column means) and \code{param_names}. Columns follow the
+parameter naming of the ModelData samplers: the fixed effects (the column
+names of \code{X}, else \code{beta[j]}), \code{log_sigma_re} and \code{re[g]} for the
+random-intercept block, then the route's own blocks -- \code{log_phi} (the
+negative-binomial size); \code{log_tau_spatial} and \code{phi_spatial[u]} (ICAR, and
+RSR's projected field); \code{log_sigma_spatial}, \code{logit_rho_bym2},
+\code{phi_spatial[u]} and \code{theta_spatial[u]} (BYM2); \code{log_sigma2_gp},
+\code{log_phi_gp} and \code{gp_w[u]} (GP); the \verb{_local} / \verb{_regional} counterparts
+with \code{gp_local[u]} / \code{gp_regional[u]} (multiscale GP); \code{log_sigma2_trend},
+\code{trend[t]}, \code{log_sigma2_seasonal}, \code{seasonal[s]}, \code{log_sigma2_short},
+\code{short_term[t]} and, for an AR1 short-term component, \code{logit_rho_short}
+(temporal). Scales are stored on the log scale and correlations on the
+logit scale, as the samplers store them; a component the model does not
+carry has no column.
 }
 \description{
 Public API for PG Gibbs sampling. Used by model packages for
@@ -84,11 +98,16 @@ updated by a random-walk Metropolis-Hastings step on \code{log(r)} whose
 stationary support is bounded to \code{r} in \verb{[0.1, 500]}; data favouring a
 dispersion outside that range pile up at the boundary.
 
-Every sampler that centres a latent effect -- the negative-binomial
-kernels, and the binomial kernels carrying a \code{spatial} or \code{temporal}
-field -- adds the removed level to the first coefficient, which leaves
-\code{eta} unchanged only when the first column of \code{X} is an all-ones
-intercept. Those routes error on a design without one.
+Every sampler that moves a latent effect's level through the first
+coefficient -- the negative-binomial kernels, and the binomial kernels
+carrying a \code{spatial} or \code{temporal} field -- leaves \code{eta} unchanged only
+when the first column of \code{X} is an all-ones intercept, and those routes
+error on a design without one. An intrinsic field (ICAR, the structured
+BYM2 part, RW1) is reported centred with its level in the intercept, and
+its sweep carries the intercept's prior through the field mean; a proper
+one (the negative-binomial iid block, an NNGP field) has the level it
+shares with the intercept drawn from its full conditional, which both
+priors define.
 }
 \examples{
 set.seed(1)
@@ -100,6 +119,7 @@ y <- rbinom(n, 1, plogis(X \%*\% c(-0.2, 0.5) + b[grp]))
 \donttest{
 fit <- tulpa_gibbs(y, rep(1L, n), X, grp, G, family = "binomial",
                    control = list(n_iter = 500L, warmup = 250L))
-colMeans(fit$beta)
+coef(fit)
+diagnostics(fit)
 }
 }

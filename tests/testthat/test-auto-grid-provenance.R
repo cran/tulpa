@@ -50,7 +50,7 @@ test_that("a marked matrix axis survives every consumer of the mark", {
 
     # (a) the provenance record names the field and hands back a bare matrix.
     prov <- tulpa:::.nl_grid_provenance(blk)
-    expect_identical(prov$auto, "logchol_grid")
+    expect_identical(prov$auto, c(logchol_grid = TRUE))
     expect_true(is.matrix(prov$prior$logchol_grid))
     expect_identical(dim(prov$prior$logchol_grid), dim(lc))
     expect_false(is_auto_grid(prov$prior$logchol_grid))
@@ -124,22 +124,62 @@ test_that("provenance strips markers and records them per block", {
     single <- list(type = "icar", sigma_grid = auto_grid(c(1, 2, 3)),
                    rho_grid = c(0.2, 0.9))
     pv <- tulpa:::.nl_grid_provenance(single)
-    expect_identical(pv$auto, "sigma_grid")
+    expect_identical(pv$auto, c(sigma_grid = TRUE))
     expect_false(is_auto_grid(pv$prior$sigma_grid))
     expect_identical(pv$prior$sigma_grid, c(1, 2, 3))
-    expect_identical(tulpa:::.nl_auto_fields_at(pv$auto), "sigma_grid")
+    expect_identical(tulpa:::.nl_auto_fields_at(pv$auto), c(sigma_grid = TRUE))
 
     multi <- list(list(type = "icar", sigma_grid = auto_grid(c(1, 2))),
                   list(type = "iid",  sigma_grid = c(0.3, 0.6)))
     pvm <- tulpa:::.nl_grid_provenance(multi)
-    expect_identical(pvm$auto[[1L]], "sigma_grid")
-    expect_identical(pvm$auto[[2L]], character(0))
+    expect_identical(pvm$auto[[1L]], c(sigma_grid = TRUE))
+    expect_identical(pvm$auto[[2L]], logical(0))
     expect_false(is_auto_grid(pvm$prior[[1L]]$sigma_grid))
-    expect_identical(tulpa:::.nl_auto_fields_at(pvm$auto, 1L), "sigma_grid")
-    expect_identical(tulpa:::.nl_auto_fields_at(pvm$auto, 2L), character(0))
+    expect_identical(tulpa:::.nl_auto_fields_at(pvm$auto, 1L),
+                     c(sigma_grid = TRUE))
+    expect_identical(tulpa:::.nl_auto_fields_at(pvm$auto, 2L), logical(0))
     # Out-of-range / absent records read as "nothing declared", never an error.
-    expect_identical(tulpa:::.nl_auto_fields_at(pvm$auto, 9L), character(0))
-    expect_identical(tulpa:::.nl_auto_fields_at(NULL, 1L), character(0))
+    expect_identical(tulpa:::.nl_auto_fields_at(pvm$auto, 9L), logical(0))
+    expect_identical(tulpa:::.nl_auto_fields_at(NULL, 1L), logical(0))
+    # A bare character vector of declared fields is the placeable default.
+    expect_identical(tulpa:::.nl_auto_fields_at("sigma_grid"),
+                     c(sigma_grid = TRUE))
+})
+
+# gcol33/tulpaObs#361: PROVENANCE (whose nodes these are) and PLACEMENT POLICY
+# (may the pass move them) are different questions, and a package with its own
+# measured answer to the second had only the user's pin to express it with --
+# which is then what the fit reports back to a user who pinned nothing.
+test_that("a declared default can ask to be integrated as written", {
+    held  <- auto_grid(c(0.5, 1, 2), place = FALSE)
+    place <- auto_grid(c(0.5, 1, 2))
+    expect_true(is_auto_grid(held))
+    expect_false(auto_grid_place(held))
+    expect_true(auto_grid_place(place))
+    # An unmarked value is held because it reads as a pin, not because it asked.
+    expect_true(auto_grid_place(c(0.5, 1, 2)))
+    expect_identical(as.numeric(held), c(0.5, 1, 2))
+    expect_error(auto_grid(c(1, 2), place = NA), "TRUE or FALSE")
+    expect_error(auto_grid(c(1, 2), place = "no"), "TRUE or FALSE")
+
+    # Both halves survive the record, and neither attribute survives the strip.
+    blk <- list(type = "icar", sigma_grid = held)
+    pv  <- tulpa:::.nl_grid_provenance(blk)
+    expect_identical(pv$auto, c(sigma_grid = FALSE))
+    expect_null(attributes(pv$prior$sigma_grid))
+
+    # Three answers, and the engine ACTS the same on the last two.
+    hold <- function(b, auto = logical(0))
+        tulpa:::.nl_axis_hold(b, "sigma_grid", auto, type = ".joint_areal")
+    expect_null(hold(list(type = "icar", sigma_grid = place)))
+    expect_identical(hold(pv$prior, pv$auto), "default_axis_pinned")
+    expect_identical(hold(list(type = "icar", sigma_grid = c(0.3, 0.9, 2))),
+                     "axis_pinned")
+    expect_true(tulpa:::.nl_axis_is_pinned(pv$prior, "sigma_grid", pv$auto,
+                                           type = ".joint_areal"))
+    # Read off the value as well as off the record, since a call site may hold
+    # the axis before the front door strips it.
+    expect_identical(hold(blk), "default_axis_pinned")
 })
 
 test_that("axis aliases cover the bare, block-prefixed and coerced spellings", {
@@ -240,6 +280,8 @@ test_that("the single-block rescue guard honours a pin and passes a default", {
     expect_identical(calls$n, 1L)
     expect_gt(max(calls$grid), 3)
     expect_null(out$res$outer_grid_recenter_declined)
+    expect_identical(out$res$outer_grid_recenter_axes, "sigma")
+    expect_null(out$res$outer_grid_axis_declined)
 
     # 2. Engine default handed in unmarked -> still recenters (#293).
     calls$n <- 0L
@@ -263,6 +305,7 @@ test_that("the single-block rescue guard honours a pin and passes a default", {
         stub_res, c(icar, list(sigma_grid = c(0.1, 0.5, 1, 2, 3))), NULL, refit)
     expect_identical(out$res$outer_grid_placement, "fixed")
     expect_identical(out$res$outer_grid_recenter_declined, "axis_pinned")
+    expect_identical(out$res$outer_grid_axis_declined, c(sigma = "axis_pinned"))
     expect_identical(calls$n, 0L)
 
     # 5. A grid that never collapsed -> untouched, different reason.
@@ -272,6 +315,8 @@ test_that("the single-block rescue guard honours a pin and passes a default", {
                                      pareto_k_grid_edge_axes = character(0)))
     out <- tulpa:::.joint_sigma_grid_rescue(spread, icar, NULL, refit)
     expect_identical(out$res$outer_grid_recenter_declined, "grid_not_collapsed")
+    expect_identical(out$res$outer_grid_axis_declined,
+                     c(sigma = "grid_not_collapsed"))
     expect_identical(calls$n, 0L)
 
     # 6. Collapsed, but no curvature to recentre on -> untouched, own reason.
@@ -280,12 +325,20 @@ test_that("the single-block rescue guard honours a pin and passes a default", {
                                               pareto_k_cov_u = NULL))
     out <- tulpa:::.joint_sigma_grid_rescue(blind, icar, NULL, refit)
     expect_identical(out$res$outer_grid_recenter_declined, "no_usable_curvature")
+    expect_identical(out$res$outer_grid_axis_declined,
+                     c(sigma = "no_usable_curvature"))
     expect_identical(calls$n, 0L)
+
+    out <- tulpa:::.joint_sigma_grid_rescue(stub_res, icar, NULL, refit,
+                                            enabled = FALSE)
+    expect_identical(out$res$outer_grid_axis_declined,
+                     c(sigma = "auto_recenter_disabled"))
 
     # 7. A prior shape this rescue does not cover stamps nothing at all -- the
     #    multi-block rescue chained after it owns that fit.
     out <- tulpa:::.joint_sigma_grid_rescue(stub_res, list(icar), NULL, refit)
     expect_null(out$res$outer_grid_recenter_declined)
+    expect_null(out$res$outer_grid_axis_declined)
 })
 
 # gcol33/tulpa#297: the second attempt's regularizing PC prior was suppressed by
@@ -380,6 +433,8 @@ test_that("the multi-block rescue reports a pinned copy-block axis", {
         stub_res, list(list(type = "icar")), NULL, cp, NULL, refit)
     expect_identical(out$res$outer_grid_placement, "auto_recentered")
     expect_gt(max(out$res$.grid), 3)
+    expect_identical(out$res$outer_grid_recenter_axes, "b1.sigma")
+    expect_null(out$res$outer_grid_axis_declined)
 
     # Pinned donor axis -> untouched, reason recorded (was previously
     # indistinguishable from "did not need it").
@@ -388,6 +443,33 @@ test_that("the multi-block rescue reports a pinned copy-block axis", {
         NULL, cp, NULL, refit)
     expect_identical(out$res$outer_grid_placement, "fixed")
     expect_identical(out$res$outer_grid_recenter_declined, "axis_pinned")
+    expect_identical(out$res$outer_grid_axis_declined,
+                     c(b1.sigma = "axis_pinned"))
+
+    out <- tulpa:::.joint_multi_sigma_grid_rescue(
+        stub_res, list(list(type = "icar")), NULL, cp, NULL, refit,
+        enabled = FALSE)
+    expect_identical(out$res$outer_grid_axis_declined,
+                     c(b1.sigma = "auto_recenter_disabled"))
+
+    # Two collapsed copy blocks and one attempt: the block the pass moved is
+    # listed as moved, the one it ran out of attempts on says so.
+    two <- utils::modifyList(stub_res, list(
+        pareto_k_grid_edge_axes = c("b1.sigma", "b2.sigma"),
+        pareto_k_mode_u = c(log(3), log(3)),
+        pareto_k_cov_u = diag(c(0.25, 0.25)),
+        pareto_k_axis_tags = c("log", "log"),
+        pareto_k_axis_names = c("b1.sigma", "b2.sigma"),
+        blocks = list(list(type = "icar"), list(type = "icar"))))
+    still <- function(prior_i, prior_sigma_i) two
+    out <- tulpa:::.joint_multi_sigma_grid_rescue(
+        two, list(list(type = "icar"), list(type = "icar")), NULL,
+        list(has_copy = TRUE, copy_blocks_zero = c(0L, 1L)), NULL, still,
+        max_attempts = 1L)
+    expect_identical(out$res$outer_grid_placement, "auto_recentered")
+    expect_identical(out$res$outer_grid_recenter_axes, "b1.sigma")
+    expect_identical(out$res$outer_grid_axis_declined,
+                     c(b2.sigma = "attempts_exhausted"))
 
     # Engine default on the donor block (the shape a wrapper package writes)
     # -> recenters.

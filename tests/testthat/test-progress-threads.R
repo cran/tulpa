@@ -3,7 +3,7 @@
 # The shared fit progress reporter appends "| N threads" to its console line
 # when the outer grid runs N cells at once, so "ran on N cores" is a property
 # of the log itself. Two reporters mirror the same wire format:
-#   * the R-side `.tulpa_iter_progress()` (counted R loops, e.g. EM-Laplace),
+#   * the R-side `tulpa_iter_progress()` (counted R loops, e.g. EM-Laplace),
 #     which takes the count via its `threads` argument;
 #   * the C++ `tulpa_progress::GridProgress` (the outer nested-Laplace grid and
 #     the parallel NUTS sampler), which derives it from the realised outer
@@ -15,13 +15,13 @@
 # 1. R-side reporter: optional threads field                                  #
 # --------------------------------------------------------------------------- #
 
-test_that(".tulpa_iter_progress appends the threads field when threads > 1", {
+test_that("tulpa_iter_progress appends the threads field when threads > 1", {
   old <- options(tulpa.nl_progress = list(progress = TRUE,
                                           progress_every = 1L,
                                           progress_throttle = 0))
   on.exit(options(old), add = TRUE)
   out <- capture.output({
-    prg <- tulpa:::.tulpa_iter_progress("test", total = 3L,
+    prg <- tulpa_iter_progress("test", total = 3L,
                                         unit = "cells", threads = 8L)
     prg$tick(); prg$tick(); prg$tick(); prg$finish()
   })
@@ -31,13 +31,13 @@ test_that(".tulpa_iter_progress appends the threads field when threads > 1", {
                         out)))
 })
 
-test_that(".tulpa_iter_progress omits the threads field when serial", {
+test_that("tulpa_iter_progress omits the threads field when serial", {
   old <- options(tulpa.nl_progress = list(progress = TRUE,
                                           progress_every = 1L,
                                           progress_throttle = 0))
   on.exit(options(old), add = TRUE)
   out <- capture.output({
-    prg <- tulpa:::.tulpa_iter_progress("test", total = 3L, unit = "cells")
+    prg <- tulpa_iter_progress("test", total = 3L, unit = "cells")
     prg$tick(); prg$tick(); prg$tick(); prg$finish()
   })
   expect_false(any(grepl("threads", out)))
@@ -82,12 +82,16 @@ test_that(".tulpa_iter_progress omits the threads field when serial", {
   arm_pos <- list(y = y_pos, n_trials = rep(1L, length(y_pos)),
                   X = Xpos, spatial_idx = spi_pos,
                   re_idx = rep(0, length(y_pos)), n_re_groups = 0L,
-                  sigma_re = 1.0, family = "gaussian", phi = 0.3)
+                  sigma_re = 1.0, family = "gaussian", phi = 0.09)
   prior <- list(type = "icar", n_spatial_units = adj$n_spatial_units,
                 adj_row_ptr = adj$adj_row_ptr, adj_col_idx = adj$adj_col_idx,
                 n_neighbors = adj$n_neighbors, sigma_grid = c(0.6, 1.0, 1.5))
 
-  capture.output(
+  # Both halves are returned: the console line is what this file asserts on,
+  # and the fit's own `n_threads_outer_realised` is what the line has to agree
+  # with. Reading the width off the fit rather than restating the request keeps
+  # the assertion an identity under any clamp (gcol33/tulpa#855).
+  out <- capture.output(
     fit <- tulpa_nested_laplace_joint(
       responses = list(
         occ = arm_occ,
@@ -101,21 +105,48 @@ test_that(".tulpa_iter_progress omits the threads field when serial", {
                      progress = TRUE, progress.throttle = 0)
     )
   )
+  list(out = out, fit = fit)
 }
 
 test_that("nested-laplace-joint progress line shows the outer-thread count", {
   skip_on_cran()
+  # The count is the REALISED outer width, which is what this file's own header
+  # says the C++ reporter derives it from -- and the width the engine is free to
+  # resolve below the request: the memory clamp lowers it, and
+  # `_R_CHECK_LIMIT_CORES_` caps the team at two, which `src/omp_threads.h` and
+  # `cran-comments.md` both state as intended. Measured on this fixture at a
+  # request of 4: `| 4 threads` with the variable unset, `| 2 threads` with it
+  # set. Asserting the REQUEST made the block fail under `R CMD check` on a tree
+  # whose fix was elsewhere (gcol33/tulpa#855).
+  #
+  # The identity is available rather than a range: the same width the reporter
+  # is stamped with travels out of the driver as
+  # `out["n_threads_outer_realised"]` and onto the fit
+  # (`.nl_attach_outer_threads()`), so the line and the fit can be held to each
+  # other and neither can drift from the clamp.
   n_out <- 4L
-  out <- .fit_joint_88(n_threads_outer = n_out)
-  joint_lines <- grep("^\\[nested-laplace-joint\\]", out, value = TRUE)
+  r <- .fit_joint_88(n_threads_outer = n_out)
+  joint_lines <- grep("^\\[nested-laplace-joint\\]", r$out, value = TRUE)
   expect_gt(length(joint_lines), 0L)
-  expect_true(any(grepl(sprintf("\\| %d threads$", n_out), joint_lines)))
+  thr <- regmatches(joint_lines, regexpr("\\| [0-9]+ threads$", joint_lines))
+  expect_gt(length(thr), 0L)
+  n_shown <- unique(as.integer(sub("\\| ([0-9]+) threads$", "\\1", thr)))
+  expect_length(n_shown, 1L)
+  expect_identical(n_shown, r$fit$n_threads_outer_realised)
+  # And the regime, so the identity is not satisfied by a serial run: the
+  # suffix is printed only above one thread, and the request is the ceiling.
+  expect_gt(n_shown, 1L)
+  expect_lte(n_shown, n_out)
 })
 
 test_that("serial nested-laplace-joint fit omits the threads field", {
   skip_on_cran()
-  out <- .fit_joint_88(n_threads_outer = 1L)
-  joint_lines <- grep("^\\[nested-laplace-joint\\]", out, value = TRUE)
+  r <- .fit_joint_88(n_threads_outer = 1L)
+  joint_lines <- grep("^\\[nested-laplace-joint\\]", r$out, value = TRUE)
   expect_gt(length(joint_lines), 0L)
   expect_false(any(grepl("threads", joint_lines)))
+  # The omission is what a width of one MEANS, not a separate decision: the
+  # suffix is printed only above one thread, so the fit has to report one too
+  # or the line and the fit are saying different things.
+  expect_identical(r$fit$n_threads_outer_realised, 1L)
 })

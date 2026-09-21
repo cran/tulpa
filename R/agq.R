@@ -35,6 +35,8 @@
 #'   set it to a known / pre-estimated residual SD rather than the default.
 #' @param n_quad Number of Gauss-Hermite quadrature nodes per cluster.
 #'   `1` recovers Laplace; common choices are `5` or `7`. Default `7`.
+#' @param offset Optional fixed per-observation offset added to eta
+#'   (default all zero, i.e. none).
 #' @param beta_init Initial fixed-effects (default zeros).
 #' @param sigma_init Initial RE SD (default `1`).
 #' @param max_iter Optimiser iteration cap (default `200`).
@@ -89,6 +91,7 @@ agq_fit <- function(y, X, group,
                     n_trials = NULL,
                     sigma_eps = 1.0,
                     n_quad = 7L,
+                    offset = NULL,
                     beta_init = NULL,
                     sigma_init = 1.0,
                     max_iter = 200L,
@@ -115,6 +118,11 @@ agq_fit <- function(y, X, group,
   if (n_quad < 1L) stop("`n_quad` must be >= 1.", call. = FALSE)
   if (is.null(n_trials)) n_trials <- rep(1L, n_obs)
   if (is.null(beta_init)) beta_init <- rep(0, p)
+  if (is.null(offset)) offset <- rep(0, n_obs)
+  if (length(offset) != n_obs) {
+    stop(sprintf("length(offset) (%d) must equal length(y) (%d).",
+                 length(offset), n_obs), call. = FALSE)
+  }
 
   # Intercept-only RE: route through the shared compiled GLMM oracle, so the
   # family density (binomial / poisson / gaussian) has a single C++ source of
@@ -129,7 +137,8 @@ agq_fit <- function(y, X, group,
   Z <- matrix(1, n_obs, 1L)
   orc <- cpp_glmm_oracle_make(family, .phi_to_registry(family, sigma_eps),
                               as.numeric(y),
-                              as.numeric(n_trials), X, Z, group, n_groups)
+                              as.numeric(n_trials), X, Z, group, n_groups,
+                              offset = as.numeric(offset))
   par_init <- c(beta_init, log(sigma_init))
 
   # At n_quad > 1 supply the analytic Fisher-identity gradient (one group sweep
@@ -201,10 +210,23 @@ agq_fit <- function(y, X, group,
     inference_mode = "structured",
     inference_tier = 2L,
     backend = "agq",
-    param_names = par_names
+    param_names = par_names,
+    # AGQ integrates each group's effect OUT of the marginal likelihood, so
+    # there is no per-group posterior to report -- the same situation
+    # tulpa_re_aghq(n_quad > 1) records. Without the reason, ranef() found no
+    # `re[` columns in the 0-row draws matrix and returned an empty frame,
+    # indistinguishable from a model with no random effects at all
+    # (gcol33/tulpa#710).
+    ranef_unavailable = paste(
+      "adaptive Gauss-Hermite quadrature integrates each group's effect out of",
+      "the marginal likelihood, so the fit holds sigma_re and not the per-group",
+      "effects. Use mode = 're_cov_gibbs' or 're_cov_nested' for ranef()."),
+    n_fixed = p
   )
-  class(fit) <- c("tulpa_agq_fit", "tulpa_fit")
-  fit
+  .finalize_fit(fit, extra_class = "tulpa_agq_fit",
+               data = list(y = y, n_trials = n_trials, model_matrix = X,
+                          family = family, offset = offset,
+                          phi = if (identical(family, "gaussian")) sigma_eps^2 else NULL))
 }
 
 

@@ -41,11 +41,13 @@ inline std::string ckpt_serialize(const HMCResultCpp& r) {
     ckpt_put_span(buf, r.n_leapfrog);
     ckpt_put_span(buf, r.divergent);
     ckpt_put_span(buf, r.treedepth);
+    ckpt_put_span(buf, r.energy);
     ckpt_put(buf, r.epsilon);
     ckpt_put<std::int32_t>(buf, r.n_warmup);
     ckpt_put<std::int32_t>(buf, r.n_sample);
     ckpt_put<std::int32_t>(buf, r.chain_id);
     ckpt_put<std::int32_t>(buf, r.n_max_treedepth);
+    ckpt_put<std::int32_t>(buf, r.n_softabs_rescued);
     std::uint64_t slen = r.sampler.size();
     ckpt_put(buf, slen);
     if (slen) buf.append(r.sampler.data(), r.sampler.size());
@@ -67,11 +69,13 @@ inline bool ckpt_deserialize(CkptReader& rd, HMCResultCpp& r) {
     r.n_leapfrog      = rd.get_span<int>();
     r.divergent       = rd.get_span<int>();
     r.treedepth       = rd.get_span<int>();
+    r.energy          = rd.get_span<double>();
     r.epsilon         = rd.get<double>();
     r.n_warmup        = rd.get<std::int32_t>();
     r.n_sample        = rd.get<std::int32_t>();
     r.chain_id        = rd.get<std::int32_t>();
     r.n_max_treedepth = rd.get<std::int32_t>();
+    r.n_softabs_rescued = rd.get<std::int32_t>();
     std::uint64_t slen = rd.get<std::uint64_t>();
     if (!rd.ok) return false;
     if (slen) {

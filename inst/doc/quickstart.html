@@ -423,7 +423,7 @@ curvature there. For a Gaussian likelihood that curvature is exact, so
 the fit returns the analytic posterior immediately, with no iteration
 and no Monte Carlo error.</p>
 <div class="sourceCode" id="cb3"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb3-1"><a href="#cb3-1" tabindex="-1"></a>fit <span class="ot">&lt;-</span> <span class="fu">tulpa</span>(y <span class="sc">~</span> x, <span class="at">data =</span> df, <span class="at">family =</span> <span class="st">&quot;gaussian&quot;</span>,</span>
-<span id="cb3-2"><a href="#cb3-2" tabindex="-1"></a>             <span class="at">mode =</span> <span class="st">&quot;laplace&quot;</span>, <span class="at">phi =</span> <span class="fl">0.8</span>)</span>
+<span id="cb3-2"><a href="#cb3-2" tabindex="-1"></a>             <span class="at">mode =</span> <span class="st">&quot;laplace&quot;</span>, <span class="at">phi =</span> <span class="fl">0.8</span><span class="sc">^</span><span class="dv">2</span>)</span>
 <span id="cb3-3"><a href="#cb3-3" tabindex="-1"></a><span class="fu">coef</span>(fit)</span></code></pre></div>
 <p>The coefficients land near the truth. <code>coef()</code> reports the
 posterior mean of each fixed effect, the same point estimate you would
@@ -454,12 +454,12 @@ the residual variance, for <code>neg_binomial_2</code> the size
 parameter that sets overdispersion, for <code>beta</code> the precision.
 The Laplace and sampler paths both condition on the value you pass: they
 treat <code>phi</code> as known and fit everything else given it. Here
-the true residual standard deviation is 0.8, so <code>phi = 0.8</code>
-is the matching value. When you do not know <code>phi</code> in advance,
-the nested-Laplace and EM layers integrate it rather than fixing it,
-which the inference vignettes walk through; for a first fit, passing a
-plausible value is enough to get estimates and intervals you can
-sanity-check.</p>
+the true residual standard deviation is 0.8, so the matching value is
+its square, <code>phi = 0.8^2</code>. When you do not know
+<code>phi</code> in advance, the nested-Laplace and EM layers integrate
+it rather than fixing it, which the inference vignettes walk through;
+for a first fit, passing a plausible value is enough to get estimates
+and intervals you can sanity-check.</p>
 <p>That is the whole basic loop. Simulate or load data, call
 <code>tulpa()</code> with a formula and a family, read
 <code>coef()</code> and <code>summary()</code> to check the estimates
@@ -502,7 +502,7 @@ before, so the only new ingredient is the group effect.</p>
 <span id="cb6-4"><a href="#cb6-4" tabindex="-1"></a>df<span class="sc">$</span>g <span class="ot">&lt;-</span> g</span>
 <span id="cb6-5"><a href="#cb6-5" tabindex="-1"></a></span>
 <span id="cb6-6"><a href="#cb6-6" tabindex="-1"></a>fit_re <span class="ot">&lt;-</span> <span class="fu">tulpa</span>(y <span class="sc">~</span> x <span class="sc">+</span> (<span class="dv">1</span> <span class="sc">|</span> g), <span class="at">data =</span> df, <span class="at">family =</span> <span class="st">&quot;gaussian&quot;</span>,</span>
-<span id="cb6-7"><a href="#cb6-7" tabindex="-1"></a>                <span class="at">mode =</span> <span class="st">&quot;laplace&quot;</span>, <span class="at">sigma_re =</span> <span class="fl">0.6</span>, <span class="at">phi =</span> <span class="fl">0.8</span>)</span>
+<span id="cb6-7"><a href="#cb6-7" tabindex="-1"></a>                <span class="at">mode =</span> <span class="st">&quot;laplace&quot;</span>, <span class="at">sigma_re =</span> <span class="fl">0.6</span>, <span class="at">phi =</span> <span class="fl">0.8</span><span class="sc">^</span><span class="dv">2</span>)</span>
 <span id="cb6-8"><a href="#cb6-8" tabindex="-1"></a><span class="fu">coef</span>(fit_re)</span></code></pre></div>
 <p><code>coef()</code> reports the fixed effects, which are unchanged in
 meaning: the intercept and slope read against a background that now
@@ -566,10 +566,10 @@ for any extra flexibility a richer model brings.</p>
 model, a model adding the slope, and a model adding the random intercept
 on top of the slope. Each is a single <code>tulpa()</code> call
 differing only in the formula.</p>
-<div class="sourceCode" id="cb8"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb8-1"><a href="#cb8-1" tabindex="-1"></a>m0 <span class="ot">&lt;-</span> <span class="fu">tulpa</span>(y <span class="sc">~</span> <span class="dv">1</span>,     <span class="at">data =</span> df, <span class="at">family =</span> <span class="st">&quot;gaussian&quot;</span>, <span class="at">mode =</span> <span class="st">&quot;laplace&quot;</span>, <span class="at">phi =</span> <span class="fl">0.8</span>)</span>
-<span id="cb8-2"><a href="#cb8-2" tabindex="-1"></a>m1 <span class="ot">&lt;-</span> <span class="fu">tulpa</span>(y <span class="sc">~</span> x,     <span class="at">data =</span> df, <span class="at">family =</span> <span class="st">&quot;gaussian&quot;</span>, <span class="at">mode =</span> <span class="st">&quot;laplace&quot;</span>, <span class="at">phi =</span> <span class="fl">0.8</span>)</span>
+<div class="sourceCode" id="cb8"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb8-1"><a href="#cb8-1" tabindex="-1"></a>m0 <span class="ot">&lt;-</span> <span class="fu">tulpa</span>(y <span class="sc">~</span> <span class="dv">1</span>,     <span class="at">data =</span> df, <span class="at">family =</span> <span class="st">&quot;gaussian&quot;</span>, <span class="at">mode =</span> <span class="st">&quot;laplace&quot;</span>, <span class="at">phi =</span> <span class="fl">0.8</span><span class="sc">^</span><span class="dv">2</span>)</span>
+<span id="cb8-2"><a href="#cb8-2" tabindex="-1"></a>m1 <span class="ot">&lt;-</span> <span class="fu">tulpa</span>(y <span class="sc">~</span> x,     <span class="at">data =</span> df, <span class="at">family =</span> <span class="st">&quot;gaussian&quot;</span>, <span class="at">mode =</span> <span class="st">&quot;laplace&quot;</span>, <span class="at">phi =</span> <span class="fl">0.8</span><span class="sc">^</span><span class="dv">2</span>)</span>
 <span id="cb8-3"><a href="#cb8-3" tabindex="-1"></a>m2 <span class="ot">&lt;-</span> <span class="fu">tulpa</span>(y <span class="sc">~</span> x <span class="sc">+</span> (<span class="dv">1</span> <span class="sc">|</span> g), <span class="at">data =</span> df, <span class="at">family =</span> <span class="st">&quot;gaussian&quot;</span>,</span>
-<span id="cb8-4"><a href="#cb8-4" tabindex="-1"></a>            <span class="at">mode =</span> <span class="st">&quot;laplace&quot;</span>, <span class="at">sigma_re =</span> <span class="fl">0.6</span>, <span class="at">phi =</span> <span class="fl">0.8</span>)</span>
+<span id="cb8-4"><a href="#cb8-4" tabindex="-1"></a>            <span class="at">mode =</span> <span class="st">&quot;laplace&quot;</span>, <span class="at">sigma_re =</span> <span class="fl">0.6</span>, <span class="at">phi =</span> <span class="fl">0.8</span><span class="sc">^</span><span class="dv">2</span>)</span>
 <span id="cb8-5"><a href="#cb8-5" tabindex="-1"></a><span class="fu">compare_models</span>(<span class="at">intercept =</span> m0, <span class="at">slope =</span> m1, <span class="at">slope_re =</span> m2, <span class="at">criterion =</span> <span class="st">&quot;loglik&quot;</span>)</span></code></pre></div>
 <p>The table reports each model’s name (taken straight from the argument
 labels, so label them as a ladder), its fixed-effect parameter count,
@@ -1111,19 +1111,19 @@ accessor shown here.</li>
 <div id="where-to-go-next" class="section level2">
 <h2>Where to go next</h2>
 <ul>
-<li>Inference details and the tier guarantees: the inference-modes and
-algorithm vignettes.</li>
-<li>Spatial and temporal fields, spatially varying coefficients: the
-spatial, temporal, and SVC vignettes.</li>
-<li>Priors and prior predictive checks: the priors vignette and
-<code>prior_predict()</code>.</li>
-<li>User-defined latent structure: the <code>tgmrf()</code>
-vignette.</li>
-<li>Model comparison by marginal likelihood, WAIC, and LOO: the
-model-comparison vignette.</li>
-<li>Posterior-predictive checks, WAIC, and LOO on a full observation
+<li><p>Inference details and the tier guarantees: the inference-modes
+and algorithm vignettes.</p></li>
+<li><p>Spatial and temporal fields, spatially varying coefficients: the
+spatial, temporal, and SVC vignettes.</p></li>
+<li><p>Priors and prior predictive checks: the priors vignette and
+<code>prior_predict()</code>.</p></li>
+<li><p>User-defined latent structure: the <code>tgmrf()</code>
+vignette.</p></li>
+<li><p>Model comparison by marginal likelihood, WAIC, and LOO: the
+model-comparison vignette.</p></li>
+<li><p>Posterior-predictive checks, WAIC, and LOO on a full observation
 model: the model packages (tulpaObs, tulpaRatio, tulpaGlmm) that build
-on this engine. ```</li>
+on this engine. ```</p></li>
 </ul>
 </div>
 

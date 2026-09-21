@@ -77,7 +77,7 @@
 .st_knob_is_pinned <- function(control, knob) {
     v <- control[[knob]]
     if (is.null(v)) return(FALSE)
-    if (is_auto_grid(v)) return(FALSE)
+    if (is_auto_grid(v)) return(!auto_grid_place(v))
     if (length(v) != 1L) return(TRUE)
     v <- suppressWarnings(as.numeric(v))
     if (!is.finite(v)) return(TRUE)
@@ -175,7 +175,7 @@
 # net rather than a substantive constraint.
 .st_auto_grid_rescue <- function(out, kernel, kargs, spatial_type, temporal_type,
                                  n_gs, n_gt, n_grho, tau_lo, tau_hi, control,
-                                 rho_spatial_val = 0.9) {
+                                 rho_spatial_val = 0.9, hyperprior = "proper") {
     if (is.character(control$auto_recenter)) {
         stop("control$auto_recenter = \"",
              paste(control$auto_recenter, collapse = "\", \""),
@@ -185,6 +185,18 @@
     }
     if (isFALSE(control$auto_recenter)) {
         return(.nl_decline_recenter(out, "auto_recenter_disabled"))
+    }
+    # bym2's spatial axes are `sigma_spatial` / `rho_spatial` (gcol33/tulpa#776),
+    # not `tau_spatial` -- this rescue has no forward/inverse transform or grid
+    # layout for that pair yet, so it declines explicitly rather than silently
+    # reporting "no usable curvature" for an axis set it never looked at. hsgp
+    # / nngp are the same situation: their spatial axes are `sigma2` paired
+    # with `lengthscale` / `phi_gp`, not `tau_spatial` (gcol33/tulpa#807).
+    if (identical(spatial_type, "bym2")) {
+        return(.nl_decline_recenter(out, "bym2_axes_not_recenterable"))
+    }
+    if (spatial_type %in% c("hsgp", "nngp")) {
+        return(.nl_decline_recenter(out, "gp_axes_not_recenterable"))
     }
     axes   <- .st_grid_axes(temporal_type)
     pinned <- intersect(.st_pinned_axes(control), axes)
@@ -215,7 +227,18 @@
         rho <- if ("rho" %in% axes) vals[["rho"]] else 0.0
         lm  <- .st_probe_log_marginal(kernel, kargs, spatial_type, rho_spatial_val,
                                       vals[["tau_spatial"]], vals[["tau_temporal"]], rho)
-        if (!is.finite(lm)) .Machine$double.xmax else -lm
+        # The posterior on the search coordinate: the grid's hyperprior, whose
+        # precision densities are already on log(tau), and for rho the density on
+        # the natural value carried to its logit coordinate.
+        lp <- .st_log_hyperprior(
+            matrix(vals, nrow = 1L, dimnames = list(NULL, axes)),
+            axes = axes, hyperprior = hyperprior)$lp
+        if ("rho" %in% axes) {
+            p_u <- stats::plogis(u[match("rho", axes)])
+            lp <- lp + log(2 * p_u * (1 - p_u))
+        }
+        post <- lm + lp
+        if (!is.finite(post)) .Machine$double.xmax else -post
     }
 
     opt <- .nl_lbfgsb_mode_find(par = u0, fn = objective,
@@ -356,9 +379,7 @@
         return(.nl_decline_recenter(out, "refit_failed"))
     }
 
-    refit$theta_grid  <- as.matrix(new_grid)
-    refit$theta_names <- colnames(new_grid)
-    refit$weights <- .nl_normalise_weights_safe(refit$log_marginal, "spatiotemporal grid")
+    refit <- .st_attach_outer_integration(refit, new_grid, hyperprior)
     refit <- .joint_attach_pareto_k_regime(refit)
     refit$outer_grid_placement         <- "auto_recentered"
     refit$outer_grid_recenter_attempts <- 1L

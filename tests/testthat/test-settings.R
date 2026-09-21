@@ -37,6 +37,7 @@ test_that("every grid axis materialises to a usable vector", {
 })
 
 test_that("every family binding resolves to a declared axis", {
+    skip_on_cran()
     for (fam in names(tulpa:::.NL_FAMILY_AXES)) {
         bind <- tulpa:::.NL_FAMILY_AXES[[fam]]
         expect_true(length(bind) > 0L, info = fam)
@@ -104,7 +105,16 @@ test_that("the default axes are exactly these values", {
 
     # Diagnostic / recenter / spatiotemporal defaults.
     expect_equal(tulpa:::.nl_diag("k_usable"), 0.7)
-    expect_identical(tulpa:::.nl_diag("k_samples"), 200L)
+    # ONE outer-k draw budget across all four backends (gcol33/tulpa#632). 500,
+    # not the 200 this held before: the joint path was raised to it at
+    # gcol33/tulpa#127 when outer scoring stopped being adaptive-batched, and it
+    # is the budget every shipped outer-k number was read at. Under
+    # gcol33/tulpa#631 this also fixes the PSIS tail fraction (13.6%), so it is
+    # not a pure cost knob and a change to it moves reported k-hats.
+    expect_identical(tulpa:::.nl_diag("k_samples"), 500L)
+    expect_identical(tulpa:::.nl_diag("k_samples_ok"), 800L)
+    expect_identical(tulpa:::.nl_diag("k_samples_good"), 2000L)
+    expect_identical(tulpa:::.nl_diag("k_bootstrap"), 1000L)
     expect_equal(tulpa:::.nl_diag("gamma3_ok"), 0.5)
     expect_equal(tulpa:::.nl_diag("gamma3_unreliable"), 1.0)
     # The two skew-correction defaults, both decided on measurement and both
@@ -132,7 +142,14 @@ test_that("the default axes are exactly these values", {
     expect_identical(tulpa:::.nl_st_default("n_spatial"), 4L)
     expect_equal(tulpa:::.nl_st_default("tau_upper"), 16)
 
+    # Cheap-pass grid screening. `iters` is a cost-against-ranking-fidelity
+    # trade paid on every cell of the grid, so it is a number the engine's
+    # throughput rests on and a change to it has to be deliberate.
+    expect_equal(tulpa:::.nl_screen("prune_tol"), 1e-3)
+    expect_identical(tulpa:::.nl_screen("iters"), 2L)
+
     expect_error(tulpa:::.nl_diag("nope"), "Unknown diagnostic setting")
+    expect_error(tulpa:::.nl_screen("nope"), "Unknown screening setting")
     expect_error(tulpa:::.nl_recenter("nope"), "Unknown recenter setting")
     expect_error(tulpa:::.nl_st_default("nope"), "Unknown spatiotemporal")
 })
@@ -255,6 +272,7 @@ test_that("default grid axes are not written inline outside the settings file", 
 })
 
 test_that("the reported Pareto-k threshold is read, never restated", {
+    skip_on_cran()
     r_dir <- test_path("..", "..", "R")
     skip_if_not(dir.exists(r_dir), "package sources not available")
     files <- setdiff(list.files(r_dir, pattern = "\\.R$", full.names = TRUE),
@@ -275,14 +293,51 @@ test_that("the reported Pareto-k threshold is read, never restated", {
     }
     expect_identical(offenders, character(0))
 
-    # And the k_samples default likewise.
+    # And the outer-k draw budget likewise (gcol33/tulpa#632). This rule used to
+    # read `k_samples\\s*(=|<-|%||%)\\s*200`, keyed to ONE name and ONE literal,
+    # and that is exactly how the joint path drifted: gcol33/tulpa#127 renamed
+    # the internal variable to `diagnose_draws` and raised the default to 500 in
+    # the same commit, so the site was invisible to a rule looking for the name
+    # `k_samples` next to the number 200. The rule is keyed to the CONCEPT
+    # instead -- any budget in this family defaulted to a numeric literal
+    # anywhere but the settings file -- so a future rename cannot walk out from
+    # under it. `n_samples` matches only against a literal, which leaves the
+    # unrelated uses (`n_samples = nrow(draws)`, the reported draw count, the
+    # `cpp_laplace_sample()` argument) alone.
     offenders <- character(0)
     for (f in files) {
         code <- readLines(f, warn = FALSE)
         code <- code[!grepl("^\\s*#|^#'", code)]
-        hits <- grep("k_samples\\s*(=|<-|%\\|\\|%)\\s*200", code, value = TRUE)
+        hits <- grep(paste0("(k_samples|diagnose_draws|n_samples|k_bootstrap)",
+                            "\\s*(=|<-|%\\|\\|%)\\s*[0-9]"),
+                     code, value = TRUE)
         if (length(hits)) {
             offenders <- c(offenders, paste0(basename(f), ": ", trimws(hits)))
+        }
+    }
+    expect_identical(offenders, character(0))
+
+    # The cheap-screen defaults likewise: the weight below which a cell is
+    # dropped and the number of Newton steps the screen takes on every cell.
+    # Keyed to the CONCEPT, so a rename cannot walk out from under it, and to a
+    # NONZERO literal, because `prune_tol = 0` is the sentinel that turns
+    # screening off entirely rather than a restatement of the default.
+    # `RcppExports.R` is generated from the cpp entry's own formals, where an
+    # Rcpp attribute default has to be a literal; the test below pins that
+    # literal to the registry instead.
+    offenders <- character(0)
+    for (f in setdiff(files, file.path(r_dir, "RcppExports.R"))) {
+        code <- readLines(f, warn = FALSE)
+        code <- code[!grepl("^\\s*#|^#'", code)]
+        pat <- paste0("(prune_tol|screen_iters)\\s*(=|<-|%\\|\\|%)\\s*",
+                      "([0-9][0-9.eE+-]*L?)")
+        hits <- grep(pat, code, value = TRUE)
+        for (h in hits) {
+            lit <- sub(paste0("^.*", pat, ".*$"), "\\3", h)
+            val <- suppressWarnings(as.numeric(sub("L$", "", lit)))
+            if (!is.na(val) && val != 0) {
+                offenders <- c(offenders, paste0(basename(f), ": ", trimws(h)))
+            }
         }
     }
     expect_identical(offenders, character(0))
@@ -301,4 +356,104 @@ test_that("the reported Pareto-k threshold is read, never restated", {
         }
     }
     expect_identical(offenders, character(0))
+})
+
+test_that("no user-facing text tells the caller to set a knob that hard-errors", {
+    skip_on_cran()
+    r_dir <- test_path("..", "..", "R")
+    skip_if_not(dir.exists(r_dir), "package sources not available")
+
+    # `control$diagnose_draws` was renamed to `control$k_samples` and the joint
+    # front door hard-errors on the old name, so a message or a doc line telling
+    # the reader to raise it sends them into that error. Two shipped for a while
+    # -- the PSIS decline vocabulary and the tail-cap warning -- because the
+    # rename swept the code and not the prose.
+    #
+    # The pattern is an IMPERATIVE aimed at the knob. Naming `diagnose_draws` as
+    # a returned FIELD (`fit$diagnose_draws` is real) or quoting the old name in
+    # the rename error itself is legitimate and must keep passing.
+    dead <- c("diagnose_draws", "diagnose_cost")
+    verbs <- "(raise|increase|lower|bump|set|use|pass|supply)"
+    files <- list.files(r_dir, pattern = "\\.R$", full.names = TRUE)
+
+    offenders <- character(0)
+    for (f in files) {
+        code <- readLines(f, warn = FALSE)
+        for (k in dead) {
+            pat <- paste0(verbs, "\\s+\\W{0,3}(control\\$)?", k, "\\b")
+            hits <- grep(pat, code, value = TRUE, ignore.case = TRUE)
+            if (length(hits)) {
+                offenders <- c(offenders, paste0(basename(f), ": ", trimws(hits)))
+            }
+        }
+    }
+    expect_identical(offenders, character(0))
+
+    # And the knob the reader IS meant to reach exists on every front door that
+    # reports the diagnostic, under one name, reached the same way.
+    for (fn in c("tulpa_nested_laplace", "tulpa_nested_laplace_joint",
+                 "tulpa_re_cov_nested", "fit_spde")) {
+        expect_true("control" %in% names(formals(getExportedValue("tulpa", fn))),
+                    info = fn)
+    }
+})
+
+test_that("every outer-k entry point defaults to the registry's draw budget", {
+    # The source lint above catches a budget written as a literal. It cannot
+    # catch a SECOND registry-shaped default that reads a different key, and it
+    # says nothing about what the defaults evaluate to -- which is the half that
+    # mattered in gcol33/tulpa#632, where four backends scored the same
+    # hyperparameter posterior at two budgets. Under gcol33/tulpa#631 the budget
+    # fixes the PSIS tail FRACTION (20.0% at 200, 13.6% at 500) and the k-hat is
+    # read against the fixed `k_usable` band, so two live defaults are two
+    # different quantiles of the weight distribution and can band a fit
+    # differently for no reason the fit records.
+    ns  <- asNamespace("tulpa")
+    ref <- tulpa:::.nl_diag("k_samples")
+
+    entries <- list(
+        .joint_pareto_k                = "n_samples",
+        .nested_outer_pareto_k         = "n_samples",
+        .nested_is_pareto_k            = "n_samples",
+        .nested_grid_pareto_k          = "n_samples",
+        .joint_attach_pareto_k_single  = "diagnose_draws",
+        .joint_attach_pareto_k_multi   = "diagnose_draws",
+        .joint_dispatch_multi          = "diagnose_draws"
+    )
+    for (fn in names(entries)) {
+        arg <- entries[[fn]]
+        f <- get(fn, envir = ns)
+        expect_true(arg %in% names(formals(f)), info = fn)
+        expect_identical(eval(formals(f)[[arg]], envir = ns), ref, info = fn)
+    }
+
+    # And the two `k_quality` entry budgets sit above the base one: the ladder
+    # they start is a raise, so an inversion here would make naming a target
+    # band LOWER the budget that has to resolve it.
+    expect_gt(tulpa:::.nl_diag("k_samples_ok"),   ref)
+    expect_gt(tulpa:::.nl_diag("k_samples_good"), tulpa:::.nl_diag("k_samples_ok"))
+})
+
+test_that("the cheap-screen depth is one value across the R and C++ defaults", {
+    # The screening depth exists at three points -- the registry the front door
+    # reads, the literal the cpp entry declares (an Rcpp attribute default has
+    # to be a literal, so it cannot read the engine constant), and the engine
+    # constant the grid driver falls back to. A fit's cost and its cheap ranking
+    # both move with it, so two live values would mean the same grid screened at
+    # two depths depending on which layer supplied the number.
+    ref <- as.integer(tulpa:::.nl_screen("iters"))
+
+    # The cpp entry's own default, as the generated R wrapper carries it.
+    entry <- formals(tulpa:::cpp_nested_laplace_joint_multi)$screen_iters
+    expect_false(is.null(entry))
+    expect_identical(as.integer(eval(entry)), ref)
+
+    # And the engine constant behind it.
+    src <- test_path("..", "..", "src", "nested_laplace_grid.h")
+    skip_if_not(file.exists(src), "package sources not available")
+    line <- grep("static const int CHEAP_SCREEN_ITERS",
+                 readLines(src, warn = FALSE), value = TRUE)
+    expect_length(line, 1L)
+    expect_identical(
+        as.integer(sub(".*=\\s*([0-9]+).*", "\\1", line)), ref)
 })

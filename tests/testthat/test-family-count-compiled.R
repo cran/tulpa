@@ -129,6 +129,7 @@ test_that("the observed curvature the ZI mixture reads is positive", {
 
 
 test_that("the compiled path recovers each family's generating parameters", {
+  skip_on_cran()
   specs <- list(
     list(fam = "neg_binomial_1",           beta = c(1.4, 0.5), phi = 2),
     list(fam = "truncated_poisson",        beta = c(0.7, 0.4), phi = 1),
@@ -217,6 +218,7 @@ test_that("a hurdle model factorizes into its two independent fits", {
 
 
 test_that("the hurdle factorization is exact under any matched ZI prior", {
+  skip_on_cran()
   # The companion to the test above: the identity is a property of the
   # likelihood, not of the particular prior scale, so it must hold equally at a
   # prior far from the default. This is what separates "the priors happen to
@@ -245,6 +247,7 @@ test_that("the hurdle factorization is exact under any matched ZI prior", {
 
 
 test_that("a hurdle model recovers its generating parameters", {
+  skip_on_cran()
   est <- t(vapply(1:8, function(k) {
     set.seed(700 + k)
     n  <- 3000

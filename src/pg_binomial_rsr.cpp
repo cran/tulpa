@@ -18,45 +18,6 @@
 
 using namespace Rcpp;
 
-namespace {
-
-// The projector must be symmetric (the flat buffer is read row-major and both
-// orientations are used) and must annihilate the constant vector: the RSR
-// design it orthogonalises against carries an intercept, and the field level
-// being outside the likelihood is what makes the raw field's sum-to-zero
-// normalisation free.
-void check_rsr_projector(const Rcpp::NumericVector& P, int J) {
-  if (P.size() != static_cast<R_xlen_t>(J) * J) {
-    Rcpp::stop("`rsr_projection` has %d element(s) but must have %d "
-               "(a %d x %d matrix).", static_cast<int>(P.size()), J * J, J, J);
-  }
-  double max_asym = 0.0;
-  for (int a = 0; a < J; a++) {
-    for (int b = a + 1; b < J; b++) {
-      max_asym = std::max(max_asym,
-          std::abs(P[static_cast<size_t>(a) * J + b] -
-                   P[static_cast<size_t>(b) * J + a]));
-    }
-  }
-  if (max_asym > 1e-8) {
-    Rcpp::stop("`rsr_projection` is not symmetric (largest asymmetry %g); an "
-               "orthogonal projector must be.", max_asym);
-  }
-  double max_row = 0.0;
-  for (int a = 0; a < J; a++) {
-    double s = 0.0;
-    for (int b = 0; b < J; b++) s += P[static_cast<size_t>(a) * J + b];
-    max_row = std::max(max_row, std::abs(s));
-  }
-  if (max_row > 1e-8) {
-    Rcpp::stop("`rsr_projection` does not annihilate the constant vector "
-               "(largest row sum %g). Orthogonalise the field against a design "
-               "that includes an intercept.", max_row);
-  }
-}
-
-}  // namespace
-
 // ---------------------------------------------------------------------
 // RSR (Restricted Spatial Regression) Gibbs sampler
 //
@@ -109,7 +70,7 @@ Rcpp::List cpp_pg_binomial_gibbs_rsr(
   }
   const int J = n_spatial_units;
   tulpa::pg_check_index(spatial_group, N, J, "spatial_group");
-  check_rsr_projector(rsr_projection, J);
+  tulpa::pg_check_rsr_projector(rsr_projection, J, /*require_constant=*/true);
   const tulpa::PgAdjacency adj =
       tulpa::pg_build_adjacency(adj_list, n_neighbors, J);
   tulpa::pg_check_components_observed(adj, spatial_group);
@@ -207,6 +168,14 @@ Rcpp::List cpp_pg_binomial_gibbs_rsr(
         spatial_proj_draws(save_idx, s) = phi_proj[s];
       }
       tau_draws[save_idx] = tau;
+      for (int i = 0; i < N; i++) {
+        spatial_contrib[i] = phi_proj[spatial_group[i] - 1];
+      }
+      C.log_prob_draws[save_idx] =
+          C.log_joint_common(y, n, spatial_contrib.begin(), prior_beta_sd,
+                             prior_sigma_re_scale) +
+          tulpa::pg_log_icar(phi.begin(), adj, tau, 0.0) +
+          tulpa::pg_log_gamma(tau, prior_tau_shape, prior_tau_rate);
       save_idx++;
     }
 
@@ -227,7 +196,8 @@ Rcpp::List cpp_pg_binomial_gibbs_rsr(
     Rcpp::Named("sigma_re") = C.sigma_re_draws,
     Rcpp::Named("spatial_raw") = spatial_raw_draws,
     Rcpp::Named("spatial") = spatial_proj_draws,
-    Rcpp::Named("tau") = tau_draws
+    Rcpp::Named("tau") = tau_draws,
+    Rcpp::Named("log_prob") = C.log_prob_draws
   );
 
   if (store_eta) {

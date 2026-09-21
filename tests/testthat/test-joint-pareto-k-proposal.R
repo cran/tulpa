@@ -269,8 +269,9 @@ test_that("the grid-mixture proposal beats the single Gaussian on a skewed grid"
     prep <- tulpa:::.joint_pareto_prepare(res, refit, 600L, NULL)
     expect_identical(prep$proposal_source, "grid_moment")
     vary <- tulpa:::.joint_pareto_vary_axes(prep$Su)
-    set.seed(1); g <- tulpa:::.joint_pareto_score(prep, vary, refit, 600L)
-    set.seed(1); mx <- tulpa:::.joint_pareto_score_mixture(prep, vary, refit, 600L)
+    spec <- tulpa:::.joint_cand_spec(prep, vary, refit)
+    set.seed(1); g  <- tulpa:::.k_score_gaussian(spec, 600L)
+    set.seed(1); mx <- tulpa:::.k_score_mixture(spec, 600L)
     expect_false(is.null(mx))
     expect_lt(mx$pareto_k, g$pareto_k)       # mixture improves the tail shape
     expect_lt(mx$pareto_k, 0.7)              # ... into the usable band
@@ -287,6 +288,7 @@ test_that("the grid-mixture proposal beats the single Gaussian on a skewed grid"
 })
 
 test_that("a grid-width deficiency stays unreliable: the reported k is never the moment-matched Gaussian (gcol33/tulpa#130)", {
+  skip_on_cran()
     # The dispatcher's load-bearing #130 invariant, pinned DIRECTLY rather than
     # only via expect_gte(pareto_k, 0.7). Construction: a spread grid (-3..3, 61
     # cells) whose integration weights are a NARROW Gaussian (sd 0.5 in log-sigma)
@@ -314,7 +316,8 @@ test_that("a grid-width deficiency stays unreliable: the reported k is never the
     vary <- tulpa:::.joint_pareto_vary_axes(prep$Su)
 
     set.seed(203)
-    g <- tulpa:::.joint_pareto_score(prep, vary, refit_wide, 4000L)
+    g <- tulpa:::.k_score_gaussian(
+        tulpa:::.joint_cand_spec(prep, vary, refit_wide), 4000L)
     # The grid-moment proposal -- the engine's faithful single-Gaussian summary of
     # what it integrates over -- is unreliable: the grid is too narrow.
     expect_gte(g$gm$pareto_k, 0.7)
@@ -327,7 +330,8 @@ test_that("a grid-width deficiency stays unreliable: the reported k is never the
     # The dispatched verdict: adopt the faithful within-grid proposal, stay
     # unreliable, and NOT report the moment-matched Gaussian.
     set.seed(203)
-    disp <- tulpa:::.joint_pareto_score_dispatch(prep, vary, refit_wide, 4000L)
+    disp <- tulpa:::.k_dispatch(
+        tulpa:::.joint_cand_spec(prep, vary, refit_wide), 4000L)
     expect_identical(disp$source, "grid_mixture")
     expect_false(identical(disp$source, "moment_matched"))
     expect_gte(disp$best$pareto_k, 0.7)
@@ -437,7 +441,7 @@ test_that("a multi-block CCD fit sources the k-hat from the mode Hessian", {
                    n_re_groups = 0L, sigma_re = 1.0, family = "binomial", phi = 1.0),
         pos = list(y = yp, n_trials = rep(1L, length(yp)), X = Xp,
                    spatial_idx = as.integer(iAp), re_idx = rep(0, length(yp)),
-                   n_re_groups = 0L, sigma_re = 1.0, family = "gaussian", phi = 0.5))
+                   n_re_groups = 0L, sigma_re = 1.0, family = "gaussian", phi = 0.25))
     prior <- list(
         list(type = "icar", n_spatial_units = nA, adj_row_ptr = aA$adj_row_ptr,
              adj_col_idx = aA$adj_col_idx, n_neighbors = aA$n_neighbors,
@@ -482,7 +486,7 @@ test_that("a collapsed tensor fit recovers a usable k-hat (grid-moment + moment 
                    n_re_groups = 0L, sigma_re = 1.0, family = "binomial", phi = 1.0),
         pos = list(y = yp, n_trials = rep(1L, length(yp)), X = Xp,
                    spatial_idx = as.integer(sp), re_idx = rep(0, length(yp)),
-                   n_re_groups = 0L, sigma_re = 1.0, family = "gaussian", phi = 0.4))
+                   n_re_groups = 0L, sigma_re = 1.0, family = "gaussian", phi = 0.16))
     prior <- list(list(
         type = "icar", n_spatial_units = n_s, adj_row_ptr = adj$adj_row_ptr,
         adj_col_idx = adj$adj_col_idx, n_neighbors = adj$n_neighbors,
@@ -527,7 +531,7 @@ test_that("diagnose_k = 'by_arm' adds per-arm k and leaves the joint k unchanged
                    n_re_groups = 0L, sigma_re = 1.0, family = "binomial", phi = 1.0),
         pos = list(y = yp, n_trials = rep(1L, length(yp)), X = Xp,
                    spatial_idx = as.integer(iAp), re_idx = rep(0, length(yp)),
-                   n_re_groups = 0L, sigma_re = 1.0, family = "gaussian", phi = 0.5))
+                   n_re_groups = 0L, sigma_re = 1.0, family = "gaussian", phi = 0.25))
     prior <- list(
         list(type = "icar", n_spatial_units = nA, adj_row_ptr = aA$adj_row_ptr,
              adj_col_idx = aA$adj_col_idx, n_neighbors = aA$n_neighbors,

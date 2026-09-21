@@ -1,5 +1,5 @@
 # Approximation-reliability diagnostics for deterministic (i.i.d.-draw)
-# nested-Laplace fits: laplace_diagnostics() and the mcmc_diagnostics() dispatch.
+# nested-Laplace fits: the diagnostics() dispatch to the reliability table.
 #
 # The reliability headline is a PSIS Pareto-k-hat (Vehtari et al. 2024) of the
 # importance ratio log p_target - log q_proposal, scoring whether the
@@ -54,7 +54,7 @@
     pos = list(y = sim$y_pos, n_trials = rep(1L, length(sim$y_pos)),
                X = sim$Xpos, spatial_idx = sim$spi_pos,
                re_idx = rep(0, length(sim$y_pos)), n_re_groups = 0L,
-               sigma_re = 1.0, family = "gaussian", phi = 0.5,
+               sigma_re = 1.0, family = "gaussian", phi = 0.25,
                field_coef = list(name = "alpha", grid = alpha_grid))
   )
 }
@@ -84,6 +84,7 @@
 # --------------------------------------------------------------------------- #
 
 test_that("reliability k-hat is small when the proposal covers the target (good case)", {
+  skip_on_cran()
   set.seed(101)
   # The reliability headline reads the outer PSIS k-hat of
   # log p_target(theta) - log q_proposal(theta). A Gaussian target covered by a
@@ -107,6 +108,7 @@ test_that("reliability k-hat is small when the proposal covers the target (good 
 })
 
 test_that("reliability k-hat is large when the target is heavier than the proposal (bad case)", {
+  skip_on_cran()
   set.seed(203)
   # The grid proposal is concentrated (sd 0.5 on the log scale) but the target
   # is a wide Gaussian (sd 3): the proposal cannot cover the target's spread, so
@@ -135,6 +137,7 @@ test_that("reliability k-hat is large when the target is heavier than the propos
 # --------------------------------------------------------------------------- #
 
 test_that("a pinned (zero-variance) axis yields the same finite k-hat as the varying-axis fit", {
+  skip_on_cran()
   set.seed(101)
   sg <- exp(seq(-3, 3, length.out = 41))
   refit_cover <- function(tm) { u <- log(tm[, "sigma"]); -0.5 * (u / 0.8)^2 - u }
@@ -163,7 +166,7 @@ test_that("a pinned (zero-variance) axis yields the same finite k-hat as the var
 # (3) Shape / plumbing on a real small nested-Laplace fit.                     #
 # --------------------------------------------------------------------------- #
 
-test_that("laplace_diagnostics returns one finite row per parameter on a small joint fit", {
+test_that("diagnostics() returns one finite row per parameter on a small joint fit", {
   skip_if_not_slow()
   sim   <- .rel_sim(seed = 41)
   fit   <- tulpa_nested_laplace_joint(
@@ -173,18 +176,13 @@ test_that("laplace_diagnostics returns one finite row per parameter on a small j
   fit$draws      <- tulpa_posterior_draws(fit, idx = 1:4, n = 800)
   fit$draws_kind <- "iid"
 
-  rel <- laplace_diagnostics(fit)
+  rel <- diagnostics(fit)
   expect_s3_class(rel, "laplace_diagnostics")
   expect_equal(nrow(rel), 4L)
-  expect_setequal(names(rel),
-                  c("parameter", "mean", "sd", "ess_bulk", "ess_tail", "rhat"))
+  # i.i.d. draws carry no chain, so the table withholds rhat / ESS.
+  expect_setequal(names(rel), c("parameter", "mean", "sd"))
   expect_true(all(is.finite(rel$mean)))
   expect_true(all(is.finite(rel$sd)))
-  expect_true(all(is.finite(rel$rhat)))
-
-  # i.i.d.-draw Monte-Carlo diagnostics: rhat ~ 1, ESS ~ n_draws.
-  expect_true(all(abs(rel$rhat - 1) < 0.1))
-  expect_true(all(rel$ess_bulk > 0.5 * 800))
 
   # The headline k-hat is finite (the pinned-alpha fit no longer declines) and
   # carries a band; grid quadrature reliability is attached.

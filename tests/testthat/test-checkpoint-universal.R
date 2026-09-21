@@ -64,6 +64,54 @@ test_that("single-block nested-Laplace checkpoint == un-checkpointed + resumes",
     "fingerprint")
 })
 
+# The equivalence above reads the fields `LaplaceResult` carries, which is
+# exactly why it could not see gcol33/tulpa#646: the per-row predictive variance
+# lives in the grid driver's own buffer, so `ckpt_serialize` has no way to carry
+# it and a loaded cell used to come back holding the buffer's initial 0. A 0
+# there is not an absent value -- a caller marginalising the
+# (fitted_eta, fitted_eta_var) pair as a grid mixture reads it as a cell of zero
+# predictive variance and understates the reported variance in proportion to the
+# resumed mass. Both the all-loaded and the partly-loaded grid are checked: the
+# torn tail is what a killed run actually comes back as, and it is the case
+# where loaded and freshly solved cells have to agree with each other.
+test_that("a resumed cell reports the predictive variance, not the buffer's 0", {
+  set.seed(11L)
+  n_s <- 20L; N <- 160L
+  adj <- .ck_chain_adj(n_s)
+  w <- as.numeric(arima.sim(n = n_s, list(ar = 0.6))) * 0.7; w <- w - mean(w)
+  sidx <- sample(n_s, N, replace = TRUE); x <- rnorm(N)
+  y <- rbinom(N, 1, plogis(0.3 + 0.5 * x + w[sidx]))
+  X <- cbind(1, x)
+  prior <- c(list(type = "icar", tau_grid = 1 / c(0.5, 0.8, 1.2, 1.8)^2,
+                  spatial_idx = sidx), adj)
+  fit <- function(ck = NULL) {
+    ctrl <- list(diagnose_k = FALSE)
+    if (!is.null(ck)) ctrl$checkpoint <- ck
+    tulpa_nested_laplace(y = y, n_trials = rep(1L, N), X = X, prior = prior,
+                         family = "binomial", control = ctrl)
+  }
+  path <- tempfile(fileext = ".ckpt"); on.exit(unlink(path), add = TRUE)
+
+  f_plain <- fit()
+  v0 <- f_plain$fitted_eta_var
+  expect_false(is.null(v0))
+  # The uninterrupted fit is the reference, so it has to carry a variance in
+  # every cell for the comparison below to be able to fail.
+  expect_true(all(is.finite(v0)))
+  expect_false(any(apply(v0, 1L, function(r) all(r == 0))))
+
+  invisible(fit(list(path = path, resume = FALSE)))
+  f_all <- fit(list(path = path, resume = TRUE))   # every cell loaded
+  expect_false(any(apply(f_all$fitted_eta_var, 1L, function(r) all(r == 0))))
+  expect_equal(f_all$fitted_eta_var, v0, tolerance = 1e-12)
+
+  b <- readBin(path, "raw", n = file.size(path))
+  writeBin(b[seq_len(as.integer(length(b) * 0.6))], path)
+  f_mix <- fit(list(path = path, resume = TRUE))   # loaded + freshly solved
+  expect_false(any(apply(f_mix$fitted_eta_var, 1L, function(r) all(r == 0))))
+  expect_equal(f_mix$fitted_eta_var, v0, tolerance = 1e-12)
+})
+
 # --- RE-covariance nested CCD -----------------------------------------------
 
 test_that("RE-cov nested CCD checkpoint == un-checkpointed + resumes", {
@@ -134,6 +182,63 @@ test_that("per-chain NUTS checkpoint reproduces draws and resumes after a crash"
     "fingerprint")
 })
 
+# --- per-chain NUTS, reached from the R door (gcol33/tulpa#808) -------------
+#
+# The block above exercises the checkpoint mechanism through the unexported
+# Gaussian test entry cpp_tulpa_fit_generic_chains(); this block exercises the
+# same mechanism through the user-reachable route -- tulpa(mode = "hmc") /
+# tulpa_sample_glmm() -- which previously accepted control$checkpoint and
+# dropped it silently.
+
+test_that("tulpa(mode = 'hmc') checkpoint reproduces draws and resumes", {
+  set.seed(8L)
+  n <- 100L
+  d <- data.frame(x = rnorm(n))
+  d$y <- rpois(n, exp(0.3 + 0.5 * d$x))
+  path <- tempfile(fileext = ".ckpt"); on.exit(unlink(path), add = TRUE)
+
+  run <- function(ck = NULL) {
+    ctrl <- list(n_iter = 200L, warmup = 100L, n_chains = 2L, seed = 1L)
+    if (!is.null(ck)) ctrl$checkpoint <- list(path = ck, resume = TRUE)
+    tulpa(y ~ x, data = d, family = "poisson", mode = "hmc", control = ctrl)
+  }
+
+  f_plain <- run()
+  f_ck    <- run(path)
+  expect_true(file.exists(path))
+  expect_equal(f_ck$draws, f_plain$draws, tolerance = 1e-10)
+
+  # Resume: the file already holds every finished chain, so a second call
+  # against the same path reproduces the draws without appending.
+  sz <- file.size(path)
+  f_re <- run(path)
+  expect_equal(file.size(path), sz)
+  expect_equal(f_re$draws, f_plain$draws, tolerance = 1e-10)
+
+  # resume = FALSE removes the stale file before the kernel opens it, so a
+  # fresh run against different data does not inherit the old chains.
+  d2 <- data.frame(x = rnorm(n))
+  d2$y <- rpois(n, exp(-0.2 + 0.1 * d2$x))
+  f_fresh <- tulpa(y ~ x, data = d2, family = "poisson", mode = "hmc",
+                   control = list(n_iter = 200L, warmup = 100L, n_chains = 2L,
+                                  seed = 1L,
+                                  checkpoint = list(path = path, resume = FALSE)))
+  expect_false(isTRUE(all.equal(unname(f_fresh$draws), unname(f_plain$draws))))
+})
+
+test_that("control$checkpoint is refused on a non-NUTS sampler backend", {
+  set.seed(9L)
+  n <- 60L
+  d <- data.frame(x = rnorm(n))
+  d$y <- rpois(n, exp(0.2 + 0.3 * d$x))
+  path <- tempfile(fileext = ".ckpt"); on.exit(unlink(path), add = TRUE)
+  expect_error(
+    tulpa(y ~ x, data = d, family = "poisson", mode = "vi",
+         control = list(checkpoint = list(path = path))),
+    "only read by the NUTS/HMC kernel")
+  expect_false(file.exists(path))
+})
+
 # --- gcol33/tulpa#442 -------------------------------------------------------
 #
 # A resumed cell has to be indistinguishable from a freshly solved one in EVERY
@@ -194,4 +299,55 @@ test_that("the RE group assignment separates two fingerprints in its second half
   }
   run(g1, FALSE)
   expect_error(run(g2, TRUE), "fingerprint")
+})
+
+# ============================================================================
+# The chain fingerprint covers the DATA, not only its shape (gcol33/tulpa#683)
+#
+# The response lives behind an opaque pointer, so the fingerprint folds the
+# target the chains sample -- evaluated at engine-fixed probe positions -- and a
+# resume against a different data set of the same shape is refused instead of
+# returning the earlier fit's draws under the new data's name.
+# ============================================================================
+
+test_that("a resume against different data of the same shape is refused", {
+  set.seed(11L)
+  X  <- cbind(1, rnorm(60))
+  y1 <- rpois(60, exp( 0.5 + 0.4 * X[, 2]))
+  y2 <- rpois(60, exp(-1.5 - 1.2 * X[, 2]))
+  cp <- file.path(tempdir(), "ckpt-683.bin")
+  on.exit(unlink(cp), add = TRUE)
+  unlink(cp)
+  run <- function(y, path) cpp_tulpa_fit_generic_chains(
+    as.numeric(y), X, 2L, n_iter = 120L, n_warmup = 60L, seed = 5L,
+    checkpoint_path = path)
+
+  f1 <- run(y1, cp)
+  expect_error(run(y2, cp), "fingerprint mismatch")
+
+  # The same data still resumes, bit for bit: the probe is deterministic and
+  # takes nothing from R's RNG stream.
+  f1b <- run(y1, cp)
+  expect_identical(f1$draws, f1b$draws)
+
+  # And it is the DATA that separates them, not the file: y2 fits normally on
+  # its own path, to its own answer.
+  f2 <- run(y2, file.path(tempdir(), "ckpt-683b.bin"))
+  on.exit(unlink(file.path(tempdir(), "ckpt-683b.bin")), add = TRUE)
+  expect_false(isTRUE(all.equal(colMeans(f1$draws), colMeans(f2$draws))))
+})
+
+test_that("a changed design of the same shape is refused too", {
+  set.seed(12L)
+  X1 <- cbind(1, rnorm(50))
+  X2 <- cbind(1, rnorm(50))
+  y  <- rpois(50, 3)
+  cp <- file.path(tempdir(), "ckpt-683c.bin")
+  on.exit(unlink(cp), add = TRUE)
+  unlink(cp)
+  run <- function(X, path) cpp_tulpa_fit_generic_chains(
+    as.numeric(y), X, 2L, n_iter = 120L, n_warmup = 60L, seed = 3L,
+    checkpoint_path = path)
+  run(X1, cp)
+  expect_error(run(X2, cp), "fingerprint mismatch")
 })

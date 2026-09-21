@@ -92,15 +92,10 @@ knitr::opts_chunk$set(eval = EVAL_FITS)
 # as.numeric(logLik(m_nt))
 
 ## ----evidence-----------------------------------------------------------------
-# lse <- function(v) { m <- max(v); m + log(sum(exp(v - m))) }
-# evidence_temporal <- lse(fit$log_marginal)
-# c(no_temporal = as.numeric(logLik(m_nt)), temporal = evidence_temporal)
+# compare_models(no_temporal = m_nt, temporal = fit, criterion = "loglik")
 
-## ----compare------------------------------------------------------------------
-# cmp <- compare_models(no_temporal = m_nt,
-#                       temporal = fit,
-#                       criterion = "loglik")
-# cmp
+## ----waic---------------------------------------------------------------------
+# compare_models(no_temporal = m_nt, temporal = fit, criterion = "waic")
 
 ## ----fit-gaussian-------------------------------------------------------------
 # set.seed(7)

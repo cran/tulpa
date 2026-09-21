@@ -354,8 +354,13 @@ posterior_sample <- function(fit) {
   if (is.null(carries)) {
     carries <- "no posterior representation this accessor can read"
   }
-  sprintf("%s(): %s carries no posterior draws. It carries %s.",
-          caller, who, carries)
+  # A chain-stamped fit is a sampler's output, so an absent sample there is a
+  # sample that was not kept rather than a representation without one.
+  chain <- is.list(fit) && identical(fit[["draws_kind"]], "chain")
+  sprintf("%s(): %s carries no posterior draws.%s It carries %s.",
+          caller, who,
+          if (chain) " It is stamped as an MCMC chain, which it did not retain." else "",
+          carries)
 }
 
 # The one place a fit's posterior draws are read off the object.
@@ -368,7 +373,10 @@ posterior_sample <- function(fit) {
 #' @keywords internal
 .fit_draws <- function(fit) {
   if (!is.list(fit)) return(NULL)
-  fit[["draws"]] %||% fit[["samples"]]
+  draws <- fit[["draws"]] %||% fit[["samples"]]
+  # A zero-row draws matrix holds no sample, so it is read as none.
+  if (!is.null(draws) && NROW(draws) == 0L) return(NULL)
+  draws
 }
 
 #' MCMC chain draws from a fit
@@ -399,13 +407,15 @@ mcmc_draws <- function(fit) {
   if (is.null(draws)) return(NULL)
   if (length(dim(draws)) == 3L) {
     d  <- dim(draws)
-    pn <- dimnames(draws)[[3L]] %||% paste0("param", seq_len(d[3L]))
+    pn <- .tulpa_draw_names(dimnames(draws)[[3L]], fit, d[3L])
     # [iter, chain, param] is column-major with iter fastest, so reshaping to
     # nrow = iter * chain stacks each parameter's pooled draws into one column.
     m <- matrix(as.numeric(draws), nrow = d[1L] * d[2L], ncol = d[3L])
     colnames(m) <- pn
     return(m)
   }
+  cn <- .tulpa_draw_names(colnames(draws), fit, ncol(draws))
+  if (!identical(colnames(draws), cn)) colnames(draws) <- cn
   draws
 }
 
@@ -430,18 +440,23 @@ mcmc_draws <- function(fit) {
   }
 
   draws <- as.matrix(draws)
-  cid <- fit$chain_id
-  nch <- fit$n_chains %||% 1L
-  if (!is.null(cid) && length(cid) == nrow(draws)) {
-    ks <- sort(unique(cid))
-    lapply(ks, function(k) draws[cid == k, , drop = FALSE])
-  } else if (nch > 1L && nrow(draws) %% nch == 0L) {
-    per <- nrow(draws) %/% nch
-    lapply(seq_len(nch), function(k)
-      draws[((k - 1L) * per + 1L):(k * per), , drop = FALSE])
-  } else {
-    list(draws)
+  cid <- .tulpa_chain_id(fit, nrow(draws))
+  lapply(sort(unique(cid)), function(k) draws[cid == k, , drop = FALSE])
+}
+
+# Chain index (1..n_chains) of each of `n_rows` pooled draw rows: the fit's
+# `chain_id` row map when it covers every row, else contiguous chain-major
+# blocks of an `n_chains` count that divides the rows, else one chain.
+.tulpa_chain_id <- function(fit, n_rows) {
+  cid <- fit[["chain_id"]]
+  nch <- fit[["n_chains"]] %||% 1L
+  if (!is.null(cid) && length(cid) == n_rows) {
+    return(as.integer(factor(cid)))
   }
+  if (nch > 1L && n_rows %% nch == 0L) {
+    return(rep(seq_len(nch), each = n_rows %/% nch))
+  }
+  rep(1L, n_rows)
 }
 
 #' Posterior draws as a 3D array
@@ -467,6 +482,20 @@ tulpa_draws_array <- function(fit) {
   arr
 }
 
+# Column names for a draws matrix, in the order they are trustworthy: the
+# matrix's own, then the fit's `$param_names`, then positional. Several backends
+# (mala, imh_laplace, pathfinder, vi) store an UNNAMED draws matrix alongside a
+# fully populated `$param_names`, so reading colnames() alone reported every row
+# as param1..paramN and a warning list of "Rhat > 1.01: param3" could not be
+# traced back to a coefficient without counting columns by hand
+# (gcol33/tulpa#714).
+#' @keywords internal
+.tulpa_draw_names <- function(nm, fit, p) {
+  if (!is.null(nm) && length(nm) == p && all(nzchar(nm))) return(nm)
+  base <- if (!is.null(nm) && length(nm) == p) nm else fit$param_names
+  .tulpa_fill_names(base, p, "param")
+}
+
 # The array assembly without the user-facing note, for the internal callers that
 # probe for draws and already have a designed fallback (the `posterior` interop
 # conversion, k-fold, power-scaling). One body, two doors: the front door reports
@@ -477,8 +506,7 @@ tulpa_draws_array <- function(fit) {
   if (is.null(chain_list)) return(NULL)
   n_iter <- min(vapply(chain_list, nrow, integer(1)))
   p  <- ncol(chain_list[[1L]])
-  nm <- colnames(chain_list[[1L]])
-  if (is.null(nm)) nm <- paste0("param", seq_len(p))
+  nm <- .tulpa_draw_names(colnames(chain_list[[1L]]), fit, p)
   arr <- array(
     NA_real_, dim = c(n_iter, length(chain_list), p),
     dimnames = list(NULL, NULL, nm)
@@ -502,8 +530,7 @@ get_draws_array <- function(fit) list(draws = tulpa_draws_array(fit))
   if (is.null(chain_list) || nrow(chain_list[[1L]]) < 4L) return(NULL)
 
   p  <- ncol(chain_list[[1L]])
-  nm <- colnames(chain_list[[1L]])
-  if (is.null(nm)) nm <- paste0("param", seq_len(p))
+  nm <- .tulpa_draw_names(colnames(chain_list[[1L]]), fit, p)
   keep <- if (is.null(pars)) seq_len(p) else which(nm %in% pars)
   if (length(keep) == 0L) return(NULL)
 
@@ -522,27 +549,6 @@ get_draws_array <- function(fit) list(draws = tulpa_draws_array(fit))
   }
   data.frame(parameter = nm[keep], out, check.names = FALSE,
              stringsAsFactors = FALSE, row.names = NULL)
-}
-
-#' MCMC convergence diagnostics
-#'
-#' @description
-#' `r lifecycle::badge("deprecated")`
-#'
-#' Use [diagnostics()], which reads a fit's draws provenance and returns the
-#' diagnostic that applies -- chain mixing for MCMC draws, approximation
-#' reliability for deterministic fits. The name `mcmc_diagnostics()` described
-#' only one of the two branches it already routed between.
-#'
-#' @inheritParams diagnostics
-#' @return The value of [diagnostics()] for `fit`.
-#' @keywords internal
-#' @export
-mcmc_diagnostics <- function(fit, pars = NULL,
-                             measures = c("rhat", "ess_bulk", "ess_tail"),
-                             probs = c(0.05, 0.95)) {
-  lifecycle::deprecate_warn("0.0.95", "mcmc_diagnostics()", "diagnostics()")
-  diagnostics(fit, pars = pars, measures = measures, probs = probs)
 }
 
 #' Select the "main" model parameters for diagnostic display

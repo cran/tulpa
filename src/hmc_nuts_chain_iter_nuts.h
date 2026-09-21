@@ -5,6 +5,11 @@
     bool divergent = false;
     int iter_n_leapfrog = L;
     int iter_treedepth = 0;
+    // Starting Hamiltonian of this iteration's trajectory (-log_post +
+    // kinetic energy at the sampled momentum), Stan's energy__ -- read by
+    // plot_energy() / the E-BFMI check, stored once per iteration alongside
+    // log_prob / accept_prob / divergent / treedepth (gcol33/tulpa#783).
+    double iter_H0 = 0.0;
 
     if (use_nuts && !(use_lbfgs && !lbfgs_warmup_done)) {
       // -----------------------------------------------------------------
@@ -29,6 +34,7 @@
       double H0 = nuts_compute_hamiltonian_fast(
         log_prob_current, p.data(), mass, n_params
       );
+      iter_H0 = H0;
       double delta_max = 1000.0;
 
       // Load current state into workspace persistent slots
@@ -293,11 +299,20 @@
             run_trajectory(eps_retry, softabs_persistent_mass, H0_retry, 1000.0,
                            retry_divergent, retry_treedepth);
 
-            // If retry succeeded (no divergence), accept and stop retrying
+            // If retry succeeded (no divergence), accept and stop retrying.
+            //
+            // `divergent` STAYS TRUE: the trajectory this iteration was asked
+            // for did diverge, and clearing the flag took the event out of
+            // result.divergent[], out of n_divergent(fit) and out of
+            // diagnostic_summary() -- the rescue's only trace was a verbose
+            // print (gcol33/tulpa#695). The rescue is reported in its own
+            // counter beside it, so a reader can tell a divergence that was
+            // rescued from one that was not.
             if (!retry_divergent) {
-              divergent = false;
               iter_treedepth = retry_treedepth;
+              iter_H0 = H0_retry;
               softabs_successes++;
+              result.n_softabs_rescued++;
               alpha = (total_leapfrog > 0) ? (sum_accept_prob / total_leapfrog) : 0.0;
               iter_n_leapfrog = total_leapfrog;
               break;  // Success -- stop retry loop
@@ -305,11 +320,9 @@
             // Otherwise: try again with halved step size (next iteration)
           }  // end retry_attempt loop
 
-          // If all retries failed, update stats from last attempt
-          if (divergent) {
-            alpha = (total_leapfrog > 0) ? (sum_accept_prob / total_leapfrog) : 0.0;
-            iter_n_leapfrog = total_leapfrog;
-          }
+          // Stats come from the last attempt either way.
+          alpha = (total_leapfrog > 0) ? (sum_accept_prob / total_leapfrog) : 0.0;
+          iter_n_leapfrog = total_leapfrog;
         }
         // else: metric computation failed, keep original divergent result
       }
@@ -325,7 +338,12 @@
       iter_n_leapfrog = total_leapfrog;
 
       if (divergent) n_divergent++;
-      if (iter_treedepth >= max_treedepth) result.n_max_treedepth++;
+      // Post-warmup only. Treedepth saturation while epsilon is still adapting
+      // is normal and says nothing about the sampled chain, so counting it
+      // inflated the field by design (gcol33/tulpa#703). The per-sample
+      // `treedepth` vector R already receives covers the same iterations, so
+      // the two agree.
+      if (!is_warmup && iter_treedepth >= max_treedepth) result.n_max_treedepth++;
 
       // Adaptation during warmup
       if (is_warmup) {

@@ -93,3 +93,56 @@ test_that("tweedie validation fires", {
   expect_identical(
     tulpa:::family_loglik(0, -1, "tweedie", phi = 1, phi2 = 1.5), -Inf)
 })
+
+test_that("family = 'tweedie' is reachable on the sampler backends", {
+  # gcol33/tulpa#694: build_sampler_model_inputs() called resp.prepare(), which
+  # hard-errors when family == "tweedie" && isnan(phi2), and the caller assigned
+  # phi2 only AFTERWARDS -- so it was always NaN there and the family was
+  # unreachable on every sampler backend, hmc included.
+  skip_on_cran()
+  set.seed(7)
+  n <- 120L
+  x <- rnorm(n)
+  mu <- exp(0.4 + 0.5 * x); phi <- 1.0; p <- 1.6
+  lam <- mu^(2 - p) / (phi * (2 - p))
+  a <- (2 - p) / (p - 1); b <- mu^(1 - p) / (phi * (p - 1))
+  nev <- rpois(n, lam)
+  y <- ifelse(nev > 0, rgamma(n, shape = nev * a, rate = b), 0)
+  d <- data.frame(y = y, x = x)
+
+  fit <- tulpa(y ~ x, data = d, family = "tweedie", phi2 = p, mode = "hmc",
+               control = list(n_iter = 60L, warmup = 30L, n_chains = 1L,
+                              seed = 1L))
+  expect_s3_class(fit, "tulpa_fit")
+  expect_true(all(is.finite(coef(fit))))
+
+  # The error it used to raise is still raised when phi2 is genuinely absent.
+  expect_error(tulpa(y ~ x, data = d, family = "tweedie", mode = "hmc",
+                     control = list(n_iter = 20L, warmup = 10L, n_chains = 1L,
+                                    seed = 1L)),
+               "phi2|variance power")
+})
+
+
+test_that("a tweedie random-intercept fit does not hang on a diverging trajectory (gcol33/tulpa#789)", {
+  # gcol33/tulpa#789: log_lik_tweedie() (src/laplace_family_link.h) had no
+  # finiteness guard before its event-count series and no bound on the series
+  # itself, so a leapfrog proposal reaching mu = +Inf or eta = NaN turned every
+  # log-term into Inf - Inf = NaN and the upward loop never broke -- logged as
+  # a ~550s run ending in std::bad_alloc on this exact configuration.
+  skip_on_cran()
+  set.seed(1); n <- 160L; G <- 12L; p <- 1.5
+  x <- rnorm(n); g <- factor(sample(seq_len(G), n, replace = TRUE))
+  b0 <- rnorm(G, 0, 0.5); b1 <- rnorm(G, 0, 0.3)
+  mu <- exp(0.5 + 0.5 * x + b0[g] + b1[g] * x)
+  nev <- rpois(n, mu^(2 - p) / (2 - p))
+  y <- vapply(seq_len(n), function(i) if (nev[i] == 0) 0 else
+    sum(rgamma(nev[i], shape = (2 - p) / (p - 1), scale = (p - 1) * mu[i]^(p - 1))), 1)
+  d <- data.frame(x = x, g = g, y = y)
+
+  fit <- tulpa(y ~ x + (1 | g), data = d, family = "tweedie", phi = 1, phi2 = 1.5,
+               mode = "hmc",
+               control = list(n_iter = 60L, warmup = 30L, n_chains = 1L, seed = 1L))
+  expect_s3_class(fit, "tulpa_fit")
+  expect_true(all(is.finite(coef(fit))))
+})

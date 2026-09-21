@@ -90,14 +90,11 @@ knitr::opts_chunk$set(eval = EVAL_FITS)
 
 ## ----compare------------------------------------------------------------------
 # m0 <- tulpa(y ~ x, data = ds, family = "binomial", mode = "laplace")
-# 
-# lse  <- function(z) { m <- max(z); m + log(sum(exp(z - m))) }
-# ev_spatial    <- lse(fit$log_marginal)
-# ev_nonspatial <- as.numeric(logLik(m0))
-# c(nonspatial = ev_nonspatial, spatial = ev_spatial)
+# cmp <- compare_models(nonspatial = m0, spatial = fit, criterion = "loglik")
+# cmp
 
 ## ----compare-diff-------------------------------------------------------------
-# ev_spatial - ev_nonspatial
+# diff(cmp$logLik)
 
 ## ----continuous-spec----------------------------------------------------------
 # gp_spec <- spatial_gp(~ lon + lat)

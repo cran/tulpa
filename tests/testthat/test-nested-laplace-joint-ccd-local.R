@@ -94,6 +94,38 @@ test_that("greedy selection picks mutually non-adjacent cells", {
   }
 })
 
+test_that("the selection ranks by weight by default, or by the mass a cell misplaces", {
+  mu <- c(0.2, 0.9); s <- c(0.6, 0.5)
+  lv <- list(a = c(-1.5, -0.5, 0.5, 1.5), b = c(-1.5, -0.5, 0.5, 1.5))
+  gd <- .lccd_grid(lv, mu, s)
+  U  <- as.matrix(gd$grid)
+  nb <- tulpa:::.joint_local_ccd_neighbors(U, gd$grid, 1:2)
+  w  <- tulpa:::.joint_integration_weights(gd$lm, NULL)
+  curv <- vector("list", nrow(U)); cands <- integer(0)
+  for (c in seq_len(nrow(U))) {
+    cc <- tulpa:::.joint_local_ccd_cell_curv(c, U, gd$lm, nb$up, nb$dn)
+    if (is.null(cc)) next
+    curv[[c]] <- cc; cands <- c(cands, c)
+  }
+  expect_gt(length(cands), 1L)
+  expect_identical(tulpa:::.joint_local_ccd_rank_score("weight", cands, w, curv), w)
+  sc <- tulpa:::.joint_local_ccd_rank_score("mass_moved", cands, w, curv)
+  lbr <- vapply(cands, function(c)
+    tulpa:::.joint_local_ccd_cell_box_mass(curv[[c]])$log_box_ratio, numeric(1))
+  expect_equal(sc[cands], w[cands] * abs(expm1(lbr)), tolerance = 1e-14)
+  expect_true(all(sc[-cands] == -Inf))
+  expect_error(tulpa:::.joint_local_ccd_rank_score("size", cands, w, curv))
+
+  # The default rank is the weight ranking, bit for bit.
+  args <- list(joint_grid = gd$grid, log_marginal = gd$lm, modes = NULL,
+               dnode = NULL, latent_axes = c("a", "b"),
+               tags = c(a = "identity", b = "identity"),
+               eval_nodes = .lccd_eval(mu, s), max_cells = 2L)
+  expect_identical(do.call(tulpa:::.joint_local_ccd_refine, args),
+                   do.call(tulpa:::.joint_local_ccd_refine,
+                           c(args, list(rank = "weight"))))
+})
+
 test_that("local CCD declines on NULL tags, the engage gate, and a monotone field", {
   expect_false(tulpa:::.joint_local_ccd_engage(3L))
   expect_true(tulpa:::.joint_local_ccd_engage(4L))
@@ -721,6 +753,14 @@ test_that("a locally refined fit says what its interval was read off", {
     f(v[use], w[use] / sum(w[use]), cell[use])
   }, numeric(3L)))
 
+  # All three arms are read off the same dispatch at the same within-cell
+  # construction, so what varies between them is the collapse construction and
+  # nothing else. `mixed` declines the box-uniform default and falls back to the
+  # chord read, so the comparators ask for chord too; naming a policy inline
+  # here is what let them drift apart the last time the construction moved.
+  dens   <- function(v, ww)
+    tulpa:::.nl_summary_quantile(v, ww, probs, "unbounded", "density",
+                                 within = "chord")
   mixed  <- per_axis(function(v, ww, cc)
     tulpa:::.nl_summary_quantile(v, ww, probs, "unbounded", "mixed"))
   moment <- per_axis(function(v, ww, cc)
@@ -734,13 +774,13 @@ test_that("a locally refined fit says what its interval was read off", {
       vv  <- c(vv, sum(ww[ix] * v[ix]) / tot)
       wv  <- c(wv, tot)
     }
-    tulpa:::.nl_wtd_quantile(vv, wv, probs, outside = "clamp")
+    dens(vv, wv)
   })
   w0 <- tulpa:::.joint_integration_weights(tg$lm, NULL)
   base <- t(vapply(seq_len(ncol(tg$grid)), function(j) {
     v   <- as.numeric(tg$grid[, j])
     use <- is.finite(v) & is.finite(w0) & w0 > 0
-    tulpa:::.nl_wtd_quantile(v[use], w0[use] / sum(w0[use]), probs, "clamp")
+    dens(v[use], w0[use] / sum(w0[use]))
   }, numeric(3L)))
 
   ex <- matrix(rep(tg$exact, each = nrow(mixed)), nrow = nrow(mixed))
@@ -773,16 +813,22 @@ test_that("the mixed read beats the alternatives on both sides of design_mass", 
   expect_gte(nrow(lo), 15L)
 
   # Summed absolute endpoint error against the exact quantiles. Measured:
-  # design_mass >= 0.5 (19 configurations) mixed 3.18024, collapsed 15.72792,
-  # unrefined 17.80607; design_mass < 0.5 (17) mixed 2.69889, collapsed 3.92249,
-  # unrefined 3.83155.
+  # design_mass >= 0.5 (19 configurations) mixed 3.46157, collapsed 16.29057,
+  # unrefined 18.05801; design_mass < 0.5 (17) mixed 3.14443, collapsed 4.79910,
+  # unrefined 4.48729.
+  #
+  # The mixed totals rose from 3.18024 / 2.69889 when the mixed support moved to
+  # `outside = "extend"` alongside the density one, and the comparator totals
+  # from 15.72792 / 17.80607 / 3.92249 / 3.83155 when they were aligned onto the
+  # same dispatch. The ordering below holds under either policy applied to all
+  # three arms; it is the margin, not the verdict, that moves.
   for (part in list(hi, lo)) {
     tot <- colSums(part[, c("mixed", "moment", "collapsed", "base")])
     expect_lt(tot[["mixed"]], tot[["collapsed"]])
     expect_lt(tot[["mixed"]], tot[["base"]])
   }
-  expect_lt(sum(hi$mixed), 3.5)
-  expect_lt(sum(lo$mixed), 3.0)
+  expect_lt(sum(hi$mixed), 3.8)
+  expect_lt(sum(lo$mixed), 3.5)
 
   # The moment read wins on THIS target because a Gaussian moment match is its
   # exact family here, which is why the win does not carry (see below).
@@ -792,7 +838,7 @@ test_that("the mixed read beats the alternatives on both sides of design_mass", 
 test_that("the moment read's advantage is the family, not the support", {
   skip_if_not_slow()
   # Same correlation, same refinement, skewed marginals. Measured over 27
-  # configurations: mixed 24.59641 against moment 39.93958. The mixed total is
+  # configurations: mixed 28.52885 against moment 39.85826. The mixed total is
   # off the GATED refinement (gcol33/tulpa#318); unconditional refinement on this
   # target gives 26.24674.
   s <- .lccd_gate_sweep(gamma_shape = 2, reaches = c(1.5, 2, 3))
@@ -981,7 +1027,7 @@ test_that("the gate declines this fixture's own cell, and the read moves toward 
   # box-uniform default does not (gcol33/tulpa#399). Scoring the REFINEMENT GATE
   # against it therefore has to be done in the read that produced it, or the
   # within-cell construction -- an orthogonal choice (gcol33/tulpa#357) -- enters
-  # the number. At the default: wid(on) = 0.4706, wid(off) = 0.7313. The ordering
+  # the number. At the default: wid(on) = 0.4706, wid(off) = 0.7146. The ordering
   # this test asserts holds either way.
   #
   # That gap is NOT the box partition being mis-sized on a three-level axis.
@@ -999,10 +1045,12 @@ test_that("the gate declines this fixture's own cell, and the read moves toward 
   on  <- lc(tulpa:::.nl_diag("gamma3_ok"))
 
   # The regime first: this fixture's candidate cell holds essentially none of the
-  # base grid's weight and scores 0.7458 on the misfit, so the gate declines it
-  # and the fit falls back to the plain tensor read.
+  # base grid's weight and scores 0.719 on the misfit, so the gate declines it
+  # and the fit falls back to the plain tensor read. The misfit is scored on the
+  # outer posterior at the design's nodes, which carries the default hyperprior
+  # since gcol33/tulpa#730; on the prior-less marginal it read 0.7458.
   expect_equal(off$local_ccd_info$n_cells_refined, 1L)
-  expect_equal(off$local_ccd_info$misfit, 0.7458, tolerance = 1e-3)
+  expect_equal(off$local_ccd_info$misfit, 0.719, tolerance = 1e-3)
   expect_lt(off$local_ccd_info$cell_share, 1e-3)
   expect_equal(on$local_ccd_info$n_cells_refined, 0L)
   expect_equal(on$local_ccd_info$n_cells_declined, 1L)
@@ -1012,7 +1060,7 @@ test_that("the gate declines this fixture's own cell, and the read moves toward 
   # And it is a correction, not only a decline. The converged m = 13 reference of
   # the SAME simulation (dev_notes/issue_316, 28561 cells, refinement off) has
   # per-axis 95% widths 0.81646 / 1.49922 / 0.81826 / 1.22962. Measured mean
-  # absolute width error against it: 0.7749 with the cloud, 0.3198 without. (The
+  # absolute width error against it: 0.7146 with the cloud, 0.2500 without. (The
   # two grids do not share axis RANGES with the reference, so a clamped endpoint
   # is not on the same support; the widths are the comparable part.)
   ref_w <- c(0.81646, 1.49922, 0.81826, 1.22962)

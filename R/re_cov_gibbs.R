@@ -261,6 +261,11 @@ tulpa_re_cov_gibbs <- function(y, n_trials = NULL, X, re_terms,
          call. = FALSE)
   }
   layout <- .re_cov_block_layout(re_terms, n_obs)
+  if (length(layout) == 0L) {
+    stop("tulpa_re_cov_gibbs(): no random-effect terms. The Gibbs sweep is ",
+         "over the random-effect covariances, so there is nothing to fit; ",
+         "use tulpa_laplace() for a fixed-effect-only model.", call. = FALSE)
+  }
   M      <- length(layout)
 
   # A user-supplied `prior_scale` applies to the block(s) whose covariance
@@ -404,6 +409,9 @@ tulpa_re_cov_gibbs <- function(y, n_trials = NULL, X, re_terms,
     # (.re_draws_mat), so ranef() / posterior_predict() see the sampled b
     # without either of them learning anything about this backend.
     re          = re_draws,
+    # log p(y, beta, b, Sigma) at each retained sweep, Sigma on its natural
+    # scale: the joint density this sampler draws from, row-aligned with draws.
+    log_prob    = out$log_prob,
     means       = beta_mean,
     param_names = beta_names,
     process_info = list(list(name = "fixed_effects", p = p,
@@ -417,5 +425,7 @@ tulpa_re_cov_gibbs <- function(y, n_trials = NULL, X, re_terms,
     n_blocks    = M,
     n_coefs     = vapply(layout, `[[`, integer(1), "nc"),
     prior       = priors
-  ), backend = "re_cov_gibbs", n_fixed = p, fixed_names = beta_names)
+  ), backend = "re_cov_gibbs", n_fixed = p, fixed_names = beta_names,
+     data = list(y = y, n_trials = n_trials, model_matrix = X,
+                family = family, phi = phi))
 }

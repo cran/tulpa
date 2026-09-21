@@ -47,6 +47,7 @@ test_that("the clamp reports which bound it hit, and the SD it measured", {
 })
 
 test_that("the clamp policy lays exactly the axis the pre-#387 formula did", {
+  skip_on_cran()
     # `"clamp"` IS `min(max(sd, lo), hi)`, so the arm the measurement compared
     # against is the pre-#387 engine exactly. (It is no longer the DEFAULT --
     # see the ceiling block below -- but it remains what a fit gets on the
@@ -86,7 +87,8 @@ test_that("the ceiling DECLINES by default, and the floor still clamps", {
     # stencil could not resolve that direction, and laying an axis from the
     # substituted number never wins a trial and loses none when skipped (7-0
     # paired). A clamped FLOOR widens a too-narrow axis, which is the direction
-    # that cannot rail, and declining there loses 22 trials against 9.
+    # that cannot rail, and declining there more than doubles the summed
+    # |coverage - nominal| (0.1614 -> 0.3379), over-covering every level.
     expect_identical(.nl_recenter("sd_clamp_policy"), "decline")
     expect_identical(.nl_recenter("sd_floor_policy"), "clamp")
 

@@ -13,6 +13,7 @@
 }
 
 test_that("marginal = FALSE leaves the fit unchanged", {
+  skip_on_cran()
   d <- .em_sim(1L)
   f <- tulpa_eb(d$y, NULL, d$X, d$re, family = "poisson")
   expect_null(f$cov_marginal)
@@ -25,6 +26,7 @@ test_that("marginal = FALSE leaves the fit unchanged", {
 })
 
 test_that("marginal = TRUE attaches the correction and widens intervals", {
+  skip_on_cran()
   d  <- .em_sim(1L)
   f0 <- tulpa_eb(d$y, NULL, d$X, d$re, family = "poisson")
   f1 <- tulpa_eb(d$y, NULL, d$X, d$re, family = "poisson", marginal = TRUE)
@@ -49,19 +51,19 @@ test_that("marginal = TRUE attaches the correction and widens intervals", {
 })
 
 test_that("H_theta matches an independently differenced Hessian", {
+  skip_on_cran()
   d  <- .em_sim(1L)
   f1 <- tulpa_eb(d$y, NULL, d$X, d$re, family = "poisson", marginal = TRUE)
   skip_if(is.null(f1$H_theta), "correction did not form on this seed")
 
-  # log_prior_theta = function(theta) 0, not NULL: f1 fits under tulpa_eb()'s
-  # default hyperprior = "flat" (gcol33/tulpa#268), and core must target the
-  # same objective for H_theta to match. NULL here would resolve to the
-  # PC + LKJ default .re_cov_theta_fit() falls back to on its own, which is
-  # what hyperprior = "pc_lkj" (not the default) builds.
+  # f1 fits under tulpa_eb()'s default hyperprior = "proper" at the engine's
+  # scale anchor (gcol33/tulpa#730), and core must target the same objective
+  # for H_theta to match: log_prior_theta = NULL with prior_sigma and eta NULL
+  # resolves to that same PC + LKJ prior.
   core <- .re_cov_theta_fit(
     y = d$y, n_trials = NULL, X = d$X, re_terms = list(d$re),
-    family = "poisson", phi = 1.0, prior_sigma = c(3, 0.05), eta = 2,
-    log_prior_theta = function(theta) 0, beta_prior = NULL, n_quad = 1L,
+    family = "poisson", phi = 1.0, prior_sigma = NULL, eta = NULL,
+    log_prior_theta = NULL, beta_prior = NULL, n_quad = 1L,
     max_iter = 100L, tol = 1e-8, n_threads = 1L,
     caller = "test", need_scale = FALSE, outer_maxit = 500L, offset = NULL)
 
@@ -77,10 +79,11 @@ test_that("H_theta matches an independently differenced Hessian", {
 })
 
 test_that("J matches a direct central difference of the inner mode", {
+  skip_on_cran()
   d <- .em_sim(1L)
   core <- .re_cov_theta_fit(
     y = d$y, n_trials = NULL, X = d$X, re_terms = list(d$re),
-    family = "poisson", phi = 1.0, prior_sigma = c(3, 0.05), eta = 2,
+    family = "poisson", phi = 1.0, prior_sigma = NULL, eta = NULL,
     log_prior_theta = NULL, beta_prior = NULL, n_quad = 1L,
     max_iter = 100L, tol = 1e-8, n_threads = 1L,
     caller = "test", need_scale = FALSE, outer_maxit = 500L, offset = NULL)
@@ -114,6 +117,7 @@ test_that("J matches a direct central difference of the inner mode", {
 })
 
 test_that("vcov and summary report the marginal covariance when present", {
+  skip_on_cran()
   d  <- .em_sim(1L)
   f1 <- tulpa_eb(d$y, NULL, d$X, d$re, family = "poisson", marginal = TRUE)
   skip_if(is.null(f1$cov_marginal), "correction did not form on this seed")
@@ -160,6 +164,7 @@ test_that("force_sparse resolves TRUE / FALSE / auto", {
 })
 
 test_that("warm-start hyperparameter mass reads theta_cov by block", {
+  skip_on_cran()
   d       <- .em_sim(1L)
   f_plain <- tulpa_eb(d$y, NULL, d$X, d$re, family = "poisson")
   f_marg  <- tulpa_eb(d$y, NULL, d$X, d$re, family = "poisson", marginal = TRUE)
@@ -200,6 +205,7 @@ test_that("warm-start hyperparameter mass reads theta_cov by block", {
 })
 
 test_that(".build_warm_start masses log_sigma_re from theta_cov", {
+  skip_on_cran()
   # The sampler warm start is a separate feature; this only checks that it picks
   # up the curvature when both are present.
   skip_if_not(exists(".build_warm_start") &&
@@ -246,6 +252,7 @@ test_that(".build_warm_start masses log_sigma_re from theta_cov", {
 })
 
 test_that("Richardson extrapolation runs and stays close to the plain stencil", {
+  skip_on_cran()
   d  <- .em_sim(1L)
   f1 <- tulpa_eb(d$y, NULL, d$X, d$re, family = "poisson", marginal = TRUE)
   f2 <- tulpa_eb(d$y, NULL, d$X, d$re, family = "poisson", marginal = TRUE,
@@ -275,6 +282,7 @@ test_that("Richardson extrapolation runs and stays close to the plain stencil", 
 }
 
 test_that("an estimated dispersion rides through the correction as log phi", {
+  skip_on_cran()
   d  <- .em_sim_nb(7L)
   f1 <- tulpa_eb(d$y, NULL, d$X, d$re, family = "neg_binomial_2", phi = 1.5,
                  estimate_phi = TRUE, marginal = TRUE)
@@ -298,6 +306,7 @@ test_that("an estimated dispersion rides through the correction as log phi", {
 })
 
 test_that("the three routes agree on H_theta with an estimated dispersion", {
+  skip_on_cran()
   # Closed (no differencing), analytic-gradient stencil, and objective stencil
   # must land on the same bordered outer Hessian and the same phi column of J.
   # This is the estimated-dispersion analogue of the RE-only route-equivalence

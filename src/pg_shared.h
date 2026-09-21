@@ -7,6 +7,7 @@
 #include <Rcpp.h>
 #include <cmath>
 #include <algorithm>
+#include <utility>
 #include <vector>
 
 #include "pg_binomial.h"   // update_beta, update_re
@@ -14,6 +15,8 @@
 #include "linalg_fast.h"   // shared small-dense Cholesky / NNGP solve core
 #include "omp_threads.h"   // tulpa_omp_team_size_req, tulpa_parallel_for
 #include "pc_prior.h"      // tulpa::log_prior_sigma2_pc
+#include "tulpa/cov_kernel.h"  // cov_value: the one kernel per cov_type code
+#include "glmm_family_elt.h"     // glmm_elt: the one GLMM family density
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -239,6 +242,53 @@ inline void pg_require_intercept(const Rcpp::NumericMatrix& X,
 }
 
 // ============================================================================
+// Restricted spatial regression: the projector both RSR kernels are handed
+// ============================================================================
+
+// `P_perp = I - P_X`, flattened row-major. It must be symmetric, because the
+// buffer is read in both orientations, and idempotent up to the tolerance a
+// projector formed from a QR is.
+//
+// `require_constant` additionally asks that it annihilate the constant vector,
+// which is what makes an INTRINSIC field's level free: the areal kernel's ICAR
+// prior carries no precision on that direction, so the field level has to be
+// outside the likelihood for the draw to be proper. A proper field (an NNGP
+// one) identifies its own level from its prior, so the requirement does not
+// apply there -- a restricted design without an intercept is then a choice the
+// caller is entitled to make, not an under-determined model.
+inline void pg_check_rsr_projector(const Rcpp::NumericVector& P, int J,
+                                   bool require_constant) {
+  if (P.size() != static_cast<R_xlen_t>(J) * J) {
+    Rcpp::stop("`rsr_projection` has %d element(s) but must have %d "
+               "(a %d x %d matrix).", static_cast<int>(P.size()), J * J, J, J);
+  }
+  double max_asym = 0.0;
+  for (int a = 0; a < J; a++) {
+    for (int b = a + 1; b < J; b++) {
+      max_asym = std::max(max_asym,
+          std::abs(P[static_cast<size_t>(a) * J + b] -
+                   P[static_cast<size_t>(b) * J + a]));
+    }
+  }
+  if (max_asym > 1e-8) {
+    Rcpp::stop("`rsr_projection` is not symmetric (largest asymmetry %g); an "
+               "orthogonal projector must be.", max_asym);
+  }
+  if (!require_constant) return;
+  double max_row = 0.0;
+  for (int a = 0; a < J; a++) {
+    double s = 0.0;
+    for (int b = 0; b < J; b++) s += P[static_cast<size_t>(a) * J + b];
+    max_row = std::max(max_row, std::abs(s));
+  }
+  if (max_row > 1e-8) {
+    Rcpp::stop("`rsr_projection` does not annihilate the constant vector "
+               "(largest row sum %g). Orthogonalise the field against a design "
+               "that includes an intercept.", max_row);
+  }
+}
+
+// ============================================================================
 // Sequential NNGP topology and regression weights
 // ============================================================================
 
@@ -353,17 +403,10 @@ inline void pg_nngp_factors(double phi_gp, int cov_type,
   out.B.assign(static_cast<size_t>(n) * nn, 0.0);
   out.F.assign(n, 1.0);
 
+  // Unit marginal variance: the sweep scales by sigma2 itself.
   auto compute_cov = [phi_gp, cov_type](double d) {
     if (d < 1e-10) return 1.0;
-    if (cov_type == 0) {
-      return std::exp(-d / phi_gp);
-    } else if (cov_type == 1) {
-      const double x = std::sqrt(3.0) * d / phi_gp;
-      return (1.0 + x) * std::exp(-x);
-    } else {
-      const double x = std::sqrt(5.0) * d / phi_gp;
-      return (1.0 + x + x * x / 3.0) * std::exp(-x);
-    }
+    return cov_value(d, 1.0, phi_gp, static_cast<CovType>(cov_type));
   };
 
   std::vector<double> c_vec, C_mat, L, zeros;
@@ -550,6 +593,213 @@ inline double pg_log_prior_sigma2_pc(double sigma2, double U, double alpha) {
   return log_prior_sigma2_pc<double>(sigma2, U, alpha);
 }
 
+// ============================================================================
+// Log joint density of a Polya-Gamma sampler's target
+//
+// What a kernel records per retained draw as `log_prob`: the log density of
+// the model whose full conditionals its update steps sample, at the retained
+// state and on the scale each quantity is sampled on (a standard deviation, a
+// precision, a variance). The Polya-Gamma weights and the half-Cauchy
+// auxiliary variables are marginalized out, which is what their augmentations
+// were built to leave. Normalizing constants are kept, except an intrinsic
+// field's pseudo-determinant, which carries no hyperparameter.
+// ============================================================================
+
+inline constexpr double PG_LOG_2PI = 1.8378770664093454835606594728112;
+
+inline double pg_log_normal_iid(const double* x, int n, double sd) {
+  if (n <= 0) return 0.0;
+  if (!(sd > 0.0)) return R_NegInf;
+  double ss = 0.0;
+  for (int j = 0; j < n; j++) ss += x[j] * x[j];
+  return -0.5 * n * PG_LOG_2PI - n * std::log(sd) - 0.5 * ss / (sd * sd);
+}
+
+// Half-Cauchy(0, scale) on sigma > 0: the prior pg_update_scale_halfcauchy's
+// scale mixture marginalizes to.
+inline double pg_log_halfcauchy(double sigma, double scale) {
+  if (!(sigma > 0.0)) return R_NegInf;
+  const double z = sigma / scale;
+  return std::log(2.0) - std::log(M_PI * scale) - std::log1p(z * z);
+}
+
+// Half-normal N+(0, scale^2) on sigma > 0.
+inline double pg_log_halfnormal(double sigma, double scale) {
+  if (!(sigma > 0.0)) return R_NegInf;
+  return std::log(2.0) + R::dnorm(sigma, 0.0, scale, 1);
+}
+
+// Gamma(shape, rate) on x > 0.
+inline double pg_log_gamma(double x, double shape, double rate) {
+  if (!(x > 0.0)) return R_NegInf;
+  return R::dgamma(x, shape, 1.0 / rate, 1);
+}
+
+// A Gaussian field of precision tau * Q0 with rank(Q0) = rank, given its
+// quadratic form quad = x' Q0 x.
+inline double pg_log_gmrf(double quad, int rank, double tau) {
+  if (!(tau > 0.0)) return R_NegInf;
+  return 0.5 * rank * (std::log(tau) - PG_LOG_2PI) - 0.5 * tau * quad;
+}
+
+// phi' Q phi for the ICAR precision Q = diag(degree) - A.
+inline double pg_icar_quad_form(const double* phi, const PgAdjacency& adj) {
+  double quad_form = 0.0;
+  for (int i = 0; i < adj.n; i++) {
+    quad_form += adj.degree(i) * phi[i] * phi[i];
+    for (int e = adj.row_ptr[i]; e < adj.row_ptr[i + 1]; e++) {
+      const int j = adj.col_idx[e];
+      if (j > i) quad_form -= 2.0 * phi[i] * phi[j];
+    }
+  }
+  return quad_form;
+}
+
+// ICAR(tau) at rank J - k, plus the exchangeable N(0, 1 / isolated_prec) prior a
+// kernel places on a unit with no neighbours (isolated_prec = 0: none).
+inline double pg_log_icar(const double* phi, const PgAdjacency& adj, double tau,
+                          double isolated_prec) {
+  double lp = pg_log_gmrf(pg_icar_quad_form(phi, adj),
+                          adj.n - adj.n_components, tau);
+  if (isolated_prec > 0.0) {
+    const double sd = 1.0 / std::sqrt(isolated_prec);
+    for (int j = 0; j < adj.n; j++) {
+      if (adj.degree(j) == 0) lp += pg_log_normal_iid(&phi[j], 1, sd);
+    }
+  }
+  return lp;
+}
+
+// The NNGP joint density of a scale's field at its (sigma2, phi), the PC prior
+// on sigma2 (on the variance, the scale it is sampled on) and the uniform prior
+// on phi over [lower, upper]. Reads `sc.fac`, which pg_nngp_scale_update leaves
+// at the current phi.
+inline double pg_log_nngp_scale(const PgNngpScale& sc, double prior_sigma_U,
+                                double prior_sigma_alpha,
+                                double prior_phi_lower, double prior_phi_upper) {
+  if (!(sc.sigma2 > 0.0)) return R_NegInf;
+  if (!(sc.phi >= prior_phi_lower && sc.phi <= prior_phi_upper)) return R_NegInf;
+  double lp = 0.0;
+  for (int i = 0; i < sc.top.n; i++) {
+    const double v = sc.sigma2 * sc.fac.F[i];
+    const double r = sc.w[sc.top.orig[i]] - pg_nngp_parent_mean(sc.top, sc.fac, sc.w, i);
+    lp += -0.5 * (PG_LOG_2PI + std::log(v)) - 0.5 * r * r / v;
+  }
+  return lp + pg_log_prior_sigma2_pc(sc.sigma2, prior_sigma_U, prior_sigma_alpha) -
+         std::log(prior_phi_upper - prior_phi_lower);
+}
+
+// ============================================================================
+// The level a PROPER field shares with the intercept
+//
+// With an all-ones intercept column, beta0 -> beta0 + c together with
+// x -> x - c 1 leaves eta unchanged. A proper prior on x (an iid block, an NNGP
+// field) and the intercept's N(0, sd^2) both score that move, so the direction
+// is held by the priors alone and is weakly identified when the field is
+// diffuse. The update along it is the Gibbs step for beta0 in the coordinates
+// (beta0, u = x + beta0 1): u is held and beta0 drawn from its full
+// conditional, a linear change of variables with unit Jacobian. The likelihood
+// does not depend on c, and both priors are Gaussian in c, so the conditional is
+// Gaussian:
+//
+//   log p(c | .) = const - 0.5 (1 / sd^2 + prec_field) c^2
+//                        + (-beta0 / sd^2 + lin_field) c,
+//
+// where the field prior contributes log p(x - c 1) = const
+// - 0.5 prec_field c^2 + lin_field c. Subtracting the field's mean into the
+// intercept instead is a projection, not a draw, and leaves no stated target
+// invariant (gcol33/tulpa#761). An INTRINSIC field's prior does not see the
+// constant direction, so there the level is removed by a map onto a
+// representative and the site sweep carries the intercept prior instead
+// (PgInterceptLevel below).
+// ============================================================================
+inline double pg_draw_intercept_level(double beta0, double prior_beta_sd,
+                                      double prec_field, double lin_field) {
+  const double prec_beta = 1.0 / (prior_beta_sd * prior_beta_sd);
+  const double prec = prec_beta + prec_field;
+  const double num = -beta0 * prec_beta + lin_field;
+  return R::rnorm(num / prec, 1.0 / std::sqrt(prec));
+}
+
+// ============================================================================
+// The intercept prior an INTRINSIC field's single-site sweep has to see
+//
+// A kernel that centres an intrinsic field and absorbs its mean into the
+// intercept records the sum-to-zero model: the intercept at N(0, sd^2), the
+// field's prior on the centred field. In the sampler's own coordinates, with
+// eta = b + load * x, that model is the quotient of
+//
+//   pi_u(b, x) ∝ L(b + load x) p(x) N(b + other + load mean(x); 0, sd^2)
+//
+// under (b + load c, x - c), which leaves pi_u exactly invariant, so the
+// centring is a map onto a representative rather than a move. That holds only
+// while every step leaves pi_u invariant, and the site conditional of x_j then
+// carries the Gaussian factor through mean(x). With g = load / n and
+// base = b + other + g S_{-j} it adds g^2 / sd^2 to the precision and
+// -g base / sd^2 to the precision-weighted mean. `other` is the level of any
+// further intrinsic arm sharing the intercept. Without the factor the sweep
+// gives the level a flat prior (gcol33/tulpa#763).
+// ============================================================================
+struct PgInterceptLevel {
+  double base0;    // b + other
+  double g;        // load / n
+  double inv_sd2;  // 1 / sd^2
+  double sum;      // running sum of the field
+
+  PgInterceptLevel(double beta0, double other, double prior_beta_sd,
+                   double load, const double* x, int n)
+    : base0(beta0 + other), g(load / n),
+      inv_sd2(1.0 / (prior_beta_sd * prior_beta_sd)), sum(0.0) {
+    for (int j = 0; j < n; j++) sum += x[j];
+  }
+
+  // Add site j's factor to its conditional (precision, precision-weighted
+  // mean), at its current value `x_old`.
+  void add(double x_old, double& prec, double& mean_num) const {
+    const double base = base0 + g * (sum - x_old);
+    prec += g * g * inv_sd2;
+    mean_num -= g * base * inv_sd2;
+  }
+
+  void moved(double x_old, double x_new) { sum += x_new - x_old; }
+};
+
+inline double pg_mean(const double* x, int n) {
+  double s = 0.0;
+  for (int j = 0; j < n; j++) s += x[j];
+  return n > 0 ? s / n : 0.0;
+}
+
+// The iid N(0, sigma^2) block's terms along the constant direction.
+inline void pg_iid_level_terms(const double* x, int n, double sigma,
+                               double& prec_field, double& lin_field) {
+  const double inv_s2 = 1.0 / (sigma * sigma);
+  double sum = 0.0;
+  for (int j = 0; j < n; j++) sum += x[j];
+  prec_field = n * inv_s2;
+  lin_field = sum * inv_s2;
+}
+
+// The NNGP field's terms along the constant direction. With the sequential
+// residual r_i = w_i - B_i' w_N(i) and e_i = 1 - sum_t B_i[t] its value at the
+// constant field, the shifted residual is r_i - c e_i. Reads `sc.fac` at the
+// current phi.
+inline void pg_nngp_level_terms(const PgNngpScale& sc, double& prec_field,
+                                double& lin_field) {
+  const int nn = sc.top.nn;
+  prec_field = 0.0;
+  lin_field = 0.0;
+  for (int i = 0; i < sc.top.n; i++) {
+    double e = 1.0;
+    const size_t base = static_cast<size_t>(i) * nn;
+    for (int t = 0; t < sc.top.cnt[i]; t++) e -= sc.fac.B[base + t];
+    const double r = sc.w[sc.top.orig[i]] - pg_nngp_parent_mean(sc.top, sc.fac, sc.w, i);
+    const double inv_v = 1.0 / (sc.sigma2 * sc.fac.F[i]);
+    prec_field += e * e * inv_v;
+    lin_field += r * e * inv_v;
+  }
+}
+
 // Draw from N(mean, sd^2) truncated to (0, inf) (Robert 1995). Used for the
 // Gaussian full conditional of a positive scale parameter.
 inline double rtruncnorm_pos(double mean, double sd) {
@@ -704,6 +954,9 @@ struct PgGibbsCommon {
   Rcpp::NumericMatrix beta_draws, re_draws;
   Rcpp::NumericVector sigma_re_draws;
   Rcpp::NumericMatrix eta_draws;
+  // Log joint density per retained draw; filled only by a kernel whose target
+  // is written down.
+  Rcpp::NumericVector log_prob_draws;
 
   PgGibbsCommon(const Rcpp::IntegerVector& y,
                 const Rcpp::IntegerVector& n_trials,
@@ -729,7 +982,8 @@ struct PgGibbsCommon {
       beta_draws(n_save_, X.ncol()),
       re_draws(n_save_, n_re_groups_),
       sigma_re_draws(n_save_),
-      eta_draws(store_eta_ ? n_save_ : 0, store_eta_ ? y.size() : 0)
+      eta_draws(store_eta_ ? n_save_ : 0, store_eta_ ? y.size() : 0),
+      log_prob_draws(n_save_)
   {
     if (N < 1) Rcpp::stop("`y` is empty.");
     if (n_trials.size() != N) {
@@ -770,6 +1024,30 @@ struct PgGibbsCommon {
     for (int i = 0; i < N; i++) X_beta[i] += level;
   }
 
+  // The terms every binomial Polya-Gamma target shares, at the current state:
+  // the binomial log-likelihood at eta = X beta + re + field_contrib, the
+  // Gaussian fixed-effect prior, and -- when the kernel carries an iid block --
+  // its Gaussian density and the half-Cauchy on its SD. `field_contrib` is the
+  // per-observation structured contribution (nullptr: none).
+  double log_joint_common(const Rcpp::IntegerVector& y,
+                          const Rcpp::IntegerVector& n_trials,
+                          const double* field_contrib,
+                          double prior_beta_sd,
+                          double prior_sigma_re_scale) const {
+    double lp = 0.0;
+    for (int i = 0; i < N; i++) {
+      const double e = X_beta[i] + re_contrib[i] +
+                       (field_contrib ? field_contrib[i] : 0.0);
+      lp += glmm_elt(GLMMFamily::Binomial, e, y[i], n_trials[i], 0.0).l;
+    }
+    lp += pg_log_normal_iid(beta.begin(), p, prior_beta_sd);
+    if (n_re_groups > 0) {
+      lp += pg_log_normal_iid(re.begin(), n_re_groups, sigma_re.sigma) +
+            pg_log_halfcauchy(sigma_re.sigma, prior_sigma_re_scale);
+    }
+    return lp;
+  }
+
   // Save common per-iteration draws. Caller is responsible for invoking this
   // (and per-variant save logic) only when (iter >= n_warmup && (iter - n_warmup) % thin == 0).
   void save(int save_idx) {
@@ -803,18 +1081,20 @@ struct PgGibbsCommon {
 // [lower, upper] and a log-random-walk Metropolis step on the NNGP density.
 // Both read the same factor pass, since B is scale-free and F scales linearly.
 // ============================================================================
-inline void pg_nngp_scale_update(
-    PgNngpScale& sc, int cov_type,
-    const Rcpp::NumericMatrix& coords, const Rcpp::NumericMatrix& nn_dist,
-    const std::vector<double>& sum_omega, const std::vector<double>& sum_resid,
-    double prior_sigma_U, double prior_sigma_alpha,
-    double prior_phi_lower, double prior_phi_upper
-) {
+// One single-site Gibbs sweep over the field, at the current factors: each
+// location from its own full conditional under the NNGP prior plus the
+// Polya-Gamma data term. Valid because the prior precision is SPARSE, so a
+// location's conditional reads only its parents and children.
+//
+// A field whose contribution to eta is projected (restricted spatial
+// regression) has no such conditional -- the projector couples every pair --
+// and takes the dense draw `pg_nngp_precision_dense()` builds the precision
+// for instead.
+inline void pg_nngp_field_sweep(PgNngpScale& sc,
+                                const std::vector<double>& sum_omega,
+                                const std::vector<double>& sum_resid) {
   const PgNngpTopology& top = sc.top;
-  const int n = top.n;
-  pg_nngp_factors(sc.phi, cov_type, coords, nn_dist, top, sc.fac);
-
-  for (int i = 0; i < n; i++) {
+  for (int i = 0; i < top.n; i++) {
     const int obs_i = top.orig[i];
 
     const PgNngpCond pr =
@@ -826,6 +1106,61 @@ inline void pg_nngp_scale_update(
 
     sc.w[obs_i] = R::rnorm(mean_num / tau_post, 1.0 / std::sqrt(tau_post));
   }
+}
+
+// The NNGP prior precision as a dense n x n matrix, row-major and indexed by
+// ORIGINAL location id (the indexing `sc.w` and every per-location statistic
+// use).
+//
+// Lambda = (I - A)' D^-1 (I - A) / sigma2, the same matrix
+// `pg_nngp_field_conditional()` reads one row of: row j of (I - A) carries 1 at
+// location `orig[j]` and -B[j][t] at each parent, and D_jj = sigma2 F_j. Built
+// by accumulating each factor's rank-one outer product, so the assembled matrix
+// and the sweep's conditionals cannot disagree about what the prior is.
+//
+// Only a caller that needs the JOINT precision assembles this -- a projected
+// field, whose full conditional is dense -- so the sparse sweep pays nothing.
+inline void pg_nngp_precision_dense(const PgNngpTopology& top,
+                                    const PgNngpFactors& fac, double sigma2,
+                                    std::vector<double>& Lambda) {
+  const int n = top.n;
+  Lambda.assign(static_cast<size_t>(n) * n, 0.0);
+  std::vector<int> idx;
+  std::vector<double> val;
+  idx.reserve(top.nn + 1);
+  val.reserve(top.nn + 1);
+  for (int j = 0; j < n; j++) {
+    const size_t jb = static_cast<size_t>(j) * top.nn;
+    idx.clear();
+    val.clear();
+    idx.push_back(top.orig[j]);
+    val.push_back(1.0);
+    for (int t = 0; t < top.cnt[j]; t++) {
+      idx.push_back(top.parent_orig[jb + t]);
+      val.push_back(-fac.B[jb + t]);
+    }
+    const double d = 1.0 / (sigma2 * fac.F[j]);
+    for (size_t a = 0; a < idx.size(); a++) {
+      const size_t ra = static_cast<size_t>(idx[a]) * n;
+      for (size_t b = 0; b < idx.size(); b++) {
+        Lambda[ra + idx[b]] += d * val[a] * val[b];
+      }
+    }
+  }
+}
+
+// The marginal variance and the range, given the field. Metropolis on both, on
+// the log scale; reads `sc.w` and `sc.fac` and leaves `sc.fac` at the accepted
+// phi. Shared by the sparse-sweep kernels and the projected one, which differ
+// only in how the field itself was drawn.
+inline void pg_nngp_hyper_update(
+    PgNngpScale& sc, int cov_type,
+    const Rcpp::NumericMatrix& coords, const Rcpp::NumericMatrix& nn_dist,
+    double prior_sigma_U, double prior_sigma_alpha,
+    double prior_phi_lower, double prior_phi_upper
+) {
+  const PgNngpTopology& top = sc.top;
+  const int n = top.n;
 
   // sigma2 | w, phi: the NNGP density contributes
   // -0.5 n log sigma2 - 0.5 Q0 / sigma2, the PC prior -lambda sqrt(sigma2),
@@ -862,8 +1197,26 @@ inline void pg_nngp_scale_update(
     const double log_ratio = ll_prop - ll_curr + std::log(phi_prop / sc.phi);
     if (std::isfinite(log_ratio) && std::log(R::runif(0, 1)) < log_ratio) {
       sc.phi = phi_prop;
+      // The factors of the accepted phi, so `sc.fac` is always the current one.
+      std::swap(sc.fac, sc.fac_prop);
     }
   }
+}
+
+// The whole scale update for a field whose conditional is sparse: refresh the
+// factors at the current range, sweep the field, then move the hyperparameters.
+inline void pg_nngp_scale_update(
+    PgNngpScale& sc, int cov_type,
+    const Rcpp::NumericMatrix& coords, const Rcpp::NumericMatrix& nn_dist,
+    const std::vector<double>& sum_omega, const std::vector<double>& sum_resid,
+    double prior_sigma_U, double prior_sigma_alpha,
+    double prior_phi_lower, double prior_phi_upper
+) {
+  pg_nngp_factors(sc.phi, cov_type, coords, nn_dist, sc.top, sc.fac);
+  pg_nngp_field_sweep(sc, sum_omega, sum_resid);
+  pg_nngp_hyper_update(sc, cov_type, coords, nn_dist,
+                       prior_sigma_U, prior_sigma_alpha,
+                       prior_phi_lower, prior_phi_upper);
 }
 
 } // namespace tulpa

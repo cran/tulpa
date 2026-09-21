@@ -402,8 +402,8 @@ test_that("joint multi-block recovers a COPIED correlated MCAR block (Sigma + al
     eta2 <- -0.2 + alpha_true * (u[cell] + x2 * s[cell])
     y1 <- rnorm(N, eta1, 0.4); y2 <- rnorm(N, eta2, 0.4)
 
-    arm1 <- list(y = y1, X = cbind(1, x1), family = "gaussian", phi = 0.4)
-    arm2 <- list(y = y2, X = cbind(1, x2), family = "gaussian", phi = 0.4)
+    arm1 <- list(y = y1, X = cbind(1, x1), family = "gaussian", phi = 0.16)
+    arm2 <- list(y = y2, X = cbind(1, x2), family = "gaussian", phi = 0.16)
     mcar_block <- list(
         type = "mcar", n_spatial_units = n_s, n_fields = 2L,
         adj_row_ptr = adj_rp, adj_col_idx = adj_ci, n_neighbors = as.integer(nn),
@@ -415,8 +415,9 @@ test_that("joint multi-block recovers a COPIED correlated MCAR block (Sigma + al
         prior = list(mcar_block),
         copy = list(arm = "b", block = 1L,
                     alpha_grid = c(0, exp(seq(log(0.3), log(3), length.out = 6)))),
-        phi_grid = list(a = exp(seq(log(0.2), log(0.8), length.out = 4)),
-                        b = exp(seq(log(0.2), log(0.8), length.out = 4))),
+        # Residual VARIANCE nodes spanning residual SD 0.2 to 0.8.
+        phi_grid = list(a = exp(seq(log(0.2), log(0.8), length.out = 4))^2,
+                        b = exp(seq(log(0.2), log(0.8), length.out = 4))^2),
         control = list(max_iter = 60L, tol = 1e-6, integration = "ccd",
                        store_Q = TRUE, progress = FALSE)))
 

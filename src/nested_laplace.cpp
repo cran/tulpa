@@ -40,7 +40,8 @@
 #include "hmc_hsgp_kernels.h"  // Eigen-free spectral density only
 #include "hsgp_block_factory.h"             // make_hsgp_block
 #include "laplace_spec_fit.h"               // build_spec_family_inputs + laplace_mode_spec_dense_solve
-#include "nl_entry_inputs.h"                // NlEntryInputs + the per-driver runners
+#include "nl_entry_inputs.h"
+#include "nested_laplace_entries.h"                // NlEntryInputs + the per-driver runners
 #include "nngp_block_factory.h"             // make_nngp_block
 #include "unit_precision_block.h"           // set_unit_precision_block_priors
 #include "car_proper_block.h"                // set_car_proper_block_priors
@@ -267,8 +268,12 @@ Rcpp::List cpp_nested_laplace_icar(
     std::string checkpoint_path = "",
     bool compute_skew = false,
     Rcpp::Nullable<Rcpp::IntegerVector> skew_idx = R_NilValue,
+    Rcpp::Nullable<Rcpp::NumericVector> offset_nullable = R_NilValue,
     Rcpp::Nullable<Rcpp::List> debias = R_NilValue,
-    Rcpp::Nullable<Rcpp::List> cila = R_NilValue
+    Rcpp::Nullable<Rcpp::List> cila = R_NilValue,
+    double prune_tol = 0.0, int screen_iters = 2,
+    bool compute_fitted_var = true,
+    Rcpp::Nullable<Rcpp::NumericVector> screen_log_offset = R_NilValue
 ) {
     tulpa::check_areal_inputs(adj_row_ptr, adj_col_idx, n_neighbors,
                               spatial_idx, static_cast<int>(y.size()),
@@ -322,8 +327,12 @@ Rcpp::List cpp_nested_laplace_bym2(
     std::string checkpoint_path = "",
     bool compute_skew = false,
     Rcpp::Nullable<Rcpp::IntegerVector> skew_idx = R_NilValue,
+    Rcpp::Nullable<Rcpp::NumericVector> offset_nullable = R_NilValue,
     Rcpp::Nullable<Rcpp::List> debias = R_NilValue,
-    Rcpp::Nullable<Rcpp::List> cila = R_NilValue
+    Rcpp::Nullable<Rcpp::List> cila = R_NilValue,
+    double prune_tol = 0.0, int screen_iters = 2,
+    bool compute_fitted_var = true,
+    Rcpp::Nullable<Rcpp::NumericVector> screen_log_offset = R_NilValue
 ) {
     tulpa::check_areal_inputs(adj_row_ptr, adj_col_idx, n_neighbors,
                               spatial_idx, static_cast<int>(y.size()),
@@ -372,8 +381,12 @@ Rcpp::List cpp_nested_laplace_car_proper(
     std::string checkpoint_path = "",
     bool compute_skew = false,
     Rcpp::Nullable<Rcpp::IntegerVector> skew_idx = R_NilValue,
+    Rcpp::Nullable<Rcpp::NumericVector> offset_nullable = R_NilValue,
     Rcpp::Nullable<Rcpp::List> debias = R_NilValue,
-    Rcpp::Nullable<Rcpp::List> cila = R_NilValue
+    Rcpp::Nullable<Rcpp::List> cila = R_NilValue,
+    double prune_tol = 0.0, int screen_iters = 2,
+    bool compute_fitted_var = true,
+    Rcpp::Nullable<Rcpp::NumericVector> screen_log_offset = R_NilValue
 ) {
     tulpa::check_areal_inputs(adj_row_ptr, adj_col_idx, n_neighbors,
                               spatial_idx, static_cast<int>(y.size()),
@@ -512,7 +525,10 @@ Rcpp::List cpp_nested_laplace_nngp(
     Rcpp::Nullable<Rcpp::IntegerVector> skew_idx = R_NilValue,
     Rcpp::Nullable<Rcpp::NumericVector> offset_nullable = R_NilValue,
     Rcpp::Nullable<Rcpp::List> debias = R_NilValue,
-    Rcpp::Nullable<Rcpp::List> cila = R_NilValue
+    Rcpp::Nullable<Rcpp::List> cila = R_NilValue,
+    double prune_tol = 0.0, int screen_iters = 2,
+    bool compute_fitted_var = true,
+    Rcpp::Nullable<Rcpp::NumericVector> screen_log_offset = R_NilValue
 ) {
     const int n_grid = tulpa::nl_grid_axes_length(
         "sigma2_grid", sigma2_grid, {{"phi_gp_grid", &phi_gp_grid}});
@@ -559,11 +575,8 @@ Rcpp::List cpp_nested_laplace_nngp(
         /*axis_sigma2=*/0, /*axis_phi_gp=*/1, theta_grid
     ));
 
-    tulpa::NlEntryInputs in = TULPA_NL_ENTRY_INPUTS;
-    in.offset = offset_nullable;
-
     return tulpa::nl_run_joint_sparse_entry(
-        in, n_grid,
+        TULPA_NL_ENTRY_INPUTS, n_grid,
         tulpa::NlFieldIdentity("nngp")
             .nngp(n_spatial, nn, cov_type, coords, nn_idx, spatial_idx)
             .seed(),
@@ -597,8 +610,12 @@ Rcpp::List cpp_nested_laplace_hsgp(
     std::string checkpoint_path = "",
     bool compute_skew = false,
     Rcpp::Nullable<Rcpp::IntegerVector> skew_idx = R_NilValue,
+    Rcpp::Nullable<Rcpp::NumericVector> offset_nullable = R_NilValue,
     Rcpp::Nullable<Rcpp::List> debias = R_NilValue,
-    Rcpp::Nullable<Rcpp::List> cila = R_NilValue
+    Rcpp::Nullable<Rcpp::List> cila = R_NilValue,
+    double prune_tol = 0.0, int screen_iters = 2,
+    bool compute_fitted_var = true,
+    Rcpp::Nullable<Rcpp::NumericVector> screen_log_offset = R_NilValue
 ) {
     const int n_grid = tulpa::nl_grid_axes_length(
         "sigma2_grid", sigma2_grid, {{"lengthscale_grid", &lengthscale_grid}});
@@ -625,7 +642,8 @@ Rcpp::List cpp_nested_laplace_hsgp(
     std::vector<tulpa::JointArm> arms;
     make_single_arm(parsed, arms, X, re_idx,
                     Rcpp::IntegerVector(N, 0),  // unused for DENSE_BASIS
-                    p, n_re_groups, sigma_re, y, n, family, phi, N);
+                    p, n_re_groups, sigma_re, y, n, family, phi, N,
+                    offset_nullable);
 
     // ---- theta_grid: (log_sigma2, log_lengthscale). The factory works in log
     // space because PC priors on (sigma2, ell) are typically applied in log
@@ -937,9 +955,14 @@ inline tulpa::LatentBlock make_temporal_latent_block(
     const std::string& temporal_type,
     const Rcpp::NumericVector& tau_grid,
     const Rcpp::NumericVector& rho_grid,
-    bool cyclic
+    bool cyclic,
+    int n_obs, const char* who
 ) {
     const int n_units = n_groups * n_times;
+    // block.idx below is read for every i < N with no bound of its own, so the
+    // index is checked HERE -- the one place every temporal-carrying entry
+    // builds its block -- rather than at each of the six entries.
+    tulpa::check_temporal_index(temporal_idx, n_obs, n_units, who);
     IndexedPriorOps ops_t = make_temporal_ops(temporal_type, start, n_groups,
                                               n_times, tau_grid, rho_grid, cyclic);
     tulpa::LatentBlock block;
@@ -1012,28 +1035,38 @@ inline Rcpp::List run_indexed_st_nested_laplace_joint(
     bool compute_skew = false,
     const std::vector<int>* skew_probe_idx = nullptr,
     const tulpa::SubspaceDebiasOptions* debias = nullptr,
-    const tulpa::CilaOptions* cila = nullptr
+    const tulpa::CilaOptions* cila = nullptr,
+    double prune_tol = 0.0,
+    int screen_iters = tulpa::CHEAP_SCREEN_ITERS,
+    Rcpp::Nullable<Rcpp::NumericVector> offset_nullable = R_NilValue,
+    bool compute_fitted_var = true,
+    const std::vector<double>& screen_log_offset = std::vector<double>()
 ) {
     const int n_x_after_re = p + n_re_groups;
 
     std::vector<tulpa::ParsedArm> parsed;
     std::vector<tulpa::JointArm> arms;
     make_single_arm(parsed, arms, X, re_idx, spatial_idx,
-                    p, n_re_groups, sigma_re, y, n_trials, family, phi, N);
+                    p, n_re_groups, sigma_re, y, n_trials, family, phi, N,
+                    offset_nullable);
 
-    return tulpa::run_multi_block_nested_laplace_joint(
+    Rcpp::List out = tulpa::run_multi_block_nested_laplace_joint(
         n_grid, arms, parsed, blocks, n_x_after_re,
         max_iter, tol, n_threads, /*store_modes=*/true, x_init, store_Q,
         /*prep_at_grid=*/nullptr, /*n_threads_outer=*/1,
-        std::vector<int>(), std::vector<int>(), /*prune_tol=*/0.0,
+        std::vector<int>(), std::vector<int>(), prune_tol,
         force_sparse,
         /*cell_coupling_spec=*/nullptr,
         tulpa::JointPDMode::LM, tulpa::CurvatureMode::Observed,
         /*hessian_refresh=*/1, /*progress=*/nullptr, ckpt,
         /*x_init_per_cell=*/std::vector<double>(),
         compute_skew, skew_probe_idx,
-        /*fixed_block=*/nullptr, debias, cila
+        /*fixed_block=*/nullptr, debias, cila,
+        /*inner_sparse_override=*/0, screen_iters, compute_fitted_var,
+        screen_log_offset
     );
+    tulpa::nl_attach_fitted_eta_single_arm(out, arms, parsed, blocks);
+    return out;
 }
 
 // Shared tail for every cpp_nested_laplace_st_<spatial> entry: stack the
@@ -1056,13 +1089,14 @@ inline Rcpp::List run_st_spatial_entry(
     const Rcpp::NumericVector& tau_temporal_grid,
     const Rcpp::NumericVector& rho_t, bool cyclic,
     bool force_sparse,
-    const tulpa::NlAxisOut& out_axes
+    const tulpa::NlAxisOut& out_axes,
+    const char* who
 ) {
     const int t_start = in.p() + in.n_re_groups + spatial_latent_dim;
     // Space-time front door is single-walk temporal (no panel grouping yet).
     blocks.push_back(make_temporal_latent_block(
         t_start, /*n_groups=*/1, n_times, temporal_idx, temporal_type,
-        tau_temporal_grid, rho_t, cyclic));
+        tau_temporal_grid, rho_t, cyclic, in.N(), who));
 
     tulpa::NlEntryRun run(in, struct_seed, ckpt_axes);
     Rcpp::List out = run_indexed_st_nested_laplace_joint(
@@ -1072,7 +1106,9 @@ inline Rcpp::List run_st_spatial_entry(
         in.max_iter, in.tol, in.n_threads,
         in.x_init, in.store_Q, force_sparse, run.ckpt.get(),
         in.compute_skew, run.skew_idx_ptr,
-        run.debias_req.ptr, run.cila_req.ptr);
+        run.debias_req.ptr, run.cila_req.ptr,
+        in.prune_tol, in.screen_iters, in.offset, in.compute_fitted_var,
+        in.screen_offset());
     tulpa::nl_attach_axes(out, out_axes);
     nl_attach_temporal_grids(out, temporal_type, tau_temporal_grid, rho_t);
     return out;
@@ -1123,8 +1159,12 @@ Rcpp::List cpp_nested_laplace_temporal(
     std::string checkpoint_path = "",
     bool compute_skew = false,
     Rcpp::Nullable<Rcpp::IntegerVector> skew_idx = R_NilValue,
+    Rcpp::Nullable<Rcpp::NumericVector> offset_nullable = R_NilValue,
     Rcpp::Nullable<Rcpp::List> debias = R_NilValue,
-    Rcpp::Nullable<Rcpp::List> cila = R_NilValue
+    Rcpp::Nullable<Rcpp::List> cila = R_NilValue,
+    double prune_tol = 0.0, int screen_iters = 2,
+    bool compute_fitted_var = true,
+    Rcpp::Nullable<Rcpp::NumericVector> screen_log_offset = R_NilValue
 ) {
     tulpa::nl_grid_axes_positive({{"tau_grid", &tau_grid}});
     int n_grid = tau_grid.size();
@@ -1136,7 +1176,8 @@ Rcpp::List cpp_nested_laplace_temporal(
     // run_multi_block call below.
     std::vector<tulpa::LatentBlock> blocks{ make_temporal_latent_block(
         temporal_start, n_groups, n_times, temporal_idx, temporal_type,
-        tau_grid, rho_grid, cyclic) };
+        tau_grid, rho_grid, cyclic, static_cast<int>(y.size()),
+        "cpp_nested_laplace_temporal") };
 
     // rho is an ar1 coordinate; rw1 / rw2 pass an empty grid and report only tau.
     tulpa::NlAxisOut out_axes{{"tau_grid", tau_grid}};
@@ -1175,8 +1216,12 @@ Rcpp::List cpp_nested_laplace_st_icar(
     std::string checkpoint_path = "",
     bool compute_skew = false,
     Rcpp::Nullable<Rcpp::IntegerVector> skew_idx = R_NilValue,
+    Rcpp::Nullable<Rcpp::NumericVector> offset_nullable = R_NilValue,
     Rcpp::Nullable<Rcpp::List> debias = R_NilValue,
-    Rcpp::Nullable<Rcpp::List> cila = R_NilValue
+    Rcpp::Nullable<Rcpp::List> cila = R_NilValue,
+    double prune_tol = 0.0, int screen_iters = 2,
+    bool compute_fitted_var = true,
+    Rcpp::Nullable<Rcpp::NumericVector> screen_log_offset = R_NilValue
 ) {
     tulpa::check_areal_inputs(adj_row_ptr, adj_col_idx, n_neighbors,
                               spatial_idx, static_cast<int>(y.size()),
@@ -1204,7 +1249,8 @@ Rcpp::List cpp_nested_laplace_st_icar(
         /*spatial_latent_dim=*/n_spatial_units, spatial_idx, std::move(blocks),
         temporal_idx, n_times, temporal_type, tau_temporal_grid, rho_t, cyclic,
         force_sparse,
-        {{"tau_spatial_grid", tau_spatial_grid}});
+        {{"tau_spatial_grid", tau_spatial_grid}},
+        "cpp_nested_laplace_st_icar");
 }
 
 // ---- CAR_proper (spatial) --------------------------------------------------
@@ -1233,8 +1279,12 @@ Rcpp::List cpp_nested_laplace_st_car_proper(
     std::string checkpoint_path = "",
     bool compute_skew = false,
     Rcpp::Nullable<Rcpp::IntegerVector> skew_idx = R_NilValue,
+    Rcpp::Nullable<Rcpp::NumericVector> offset_nullable = R_NilValue,
     Rcpp::Nullable<Rcpp::List> debias = R_NilValue,
-    Rcpp::Nullable<Rcpp::List> cila = R_NilValue
+    Rcpp::Nullable<Rcpp::List> cila = R_NilValue,
+    double prune_tol = 0.0, int screen_iters = 2,
+    bool compute_fitted_var = true,
+    Rcpp::Nullable<Rcpp::NumericVector> screen_log_offset = R_NilValue
 ) {
     tulpa::check_areal_inputs(adj_row_ptr, adj_col_idx, n_neighbors,
                               spatial_idx, static_cast<int>(y.size()),
@@ -1264,7 +1314,8 @@ Rcpp::List cpp_nested_laplace_st_car_proper(
         temporal_idx, n_times, temporal_type, tau_temporal_grid, rho_t, cyclic,
         force_sparse,
         {{"tau_spatial_grid", tau_spatial_grid},
-         {"rho_spatial_grid", rho_spatial_grid}});
+         {"rho_spatial_grid", rho_spatial_grid}},
+        "cpp_nested_laplace_st_car_proper");
 }
 
 // ---- BYM2 (spatial) --------------------------------------------------------
@@ -1295,8 +1346,12 @@ Rcpp::List cpp_nested_laplace_st_bym2(
     std::string checkpoint_path = "",
     bool compute_skew = false,
     Rcpp::Nullable<Rcpp::IntegerVector> skew_idx = R_NilValue,
+    Rcpp::Nullable<Rcpp::NumericVector> offset_nullable = R_NilValue,
     Rcpp::Nullable<Rcpp::List> debias = R_NilValue,
-    Rcpp::Nullable<Rcpp::List> cila = R_NilValue
+    Rcpp::Nullable<Rcpp::List> cila = R_NilValue,
+    double prune_tol = 0.0, int screen_iters = 2,
+    bool compute_fitted_var = true,
+    Rcpp::Nullable<Rcpp::NumericVector> screen_log_offset = R_NilValue
 ) {
     tulpa::check_areal_inputs(adj_row_ptr, adj_col_idx, n_neighbors,
                               spatial_idx, static_cast<int>(y.size()),
@@ -1328,7 +1383,8 @@ Rcpp::List cpp_nested_laplace_st_bym2(
         temporal_idx, n_times, temporal_type, tau_temporal_grid, rho_t, cyclic,
         force_sparse,
         {{"sigma_spatial_grid", sigma_spatial_grid},
-         {"rho_spatial_grid", rho_spatial_grid}});
+         {"rho_spatial_grid", rho_spatial_grid}},
+        "cpp_nested_laplace_st_bym2");
 }
 
 // ---- HSGP (spatial) --------------------------------------------------------
@@ -1356,8 +1412,12 @@ Rcpp::List cpp_nested_laplace_st_hsgp(
     std::string checkpoint_path = "",
     bool compute_skew = false,
     Rcpp::Nullable<Rcpp::IntegerVector> skew_idx = R_NilValue,
+    Rcpp::Nullable<Rcpp::NumericVector> offset_nullable = R_NilValue,
     Rcpp::Nullable<Rcpp::List> debias = R_NilValue,
-    Rcpp::Nullable<Rcpp::List> cila = R_NilValue
+    Rcpp::Nullable<Rcpp::List> cila = R_NilValue,
+    double prune_tol = 0.0, int screen_iters = 2,
+    bool compute_fitted_var = true,
+    Rcpp::Nullable<Rcpp::NumericVector> screen_log_offset = R_NilValue
 ) {
     const int n_grid = tulpa::nl_grid_axes_length(
         "sigma2_spatial_grid", sigma2_spatial_grid,
@@ -1406,7 +1466,8 @@ Rcpp::List cpp_nested_laplace_st_hsgp(
         temporal_idx, n_times, temporal_type, tau_temporal_grid, rho_t, cyclic,
         /*force_sparse=*/true,
         {{"sigma2_spatial_grid", sigma2_spatial_grid},
-         {"lengthscale_spatial_grid", lengthscale_spatial_grid}});
+         {"lengthscale_spatial_grid", lengthscale_spatial_grid}},
+        "cpp_nested_laplace_st_hsgp");
 }
 
 // ---- NNGP (spatial) --------------------------------------------------------
@@ -1435,8 +1496,12 @@ Rcpp::List cpp_nested_laplace_st_nngp(
     std::string checkpoint_path = "",
     bool compute_skew = false,
     Rcpp::Nullable<Rcpp::IntegerVector> skew_idx = R_NilValue,
+    Rcpp::Nullable<Rcpp::NumericVector> offset_nullable = R_NilValue,
     Rcpp::Nullable<Rcpp::List> debias = R_NilValue,
-    Rcpp::Nullable<Rcpp::List> cila = R_NilValue
+    Rcpp::Nullable<Rcpp::List> cila = R_NilValue,
+    double prune_tol = 0.0, int screen_iters = 2,
+    bool compute_fitted_var = true,
+    Rcpp::Nullable<Rcpp::NumericVector> screen_log_offset = R_NilValue
 ) {
     const int n_grid = tulpa::nl_grid_axes_length(
         "sigma2_spatial_grid", sigma2_spatial_grid,
@@ -1483,5 +1548,6 @@ Rcpp::List cpp_nested_laplace_st_nngp(
         temporal_idx, n_times, temporal_type, tau_temporal_grid, rho_t, cyclic,
         /*force_sparse=*/true,
         {{"sigma2_spatial_grid", sigma2_spatial_grid},
-         {"phi_gp_spatial_grid", phi_gp_spatial_grid}});
+         {"phi_gp_spatial_grid", phi_gp_spatial_grid}},
+        "cpp_nested_laplace_st_nngp");
 }

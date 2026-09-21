@@ -130,6 +130,9 @@ TIER_META <- list(
 #' * `cabi`     -- the registered C-ABI callable backing the backend (the symbol
 #'     a model package reaches via `LinkingTo: tulpa`, and the one an R wrapper
 #'     would call), or `NULL`.
+#' * `hyperprior` -- `TRUE` when the backend's fitter takes the outer
+#'     `hyperprior = c("proper", "flat")` choice `tulpa()` forwards; absent
+#'     otherwise.
 #' * `note`     -- optional human-readable note.
 #'
 #' Family identity (for `families`) is checked against `family$name`,
@@ -143,7 +146,12 @@ BACKEND_REGISTRY <- list(
     emits = "chain",
     tier = "exact", input = "modeldata", fitter = "tulpa_sample_glmm",
     families = NULL,
-    cabi = "tulpa_run_nuts_generic",
+    # tulpa_sample_glmm() always runs run_hmc_parallel_chains_cpp (n_chains
+    # defaults to 4, but the call shape is the same at n_chains = 1), which is
+    # what "tulpa_run_nuts_chains" is registered against; "tulpa_run_nuts_generic"
+    # is the single-chain callable a model package reaches on its own and this
+    # R door never calls (gcol33/tulpa#775).
+    cabi = "tulpa_run_nuts_chains",
     note = paste("Generic NUTS over a fixed-effect GLM (tulpa_sample_glmm);",
                  "model packages also drive NUTS through the C ABI")
   ),
@@ -152,27 +160,31 @@ BACKEND_REGISTRY <- list(
     tier = "exact", input = "modeldata", fitter = "tulpa_sample_glmm",
     families = NULL, cabi = "tulpa_run_ess_sampler"
   ),
-  pg = list(
-    emits = "chain",
-    tier = "exact", input = "design", fitter = NULL,
-    families = c("binomial", "beta_binomial", "beta_binomial_fixed",
-                 "neg_binomial_2"),
-    cabi = "tulpa_pg_binomial_gibbs"
-  ),
   gibbs = list(
     emits = "chain",
+    # The Polya-Gamma spatial sweep updates ONE random-intercept block
+    # alongside the field, so a second (1 | g) term is refused at dispatch and
+    # auto must not pick it for such a model (gcol33/tulpa#681).
+    max_re_terms = 1L,
     tier = "exact", input = "design", fitter = "tulpa_gibbs",
     families = c("binomial", "neg_binomial_2"),
-    cabi = NULL,
-    note = paste("Polya-Gamma Gibbs (binomial / negbin) via tulpa_gibbs();",
+    carries_offset = FALSE,
+    cabi = c("tulpa_pg_binomial_gibbs", "tulpa_pg_negbin_gibbs",
+             "tulpa_pg_negbin_spatial_gibbs"),
+    note = paste("Polya-Gamma (PG) Gibbs (binomial / negbin) via tulpa_gibbs();",
                  "base plus spatial (icar/bym2/rsr/gp/multiscale_gp) and temporal",
                  "dispatch through the cpp_pg_binomial_gibbs* / cpp_pg_negbin_gibbs",
-                 "kernels")
+                 "kernels, also reachable from model packages through the C ABI",
+                 "symbols above")
   ),
   re_cov_gibbs = list(
     emits = "chain",
     tier = "exact", input = "design", fitter = "tulpa_re_cov_gibbs",
-    families = NULL, cabi = NULL,
+    # The four restrictions its own dispatch enforces, declared here so the auto
+    # selector can see them: auto sent every RE-bearing formula straight to this
+    # backend, which then refused the call (gcol33/tulpa#666).
+    families = c("binomial", "poisson", "gaussian", "neg_binomial_2"),
+    carries_offset = FALSE, cabi = NULL,
     note = paste("Correlated random-slope term (1 + x | g): exact",
                  "Metropolis-within-Gibbs debias of the RE covariance Sigma.",
                  "Auto-selected from the Laplace path with control$re_cov = 'gibbs'")
@@ -224,7 +236,7 @@ BACKEND_REGISTRY <- list(
   re_cov_nested = list(
     emits = "iid",
     tier = "structured", input = "design", fitter = "tulpa_re_cov_nested",
-    families = NULL, cabi = NULL,
+    families = NULL, cabi = NULL, hyperprior = TRUE,
     note = paste("Correlated random-slope term (1 + x | g): nested-Laplace",
                  "integration over the RE covariance Sigma (CCD design + PC/LKJ",
                  "prior). Auto-selected from the Laplace path for a single",
@@ -239,12 +251,14 @@ BACKEND_REGISTRY <- list(
     emits = "iid",
     tier = "structured", input = "design", fitter = "agq_fit",
     families = c("binomial", "poisson", "gaussian"), cabi = NULL,
+    carries_offset = TRUE,
     note = "Intercept-only adaptive Gauss-Hermite (the shared GLMM oracle)"
   ),
   ep = list(
     emits = "iid",
     tier = "structured", input = "design", fitter = "ep_fit",
     families = NULL, cabi = NULL,
+    carries_offset = TRUE, phi2 = TRUE,
     note = paste("Expectation Propagation over a fixed-effect GLM with a",
                  "mean-zero Gaussian coefficient prior; matches marginal moments",
                  "(exact for a Gaussian likelihood), no random effects / fields")
@@ -252,7 +266,7 @@ BACKEND_REGISTRY <- list(
   eb = list(
     emits = "iid",
     tier = "structured", input = "design", fitter = "tulpa_eb",
-    families = NULL, cabi = NULL,
+    families = NULL, cabi = NULL, hyperprior = TRUE,
     note = paste("Empirical Bayes over the random-effect covariances: the mode",
                  "of the same outer objective re_cov_nested integrates, with",
                  "the fixed effects reported conditional on it. Tier 2 because",
@@ -263,13 +277,40 @@ BACKEND_REGISTRY <- list(
   nested_laplace = list(
     emits = "iid",
     tier = "structured", input = "nested", fitter = "tulpa_nested_laplace",
-    families = NULL, cabi = "cpp_nested_laplace_multi",
+    families = NULL,
+    # cpp_nested_laplace_multi is an Rcpp export (an R-level entry point), not
+    # a registered C-ABI callable -- a model package reaches this driver's
+    # per-field kernels individually instead, through the six symbols below
+    # (gcol33/tulpa#775).
+    cabi = c("tulpa_nested_laplace_icar", "tulpa_nested_laplace_bym2",
+             "tulpa_nested_laplace_car_proper", "tulpa_nested_laplace_temporal",
+             "tulpa_nested_laplace_nngp", "tulpa_nested_laplace_hsgp"),
+    hyperprior = TRUE,
+    # The multi-block converter behind cpp_nested_laplace_multi
+    # (.nl_block_spec_for_cpp(), R/nested_laplace.R) has no gp / nngp / hsgp
+    # arm -- only icar / bym2 / car_proper / rw1 / rw2 / ar1 / iid / spde /
+    # tgmrf -- so a continuous field's own (1 | g) turning the fit into a
+    # multi-block prior reaches a refusal deep in that dispatch rather than at
+    # the front door (gcol33/tulpa#794). A continuous field with no RE term
+    # stays single-block and is unaffected.
+    carries_continuous_spatial_re = FALSE,
     note = "Single-arm nested Laplace; integrates latent-block hyperparameters"
   ),
   nested_laplace_joint = list(
     emits = "iid",
     tier = "structured", input = "nested", fitter = "tulpa_nested_laplace_joint",
-    families = NULL, cabi = "cpp_nested_laplace_joint_multi",
+    families = NULL,
+    # cpp_nested_laplace_joint_multi is an Rcpp export, not a registered C-ABI
+    # callable, and no callable backs the joint multi-block driver at all
+    # (gcol33/tulpa#775).
+    cabi = NULL, hyperprior = TRUE,
+    # Has an R-level fitter (reachable, callable directly) but is NOT one
+    # `tulpa(mode =)` can dispatch to: it needs multiple response arms, which
+    # a single tulpa() formula cannot express (gcol33/tulpa#786). Read by the
+    # `input == "nested"` dispatch in tulpa() and by inference_mode_info()'s
+    # printed backend list, so the two cannot drift apart the way the
+    # hardcoded `backend != "nested_laplace"` check and the `[R]` tag did.
+    dispatchable = FALSE,
     note = paste("Joint multi-arm nested Laplace; driven by model packages, not the",
                  "single-response tulpa() formula (cannot express multiple arms)")
   ),
@@ -277,7 +318,10 @@ BACKEND_REGISTRY <- list(
     emits = "iid",
     tier = "structured", input = "spde", fitter = "fit_spde",
     families = c("binomial", "poisson", "neg_binomial_2", "gaussian"),
-    cabi = "cpp_nested_laplace_spde",
+    # cpp_nested_laplace_spde is the Rcpp export fit_spde() calls; the
+    # registered C-ABI symbol a model package reaches is
+    # "tulpa_nested_laplace_spde" (gcol33/tulpa#775).
+    cabi = "tulpa_nested_laplace_spde", hyperprior = TRUE,
     note = paste("Continuous Matern SPDE field; nested-Laplace integration over",
                  "(range, sigma) via fit_spde(). Uses its own CCD / grid",
                  "hyperparameter engine (the FEM Q-builder rebuilds the precision",
@@ -299,6 +343,11 @@ BACKEND_REGISTRY <- list(
 #' @keywords internal
 .tier_backends <- function(tier_key) {
   names(Filter(function(e) e$tier == tier_key, BACKEND_REGISTRY))
+}
+
+# Backend names whose fitter takes the outer `hyperprior` choice.
+.hyperprior_backends <- function() {
+  names(Filter(function(e) isTRUE(e$hyperprior), BACKEND_REGISTRY))
 }
 
 
@@ -349,6 +398,17 @@ ALL_BACKENDS <- names(BACKEND_REGISTRY)
 # Laplacian basis built by cpp_hsgp_basis_2d).
 .NL_FRONTDOOR_CONTINUOUS <- c("gp", "nngp", "hsgp")
 
+# Field shapes a restricted-spatial-regression projection can be applied to:
+# the ones a Polya-Gamma Gibbs kernel carries the field's own prior precision
+# for. Areal goes to `cpp_pg_binomial_gibbs_rsr()` (an adjacency), the NNGP
+# spellings to `cpp_pg_binomial_gibbs_gp_rsr()` (Vecchia factors at the current
+# range). An HSGP basis and an SPDE mesh have neither and are refused at
+# `spatial_rsr()` (gcol33/tulpa#815, gcol33/tulpa#848).
+.RSR_FIELDS <- c(.NL_FRONTDOOR_AREAL, "gp", "nngp")
+
+# Of those, the ones whose projection is applied on the CONTINUOUS kernel.
+.RSR_CONTINUOUS <- c("gp", "nngp")
+
 # SPDE is also coordinate-addressed (no spatial(col) term) and nested-integrated,
 # but it carries its OWN nested engine -- fit_spde() rebuilds the Matern precision
 # Q(range, sigma) per node via the FEM Q-builder and integrates (range, sigma)
@@ -377,6 +437,17 @@ ALL_BACKENDS <- names(BACKEND_REGISTRY)
 # Types outside this set stay on the conditional Laplace path under auto/structured.
 .NL_FRONTDOOR_NESTED <- c(.NL_FRONTDOOR_AREAL, .NL_FRONTDOOR_CONTINUOUS,
                           .NL_FRONTDOOR_SPDE)
+
+# The subset of .NL_FRONTDOOR_NESTED the exact ModelData NUTS sampler (`hmc`
+# and its siblings) also threads directly -- read off dispatch_glmm_modeldata()
+# (R/tulpa.R): icar / bym2 / car_proper via the areal spec, gp / nngp / hsgp via
+# .gp_sampler_spec() / .hsgp_sampler_spec(). Plain intrinsic 'car' and 'spde'
+# are NOT in this set -- the modeldata dispatch refuses 'car' by name (areal
+# there is icar/bym2 only) and has no SPDE spec builder at all -- so auto must
+# not offer either as a fallback when nested_laplace cannot carry a call
+# (gcol33/tulpa#769).
+.NL_FRONTDOOR_HMC_SPATIAL <- c("icar", "bym2", "car_proper",
+                               .NL_FRONTDOOR_CONTINUOUS)
 
 
 #' Test whether a backend supports the given family.
@@ -496,7 +567,7 @@ assert_backend_reachable <- function(backend) {
   }
   if (is.null(entry$fitter)) {
     meta <- TIER_META[[entry$tier]]
-    cabi <- entry$cabi %||% "(none)"
+    cabi <- paste(entry$cabi %||% "(none)", collapse = ", ")
     stop(sprintf(paste0(
       "Backend '%s' is registered (Tier %d, %s) but has no R-level fitter.\n",
       "Its C++ kernel is reachable from model packages through the C ABI\n",
@@ -573,7 +644,7 @@ tulpa_dispatch <- function(mode,
 #'
 #' The dispatch layer and the fitters that return generic-accessor-facing
 #' objects route their return value through this helper (some special-purpose
-#' fitters -- the logpost samplers, tulpa_ep, the categorical drivers -- still
+#' fitters -- tulpa_ep, the categorical drivers -- still
 #' stamp their class by hand), so a directly-called fitter and a
 #' `tulpa()`-dispatched one yield the same
 #' enriched object: the `tulpa_fit` class (so the generic S3 methods --
@@ -596,33 +667,166 @@ tulpa_dispatch <- function(mode,
 #' @param draws_kind Explicit `"chain"` / `"iid"` / `"point"` tag; used when the
 #'   backend is absent from `BACKEND_REGISTRY` or to override the registry.
 #' @param n_fixed,fixed_names,param_names Fixed-effect layout, each filled only
-#'   when the fitter left it unset.
+#'   when the fitter left it unset. An unnamed `means` vector of the matching
+#'   length is named by `param_names`.
+#' @param data Observation-level fields the fitter was called with --
+#'   `list(y=, n_trials=, model_matrix=, family=, offset=, phi=, phi2=)` --
+#'   stamped onto the fit so a directly-called fitter carries the same
+#'   `nobs()` / `fitted()` / `predict()` / `posterior_predict()` surface a
+#'   `tulpa()`-dispatched one does (gcol33/tulpa#781). Any subset may be
+#'   supplied; each entry fills only when the fitter did not already set the
+#'   matching field, so a fitter that already stamped a richer value (e.g. the
+#'   full design bundle `tulpa()` attaches post-dispatch) wins.
 #' @param extra_class Subclass(es) to prepend before `tulpa_fit`.
 #' @return The enriched fit, classed `c(extra_class, ..., "tulpa_fit")`.
 #' @keywords internal
 .finalize_fit <- function(fit, backend = NULL, draws_kind = NULL,
                           n_fixed = NULL, fixed_names = NULL,
-                          param_names = NULL, extra_class = NULL) {
+                          param_names = NULL, extra_class = NULL,
+                          data = NULL) {
   if (!is.list(fit)) return(fit)
 
   if (!is.null(backend)) fit$backend <- fit$backend %||% backend
   reg <- if (!is.null(fit$backend)) BACKEND_REGISTRY[[fit$backend]] else NULL
   fit$draws_kind <- fit$draws_kind %||% draws_kind %||% reg$emits
 
+  if (!is.null(data)) {
+    fit$y            <- fit$y %||% data$y
+    fit$n_trials     <- fit$n_trials %||% data$n_trials
+    fit$model_matrix <- fit$model_matrix %||% data$model_matrix
+    fit$family       <- fit$family %||% data$family
+    fit$offset       <- fit$offset %||% data$offset
+    fit$phi          <- fit$phi %||% data$phi
+    fit$phi2         <- fit$phi2 %||% data$phi2
+    # Was that `phi` estimated or conditioned on? Only `tulpa_eb()` set the
+    # field, so on every other door a consumer could not tell a fitted
+    # dispersion from the default (gcol33/tulpa#849). FALSE is the answer
+    # everywhere else, and it is set only for the families that read a
+    # dispersion at all -- elsewhere there is no quantity to have estimated.
+    if (is.null(fit$phi_estimated) &&
+        .family_base(fit$family) %in% .PHI_FAMILIES) {
+      fit$phi_estimated <- FALSE
+    }
+  }
+
   # Axis fields the fit's own path could not read, published
   # for the duration of the fit by the nested-Laplace front doors.
   fit$axis_fields_dropped <- fit$axis_fields_dropped %||%
     getOption("tulpa.nl_axis_dropped", NULL)
 
-  if (!is.null(n_fixed))     fit$n_fixed     <- fit$n_fixed     %||% n_fixed
-  if (!is.null(fixed_names)) fit$fixed_names <- fit$fixed_names %||% fixed_names
-  if (!is.null(param_names)) fit$param_names <- fit$param_names %||% param_names
+  # A zero-length name vector (`character(0)`, from `colnames(X) %||%
+  # positional` when `X` has NULL colnames) is not information -- treat it
+  # the same as NULL rather than latching it in, which previously left
+  # `fixed_names` at `character(0)` and turned `fixed_names[idx]` into NA for
+  # every coefficient (gcol33/tulpa#780). `%||%` only substitutes for NULL, so
+  # both sides of the assignment are length-checked instead: an already-set
+  # `character(0)` (from a prior finalize pass, or a fitter that pre-set the
+  # field) does not block a later, real name vector either.
+  if (!is.null(n_fixed) && is.null(fit$n_fixed)) fit$n_fixed <- n_fixed
+  if (length(fixed_names) && !length(fit$fixed_names)) fit$fixed_names <- fixed_names
+  if (length(param_names) && !length(fit$param_names)) fit$param_names <- param_names
+
+  # A blank ("") name survives every length/NULL check above but is refused
+  # by R's OWN `[.matrix` when later used to select a column -- `m[, ""]`
+  # errors "subscript out of bounds" even when a column is literally named
+  # "" (`cbind(1, x)` names its first column ""), which is what
+  # `.tulpa_point_linpred()` does with `names(coef(fit))` at predict time
+  # (gcol33/tulpa#780). Repaired positionally as soon as `fixed_names` holds
+  # SOME real content; a fit carrying no names at all (mala(), pathfinder(),
+  # a raw `logpost` sampler with no fixed/random split) is left alone here --
+  # synthesizing a placeholder for those would block the later, real name a
+  # front door adds through a SECOND `.finalize_fit()` call (mode = "mala"
+  # wrapped by tulpa()); this only ever narrows an already-nonempty vector.
+  if (!is.null(fit$n_fixed) && length(fit$fixed_names)) {
+    fit$fixed_names <- .tulpa_fill_names(fit$fixed_names, fit$n_fixed, "beta")
+  }
+  # The design a standalone fitter stores verbatim (`$model_matrix <- X`) is
+  # what predict() / fitted() / residuals() later index BY NAME against
+  # `names(coef(fit))`; if `X` itself had no or blank column names, stamp the
+  # SAME repaired names onto its leading `fixed_names` columns so the two
+  # stay in lock-step rather than one saying "beta1" and the other "".
+  # `tulpa()`'s own dispatch overwrites `$model_matrix` unconditionally with
+  # the (always fully-named) design bundle afterward, so this never fights a
+  # later real design.
+  if (length(fit$fixed_names) && is.matrix(fit$model_matrix) &&
+      ncol(fit$model_matrix) >= length(fit$fixed_names)) {
+    mmcn <- colnames(fit$model_matrix)
+    p <- length(fit$fixed_names)
+    if (is.null(mmcn)) mmcn <- rep("", ncol(fit$model_matrix))
+    if (!identical(mmcn[seq_len(p)], fit$fixed_names)) {
+      mmcn[seq_len(p)] <- fit$fixed_names
+      colnames(fit$model_matrix) <- mmcn
+    }
+  }
+  fit <- .name_means_by_parameter(fit)
 
   cls <- oldClass(fit)
   if (!is.null(extra_class)) cls <- c(setdiff(extra_class, cls), cls)
   if (!("tulpa_fit" %in% cls)) cls <- c(cls, "tulpa_fit")
   class(fit) <- cls
   fit
+}
+
+
+# Fill NULL, blank ("") or short/absent names positionally with `<prefix><i>`.
+# The one place a name vector reaching a boundary that cannot tolerate NA, "",
+# or a length mismatch is repaired -- `row.names<-` (print/summary), a
+# `draws[, ""]` subset (the per-parameter plots), and `dimnames<-` on an
+# unnamed array all error opaquely on such a vector rather than reporting "no
+# name" (gcol33/tulpa#780). Deliberately NOT written back onto the fit: a
+# fitter's raw result is often re-finalized by a front door that supplies the
+# real names afterward (`tulpa()` re-finalizing a backend's own fit with the
+# design's own `param_names`), and persisting a synthesized "param3" would
+# block that later, authoritative assignment the same way a stale
+# `character(0)` used to. Every reader that needs a complete name vector
+# (`.tulpa_draw_names()`, `.tulpa_pooled_draws()`) calls this at read time
+# instead, off whatever the fit carries at that moment.
+#' @keywords internal
+.tulpa_fill_names <- function(nm, n, prefix = "param") {
+  out <- rep(NA_character_, n)
+  if (!is.null(nm) && length(nm)) {
+    k <- min(length(nm), n)
+    out[seq_len(k)] <- as.character(nm)[seq_len(k)]
+  }
+  blank <- is.na(out) | !nzchar(out)
+  if (any(blank)) out[blank] <- paste0(prefix, which(blank))
+  out
+}
+
+
+# Name the fit's `means` by `param_names`, the full-parameter vector both are
+# laid out in. A producer that samples a bare numeric vector (the log-posterior
+# samplers) cannot name it itself, so the names arrive with the layout. A vector
+# already named, or of another length, is left as it is.
+#' @keywords internal
+.name_means_by_parameter <- function(fit) {
+  pn <- fit$param_names
+  if (is.character(pn) && length(pn) && is.numeric(fit$means) &&
+      is.null(names(fit$means)) && length(fit$means) == length(pn)) {
+    names(fit$means) <- pn
+  }
+  fit
+}
+
+
+# Rename the first `p` columns of a NUTS producer's `draws` matrix (and
+# `means`, if named in step) from the C++ kernel's positional `beta[j]` to the
+# design matrix's own column names -- the same names the Laplace path reports
+# coefficients under. Declines (leaves `beta[j]`) rather than renaming under a
+# duplicated or blank name.
+#' @keywords internal
+.nuts_name_fixed_effects <- function(res, X_names, p) {
+  if (is.null(X_names) || length(X_names) != p ||
+      anyDuplicated(X_names) || !all(nzchar(X_names))) {
+    return(res)
+  }
+  dn <- colnames(res$draws)
+  dn[seq_len(p)] <- X_names
+  colnames(res$draws) <- dn
+  if (!is.null(names(res$means)) && length(res$means) == length(dn)) {
+    names(res$means)[seq_len(p)] <- X_names
+  }
+  res
 }
 
 
@@ -658,7 +862,7 @@ get_mode_backends <- function(mode) {
 #'
 #' @description
 #' Implements the mode selection logic for tulpa. Accepts either tier names
-#' (auto, exact, structured, optimized) or backend names (hmc, ess, pg, laplace, vi).
+#' (auto, exact, structured, optimized) or backend names (hmc, ess, gibbs, laplace, vi).
 #'
 #' When mode is "auto", selects between Tier 1 (Exact) and Tier 2 (Structured)
 #' based on model characteristics. Never selects Tier 3 (Optimized) automatically.
@@ -688,7 +892,8 @@ select_inference_mode <- function(mode,
                                   has_latent = FALSE,
                                   spatial_type = NULL,
                                   temporal = NULL,
-                                  has_re = FALSE) {
+                                  has_re = FALSE,
+                                  feat = list()) {
 
   mode <- tolower(mode)
 
@@ -725,7 +930,7 @@ select_inference_mode <- function(mode,
   # is the router doing its job, not an override of anything the caller asked for.
   if (mode == "auto") {
     sel <- auto_select_mode(family, n_obs, has_spatial, has_temporal, has_latent, temporal,
-                            spatial_type, has_re = has_re)
+                            spatial_type, has_re = has_re, feat = feat)
     sel$requested <- "auto"
     sel$explicit  <- FALSE
     return(sel)
@@ -733,7 +938,7 @@ select_inference_mode <- function(mode,
 
   # Explicit tier mode: select best backend within that tier
   backend <- select_backend_for_mode(mode, family, n_obs, has_spatial, has_temporal,
-                                     has_latent, spatial_type)
+                                     has_latent, spatial_type, has_re = has_re, feat = feat)
   tier_info <- get_backend_tier(backend)
 
   return(list(
@@ -758,7 +963,17 @@ select_inference_mode <- function(mode,
 #'
 #' @keywords internal
 auto_select_mode <- function(family, n_obs, has_spatial, has_temporal, has_latent, temporal = NULL,
-                             spatial_type = NULL, has_re = FALSE) {
+                             spatial_type = NULL, has_re = FALSE,
+                             feat = list()) {
+  # `feat` carries the per-call features a backend can refuse at dispatch; see
+  # .auto_backend_ok(). The `spatial` flag is set from has_spatial so a caller
+  # cannot pass the two inconsistently.
+  feat$spatial <- isTRUE(has_spatial)
+  # A continuous spatial field (gp / nngp / hsgp) plus a formula RE term is a
+  # feature nested_laplace's multi-block converter cannot carry (gcol33/tulpa#794);
+  # an areal field + RE stays single-block prior handling and is unaffected.
+  feat$continuous_spatial_re <- isTRUE(has_re) && isTRUE(has_spatial) &&
+    tolower(spatial_type %||% "") %in% .NL_FRONTDOOR_CONTINUOUS
 
   # Latent prior blocks (`latent(tgmrf(...))`) integrate their hyperparameters
   # via nested Laplace -- the designed Tier 2 hot path for latent Gaussian
@@ -787,6 +1002,51 @@ auto_select_mode <- function(family, n_obs, has_spatial, has_temporal, has_laten
       mode = "exact", backend = "hmc", tier = 1L, tier_name = "Exact",
       reason = sprintf("%s-varying coefficients (exact ModelData NUTS)", vc)
     ))
+  }
+
+  # A continuous-time temporal GP and the multi-scale temporal field are
+  # sampler-path only: their hyperparameters are sampled jointly with the field
+  # and there is no nested-Laplace kernel laying a grid over a dense T x T
+  # Gaussian. auto used to fall through to the temporal branch below, which has
+  # arms for rw1 / rw2 / ar1 only, and tulpa() then redirected to nested Laplace
+  # -- the one door that refuses them (gcol33/tulpa#672).
+  t_type <- tolower((temporal$type %||% "")[1])
+  if (t_type %in% c("gp", "multiscale", "temporal_multiscale")) {
+    return(list(
+      mode = "exact", backend = "hmc", tier = 1L, tier_name = "Exact",
+      reason = sprintf("continuous-time temporal field (%s); exact ModelData NUTS",
+                       t_type)
+    ))
+  }
+
+  # A plain temporal field (rw1 / rw2 / ar1; gp / multiscale are the sampler-
+  # path-only arm just above) integrates through the nested-Laplace temporal
+  # kernel, same as an areal spatial field below. With no arm here, auto fell
+  # through unconditionally to the gradient-sampler default (picked on family
+  # and dataset size alone) and relied on a redirect further downstream in
+  # tulpa() to move a temporal-only model to nested_laplace -- but a ziformula
+  # / weights / phi2 the default backend could not carry then errored at the
+  # front door's feature guards BEFORE that redirect ever ran (gcol33/tulpa#769).
+  # Deciding it here means the call's actual features are visible before a
+  # backend is picked at all, and the fallback mirrors the spatial arm below:
+  # the exact ModelData sampler consumes a temporal field directly and carries
+  # ziformula / phi2 where the nested kernel does not.
+  if (has_temporal && !has_spatial) {
+    if (.auto_backend_ok("nested_laplace", family, feat)) {
+      return(list(
+        mode = "structured", backend = "nested_laplace", tier = 2L,
+        tier_name = "Structured",
+        reason = sprintf("temporal %s field; nested-Laplace integration", t_type)
+      ))
+    }
+    if (.auto_backend_ok("hmc", family, feat)) {
+      return(list(
+        mode = "exact", backend = "hmc", tier = 1L, tier_name = "Exact",
+        reason = sprintf(paste0(
+          "temporal %s field; nested-Laplace cannot carry this call, exact ",
+          "ModelData NUTS instead"), t_type)
+      ))
+    }
   }
 
   # The multi-scale (local + regional) field is carried only by the exact
@@ -824,15 +1084,37 @@ auto_select_mode <- function(family, n_obs, has_spatial, has_temporal, has_laten
     fam_nm <- family$name %||% family$distribution %||% ""
     # A temporal field routes through the joint nested-Laplace path in tulpa()
     # (the design-input Gibbs backend is redirected there), so Gibbs is reachable
-    # from auto only when there is no temporal field.
-    if (spatial_type %in% c("icar", "bym2", "rsr") && identical(fam_nm, "binomial") &&
-        !has_temporal) {
+    # from auto only when there is no temporal field. spatial_car()'s exported
+    # "car" is the same intrinsic ICAR field dispatch_gibbs_spatial() dispatches
+    # under "icar" (gcol33/tulpa#819).
+    if (.areal_gibbs_type(spatial_type) %in% c("icar", "bym2", "rsr") &&
+        identical(fam_nm, "binomial") &&
+        !has_temporal && .auto_backend_ok("gibbs", family, feat)) {
       return(list(
         mode = "exact", backend = "gibbs", tier = 1L, tier_name = "Exact",
         reason = sprintf("%s spatial model (binomial Polya-Gamma Gibbs)", spatial_type)
       ))
     }
     if (spatial_type %in% .NL_FRONTDOOR_NESTED) {
+      # The generic nested-Laplace converter carries no ziformula / (rarely)
+      # other feature the call needs (gcol33/tulpa#769: an icar field +
+      # ziformula picked this backend and then errored at the front door's
+      # zero-inflation guard). The exact ModelData NUTS sampler threads areal
+      # (icar/bym2/car_proper) and continuous (gp/nngp/hsgp) fields directly
+      # and DOES carry ziformula/phi2 -- but not SPDE or plain intrinsic 'car'
+      # (.NL_FRONTDOOR_HMC_SPATIAL), so only that subset gets the fallback;
+      # elsewhere this keeps returning nested_laplace exactly as before and the
+      # downstream guard produces its usual (unchanged) refusal.
+      if (!.auto_backend_ok("nested_laplace", family, feat) &&
+          spatial_type %in% .NL_FRONTDOOR_HMC_SPATIAL &&
+          .auto_backend_ok("hmc", family, feat)) {
+        return(list(
+          mode = "exact", backend = "hmc", tier = 1L, tier_name = "Exact",
+          reason = sprintf(paste0(
+            "%s spatial field; nested-Laplace cannot carry this call, exact ",
+            "ModelData NUTS instead"), spatial_type)
+        ))
+      }
       return(list(
         mode = "structured", backend = "nested_laplace", tier = 2L,
         tier_name = "Structured",
@@ -869,28 +1151,115 @@ auto_select_mode <- function(family, n_obs, has_spatial, has_temporal, has_laten
   # to 1, with a warning) when the caller names it directly; only the auto
   # default changes.
   if (has_re) {
-    return(list(
-      mode = "exact", backend = "re_cov_gibbs", tier = 1L, tier_name = "Exact",
-      reason = paste("random-effect term(s); RE covariance(s) integrated via",
-                     "exact Metropolis-within-Gibbs debias")
-    ))
+    # The exact debias first, the deterministic integration second: both infer
+    # the covariance, and the second is what carries an offset, a ziformula, a
+    # second dispersion and the families the Gibbs sweep does not.
+    if (.auto_backend_ok("re_cov_gibbs", family, feat)) {
+      return(list(
+        mode = "exact", backend = "re_cov_gibbs", tier = 1L, tier_name = "Exact",
+        reason = paste("random-effect term(s); RE covariance(s) integrated via",
+                       "exact Metropolis-within-Gibbs debias")
+      ))
+    }
+    if (.auto_backend_ok("re_cov_nested", family, feat)) {
+      return(list(
+        mode = "structured", backend = "re_cov_nested", tier = 2L,
+        tier_name = "Structured",
+        reason = paste("random-effect term(s); RE covariance(s) integrated via",
+                       "nested Laplace (the exact debias does not carry this call)")
+      ))
+    }
   }
 
   # Default: Tier 1 (Exact). Both MALA and NUTS (backend "hmc", via
   # tulpa_sample_glmm) are reachable from the R front door; auto keeps MALA
   # as the default gradient sampler for its lower per-iteration cost on the
   # plain-GLM designs that reach this branch. mode = "exact" selects NUTS.
-  return(list(
-    mode = "exact", backend = "mala", tier = 1L, tier_name = "Exact",
-    reason = "default (MALA gradient sampler; mode = 'exact' selects NUTS)"
-  ))
+  #
+  # MALA carries no ziformula (gcol33/tulpa#769: `tulpa(y ~ x, ..., ziformula =
+  # ~ 1)` picked this branch unconditionally and errored at the front door's
+  # zero-inflation guard on the very call that picked it). Gate on
+  # .auto_backend_ok() and fall back to the exact ModelData sampler, which
+  # carries ziformula / phi2 / offset / weights all at once, before refusing.
+  if (.auto_backend_ok("mala", family, feat)) {
+    return(list(
+      mode = "exact", backend = "mala", tier = 1L, tier_name = "Exact",
+      reason = "default (MALA gradient sampler; mode = 'exact' selects NUTS)"
+    ))
+  }
+  if (.auto_backend_ok("hmc", family, feat)) {
+    return(list(
+      mode = "exact", backend = "hmc", tier = 1L, tier_name = "Exact",
+      reason = "MALA cannot carry this call; exact ModelData NUTS instead"
+    ))
+  }
+  stop(sprintf(paste0(
+    "auto: no backend fits this call's feature combination (%s). Use an ",
+    "explicit mode naming a backend that carries it, or drop the ",
+    "conflicting feature."),
+    paste(names(feat)[vapply(feat, isTRUE, logical(1))], collapse = ", ")),
+    call. = FALSE)
+}
+
+
+# Can `backend` take this CALL, not just this model?
+#
+# `backend_supports_family()` answers the family half. The other half is the
+# per-call features a backend refuses at dispatch -- an offset, weights, a
+# ziformula, a second dispersion, more random-effect terms than its sweep
+# updates -- and the auto selector could not see any of them, so it picked
+# backends that then errored on the very call that selected them
+# (gcol33/tulpa#666, #681). Every restriction is read from the registry or from
+# the registry-derived capability sets, never restated here, so declaring one is
+# a registry edit rather than another condition in the selector.
+#
+# `feat` is a named list of logical flags plus `n_re_terms`; an absent flag is
+# FALSE.
+#' @keywords internal
+.auto_backend_ok <- function(backend, family, feat = list()) {
+  if (!backend_supports_family(backend, family)) return(FALSE)
+  reg <- BACKEND_REGISTRY[[backend]]
+  if (is.null(reg)) return(FALSE)
+  on <- function(k) isTRUE(feat[[k]])
+  if (on("offset") && identical(reg$carries_offset, FALSE)) return(FALSE)
+  if (on("continuous_spatial_re") &&
+      identical(reg$carries_continuous_spatial_re, FALSE)) return(FALSE)
+  if (on("ziformula") && !backend %in% .zi_backends()) return(FALSE)
+  if (on("phi2") && !backend %in% .phi2_backends()) return(FALSE)
+  # Weights run through a log-posterior sampler, or through the non-spatial
+  # Laplace kernel; the spatial qualification is a property of the CALL, so it
+  # travels in `feat` rather than in the registry.
+  if (on("weights") &&
+      !(identical(reg$input, "logpost") ||
+        (identical(backend, "laplace") && !on("spatial")))) return(FALSE)
+  mx <- reg$max_re_terms
+  if (!is.null(mx) && isTRUE((feat$n_re_terms %||% 0L) > mx)) return(FALSE)
+  TRUE
+}
+
+
+# Backends that DETERMINE the random-effect scale rather than conditioning on a
+# supplied one.
+#
+# `?tulpa` says a `sigma_re` handed to one of these is ignored "with a warning",
+# and only the EB and random-slope routes warned: agq / gibbs / hmc dropped the
+# value silently (gcol33/tulpa#669). Kept as one list, read by the warning, so
+# the doc's claim has a single referent.
+#' @keywords internal
+.re_scale_estimating_backends <- function() {
+  c("eb", "agq", "gibbs", "re_cov_nested", "re_cov_gibbs", "re_aghq",
+    names(BACKEND_REGISTRY)[vapply(
+      BACKEND_REGISTRY,
+      function(b) identical(b$input, "modeldata"),
+      logical(1))])
 }
 
 
 #' Select best backend within a mode
 #' @keywords internal
 select_backend_for_mode <- function(mode, family, n_obs, has_spatial, has_temporal,
-                                    has_latent = FALSE, spatial_type = NULL) {
+                                    has_latent = FALSE, spatial_type = NULL,
+                                    has_re = FALSE, feat = list()) {
 
   if (mode == "exact") {
     # HMC is the default for Exact - most general
@@ -912,6 +1281,18 @@ select_backend_for_mode <- function(mode, family, n_obs, has_spatial, has_tempor
     if (has_latent) return("nested_laplace")
     if (has_spatial && !is.null(spatial_type) && spatial_type %in% .NL_FRONTDOOR_NESTED) {
       return("nested_laplace")
+    }
+    # A random-effect term has no dataset-implied scalar sigma_re to condition
+    # on within the Structured tier either -- auto's own RE arm already
+    # integrates it via re_cov_nested / re_cov_gibbs (see auto_select_mode()),
+    # and the Structured tier carries the deterministic (nested-Laplace) half
+    # of that pair. Conditioning at sigma_re = 1 is the explicit
+    # mode = "laplace" (gcol33/tulpa#787). Guarded on !has_spatial: a spatial
+    # field reaching here is one of the non-nested types (multiscale, plain
+    # 'car', ...) that the Structured tier deliberately keeps on conditional
+    # Laplace -- re_cov_nested carries no spatial field at all.
+    if (!has_spatial && has_re && .auto_backend_ok("re_cov_nested", family, feat)) {
+      return("re_cov_nested")
     }
     return("laplace")
   }
@@ -1018,13 +1399,25 @@ inference_mode_info <- function() {
   cat("  tulpa(..., mode = 'structured') # Tier 2\n")
   cat("  tulpa(..., mode = 'optimized')  # Tier 3 (explicit opt-in)\n\n")
 
-  cat("Backends ([R] = callable from R, [C-ABI] = model-package kernel only):\n")
+  cat(paste0(
+    "Backends ([R] = tulpa(mode =) dispatch, [direct] = has an R fitter but ",
+    "tulpa(mode =) refuses it -- call the fitter itself, [C-ABI] = ",
+    "model-package kernel only):\n"))
   for (tk in c("exact", "structured", "optimized")) {
     for (b in .tier_backends(tk)) {
       entry <- BACKEND_REGISTRY[[b]]
-      tag <- if (is.null(entry$fitter)) "[C-ABI]" else "[R]    "
-      cat(sprintf("  %s mode = '%-11s # Tier %d (%s)\n",
-                  tag, paste0(b, "'"), TIER_META[[tk]]$tier, TIER_META[[tk]]$name))
+      if (is.null(entry$fitter)) {
+        tag <- "[C-ABI]"
+        usage <- sprintf("mode = '%s'", b)
+      } else if (isTRUE(entry$dispatchable %||% TRUE)) {
+        tag <- "[R]    "
+        usage <- sprintf("mode = '%s'", b)
+      } else {
+        tag <- "[direct]"
+        usage <- sprintf("%s()", entry$fitter)
+      }
+      cat(sprintf("  %s %-26s # Tier %d (%s)\n",
+                  tag, usage, TIER_META[[tk]]$tier, TIER_META[[tk]]$name))
     }
   }
 

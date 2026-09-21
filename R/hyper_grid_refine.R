@@ -62,6 +62,39 @@
 .hyper_axis_is_log_scale <- function(spec) isTRUE(spec$log_scale)
 .hyper_axis_bounds <- function(spec) spec$bounds
 
+# May refinement place a node PAST the outermost declared node on this axis?
+# A spec that predates the field says nothing about it and keeps the historical
+# answer.
+.hyper_axis_may_extend <- function(spec) !identical(spec$extend, FALSE)
+
+# The interval new nodes are confined to on an axis that may not be extended:
+# the span the axis's DECLARED nodes cover, on the natural scale. `spec$grid`
+# holds those nodes -- refinement appends to `theta_grid`, never to the spec --
+# so this is the range the caller wrote down however many passes have run.
+# A log-scale axis's zero level is its point mass rather than a point of the
+# continuum, so the span is taken over the positive nodes.
+# NULL where the axis may be extended, and where fewer than two continuum nodes
+# leave no interior to place anything in.
+.hyper_axis_node_limit <- function(spec) {
+  if (.hyper_axis_may_extend(spec)) return(NULL)
+  g <- as.numeric(spec$grid)
+  g <- g[is.finite(g)]
+  if (.hyper_axis_is_log_scale(spec)) g <- g[g > 0]
+  if (length(g) < 2L) return(c(NA_real_, NA_real_))
+  range(g)
+}
+
+# Drop proposed nodes that fall outside the declared span. A no-op on an axis
+# that may be extended; on one that may not, this is the whole of what makes a
+# stated axis a bound, so every proposal path goes through it rather than each
+# restating the comparison.
+.hyper_clip_to_node_limit <- function(pts, spec) {
+  lim <- .hyper_axis_node_limit(spec)
+  if (is.null(lim)) return(pts)
+  if (anyNA(lim)) return(pts[0])
+  pts[pts >= lim[1L] & pts <= lim[2L]]
+}
+
 # Refinement-order priority. Defaults to declaration order; callers may
 # attach `refine_priority` (integer, smaller = earlier) to a spec to override.
 .hyper_axis_refinement_order <- function(axes, specs) {
@@ -75,7 +108,8 @@
 # ============================================================================
 # Edge scores per axis (boundary mass + integrand-density-at-boundary).
 # ============================================================================
-.hyper_axis_edge_scores <- function(theta_grid, log_marginal, specs, axes) {
+.hyper_axis_edge_scores <- function(theta_grid, log_marginal, specs, axes,
+                                    refining_axis = NULL) {
   if (length(log_marginal) == 0L) return(list())
   # Non-finite cells (inner Newton non-convergent on consumer-package
   # joint fitters, e.g. occu_cover_joint_coupled at degenerate sigma+alpha
@@ -86,7 +120,10 @@
   if (length(finite_lm) == 0L) return(list())
   lm_max_total <- max(finite_lm)
   weights      <- .nl_normalise_weights_safe(log_marginal,
-                                              what = "adaptive_grid edge scores")
+                                              what = "adaptive_grid edge scores",
+                                              log_quad = .hyper_log_quad_weights(
+                                                  theta_grid, specs,
+                                                  refining = refining_axis))
   if (all(is.na(weights))) return(list())
   out <- list()
   per_level_max <- function(lm_at_lev) {
@@ -117,7 +154,8 @@
 # Identical to the joint driver's `.propose_axis_extension` /
 # `.propose_interior_densification` but reading log_scale / bounds from `spec`.
 # ============================================================================
-.hyper_propose_axis_extension <- function(spec, lev, side, extend_ok = TRUE) {
+.hyper_propose_axis_extension <- function(spec, lev, side,
+                                          extend_ok = .hyper_axis_may_extend(spec)) {
   log_scale <- .hyper_axis_is_log_scale(spec)
   bounds    <- .hyper_axis_bounds(spec)
   mid <- if (log_scale)
@@ -141,8 +179,15 @@
                  else            extend1 - (neighbour - edge)
   }
   pts <- if (isTRUE(extend_ok)) c(densify, extend1, extend2) else densify
+  pts <- .hyper_clip_to_node_limit(pts, spec)
   if (!is.null(bounds)) {
     pts <- pts[pts > bounds[1L] & pts < bounds[2L]]
+  }
+  # The declared prior support is fixed, so a node outside it would carry zero
+  # weight and only cost an inner solve.
+  slab <- spec$slab_bounds
+  if (!is.null(slab)) {
+    pts <- pts[pts >= slab[1L] & pts <= slab[2L]]
   }
   keep <- vapply(pts, function(p) {
     all(abs(lev - p) > 1e-8 * max(1, abs(p)))
@@ -150,6 +195,8 @@
   pts[keep]
 }
 
+# Every point here is a midpoint between two existing levels, so it lies inside
+# the span whatever the axis's extension setting; no clip is needed.
 .hyper_propose_interior_densification <- function(spec, lev, mode_idx,
                                                   do_left = FALSE,
                                                   do_right = FALSE) {
@@ -182,9 +229,19 @@
   } else {
     pts <- mu + c(-1.5, -0.7, 0.7, 1.5) * sd
   }
+  # The consistency pass places its points at a multiple of the modal SD, which
+  # reaches past the declared span whenever the marginal is wide relative to it.
+  pts <- .hyper_clip_to_node_limit(pts, spec)
   bounds <- .hyper_axis_bounds(spec)
   if (!is.null(bounds)) {
     pts <- pts[pts > bounds[1L] & pts < bounds[2L]]
+  }
+  # The declared prior support is fixed, so a node outside it would carry zero
+  # weight and only cost an inner solve -- the same clip the extension proposals
+  # take.
+  slab <- spec$slab_bounds
+  if (!is.null(slab)) {
+    pts <- pts[pts >= slab[1L] & pts <= slab[2L]]
   }
   if (length(pts) == 0L) return(numeric(0))
   keep <- vapply(pts, function(p) {
@@ -195,21 +252,28 @@
 }
 
 # ============================================================================
-# Slice-triple builder. For each new axis value the helper produces ONE row
-# at (axis = pt, other_axes = modal_at_anchor). Returns the matrix of new
-# cells plus the marginal-scale calibration term (log S_a, see math note).
+# Slice-cell builder. For each new axis value the helper produces ONE cell at
+# (axis = pt, other_axes = the modal cell at the anchor level). The cell is a
+# point evaluation like any other and is measured by the box it owns in its
+# row (`.hyper_refined_log_quad()`), so it carries no term standing in for the
+# rest of its level.
+#
+# The anchor is chosen among base-tensor cells and slice cells on the SAME axis,
+# never a slice cell placed on another one, so every slice cell sits on base
+# levels off its own axis and its row is a row of the base tensor.
 # ============================================================================
 .hyper_new_mode_tracked_triples <- function(theta_grid, log_marginal, specs,
-                                             axis_name, new_pts, anchor_lev) {
+                                             axis_name, new_pts, anchor_lev,
+                                             refining_axis = NULL) {
   if (length(new_pts) == 0L) return(NULL)
   v <- as.numeric(theta_grid[, axis_name])
-  mask <- abs(v - anchor_lev) < 1e-12 * max(1, abs(anchor_lev))
+  mask <- abs(v - anchor_lev) < 1e-12 * max(1, abs(anchor_lev)) &
+    .hyper_slice_anchor_ok(refining_axis, axis_name, length(v))
   if (!any(mask)) return(NULL)
   anchor_lm   <- log_marginal[mask]
+  if (!any(is.finite(anchor_lm))) return(NULL)
   k_map_local <- which.max(anchor_lm)
   idx_global  <- which(mask)[k_map_local]
-  L_map       <- anchor_lm[k_map_local]
-  calibration <- log(sum(exp(anchor_lm - L_map)))
 
   axis_names <- colnames(theta_grid)
   n_new <- length(new_pts)
@@ -220,21 +284,18 @@
                       else rep(as.numeric(theta_grid[idx_global, a]), n_new)
   }
   list(new_cells      = new_cells,
-       calibration    = rep(calibration, n_new),
        warm_start_idx = idx_global)
 }
 
-# Stitch slice triples from multiple (axis, side) packs into one matrix +
-# calibration vector. Drops rows whose cell already appears in `theta_grid`
-# at numerical tolerance via a stringified key.
+# Stitch slice cells from multiple (axis, side) packs into one matrix. Drops
+# rows whose cell already appears in `theta_grid` at numerical tolerance via a
+# stringified key.
 .hyper_concat_slice_triples <- function(triple_packs, theta_grid) {
   if (length(triple_packs) == 0L) return(NULL)
   axis_names <- colnames(theta_grid)
   parts <- lapply(triple_packs, `[[`, "new_cells")
   if (length(parts) == 0L) return(NULL)
   new_cells <- do.call(rbind, parts)
-  calib     <- as.numeric(unlist(lapply(triple_packs, `[[`, "calibration"),
-                                  use.names = FALSE))
   if (nrow(new_cells) == 0L) return(NULL)
   fmt <- function(m) {
     cols <- lapply(axis_names, function(a) sprintf("%.10g", m[, a]))
@@ -242,10 +303,9 @@
   }
   new_keys <- fmt(new_cells)
   old_keys <- fmt(theta_grid)
-  keep <- !new_keys %in% old_keys
+  keep <- !new_keys %in% old_keys & !duplicated(new_keys)
   if (!any(keep)) return(NULL)
-  list(new_cells   = new_cells[keep, , drop = FALSE],
-       calibration = calib[keep])
+  list(new_cells = new_cells[keep, , drop = FALSE])
 }
 
 # ============================================================================
@@ -254,7 +314,8 @@
 # levels with wide spacing) checks. Returns NULL if no trigger fires.
 # ============================================================================
 .hyper_detect_axis_refinement <- function(theta_grid, log_marginal, edge_info,
-                                          axis_name, spec, edge_thresh) {
+                                          axis_name, spec, edge_thresh,
+                                          refining_axis = NULL) {
   ei  <- edge_info
   lev <- ei$levels
   v   <- as.numeric(theta_grid[, axis_name])
@@ -290,17 +351,19 @@
   if (!tr_min && !tr_max && !wide_left && !wide_right) return(NULL)
   packs <- list()
   if (tr_max) {
-    pts <- .hyper_propose_axis_extension(spec, lev, "max", extend_ok = TRUE)
+    pts <- .hyper_propose_axis_extension(spec, lev, "max")
     pk  <- .hyper_new_mode_tracked_triples(theta_grid, log_marginal, NULL,
                                             axis_name, pts,
-                                            anchor_lev = lev[n_lev])
+                                            anchor_lev = lev[n_lev],
+                                            refining_axis = refining_axis)
     if (!is.null(pk)) packs[[length(packs) + 1L]] <- pk
   }
   if (tr_min) {
-    pts <- .hyper_propose_axis_extension(spec, lev, "min", extend_ok = TRUE)
+    pts <- .hyper_propose_axis_extension(spec, lev, "min")
     pk  <- .hyper_new_mode_tracked_triples(theta_grid, log_marginal, NULL,
                                             axis_name, pts,
-                                            anchor_lev = lev[1L])
+                                            anchor_lev = lev[1L],
+                                            refining_axis = refining_axis)
     if (!is.null(pk)) packs[[length(packs) + 1L]] <- pk
   }
   if (wide_left || wide_right) {
@@ -308,7 +371,8 @@
                                                   wide_left, wide_right)
     pk  <- .hyper_new_mode_tracked_triples(theta_grid, log_marginal, NULL,
                                             axis_name, pts,
-                                            anchor_lev = lev[mode_idx])
+                                            anchor_lev = lev[mode_idx],
+                                            refining_axis = refining_axis)
     if (!is.null(pk)) packs[[length(packs) + 1L]] <- pk
   }
   if (length(packs) == 0L) return(NULL)
@@ -330,8 +394,7 @@
     return(list(theta_grid = theta_grid, log_marginal = log_marginal,
                 extras = extras, refining_axis = refining_axis, n_new = 0L))
   }
-  new_cells   <- merged$new_cells
-  calibration <- merged$calibration
+  new_cells <- merged$new_cells
   n_new <- nrow(new_cells)
 
   warm_start <- NULL
@@ -344,7 +407,7 @@
 
   fit_out <- kernel_fn(new_cells, warm_start = warm_start,
                         store_extras = !is.null(extras))
-  new_lm  <- fit_out$log_marginal + calibration
+  new_lm  <- fit_out$log_marginal
   if (!is.null(hp_fn)) {
     hp_new <- hp_fn(new_cells)
     if (!is.null(hp_new) && length(hp_new) == n_new) {
@@ -385,12 +448,14 @@
     any_triggered <- FALSE
     triggered_this_pass <- character(0)
     for (a in axes) {
-      edge_info <- .hyper_axis_edge_scores(theta_grid, log_marginal, specs, a)
+      edge_info <- .hyper_axis_edge_scores(theta_grid, log_marginal, specs, a,
+                                           refining_axis = refining_axis)
       ei <- edge_info[[a]]
       if (is.null(ei)) next
       spec <- .hyper_spec_by_name(specs, a)
       packs <- .hyper_detect_axis_refinement(theta_grid, log_marginal, ei, a,
-                                              spec, edge_thresh)
+                                              spec, edge_thresh,
+                                              refining_axis = refining_axis)
       if (is.null(packs)) next
       step <- .hyper_apply_axis_refinement(theta_grid, log_marginal, extras,
                                             refining_axis, packs, a, specs,
@@ -413,14 +478,27 @@
        extras = extras, refining_axis = refining_axis, info = info)
 }
 
+# Repopulate an axis whose marginal has collapsed onto too few nodes to carry a
+# spread, by appending slice points at `mu +/- {0.7, 1.5} * sd` around the modal
+# cell.
+#
+# The trigger is the axis's own quadrature effective sample size, read off the
+# weights the fit integrates with. It used to be the weighted SD compared
+# against the parabola at the modal node, which is one SD estimator judging the
+# other: with the reported SD now the weighted one wherever the axis is resolved
+# (gcol33/tulpa#621), that comparison would have been the estimator against
+# itself and the pass would never fire. The ESS answers the question the pass is
+# actually asking -- how many nodes the marginal spreads over -- and the parabola
+# stays as the SCALE the new points are placed at, which is the regime it is
+# right in.
 .hyper_consistency_pass <- function(theta_grid, log_marginal, extras,
                                     refining_axis, specs, theta_mean,
-                                    theta_sd, kernel_fn,
-                                    tolerance = 0.7, hp_fn = NULL,
-                                    weights = NULL) {
+                                    kernel_fn,
+                                    min_ess = .nl_diag("axis_sd_ess"),
+                                    hp_fn = NULL, weights = NULL) {
   refinable <- .hyper_refinable_names(specs)
   info <- list(axes = character(0), n_added = integer(0),
-               vom_before = numeric(0), sd_laplace = numeric(0))
+               ess_before = numeric(0), sd_laplace = numeric(0))
   n_added_total <- 0L
   if (length(refinable) == 0L) {
     return(list(theta_grid = theta_grid, log_marginal = log_marginal,
@@ -428,20 +506,24 @@
                 info = NULL, n_added = 0L))
   }
   for (axis in refinable) {
-    sd_lap <- theta_sd[[axis]] %||% NA_real_
-    mu     <- theta_mean[[axis]] %||% NA_real_
-    if (!is.finite(sd_lap) || !is.finite(mu) || sd_lap <= 0) next
+    mu <- theta_mean[[axis]] %||% NA_real_
+    if (!is.finite(mu)) next
     # Refinement on a previous axis grows theta_grid / log_marginal, so the
-    # weights and the mode index are recomputed each iteration to stay aligned
-    # with the current grid rows.
-    iter_weights <- weights
-    if (is.null(iter_weights) || length(iter_weights) != length(log_marginal)) {
-      iter_weights <- .nl_normalise_weights_safe(log_marginal, "refinement grid")
+    # log quadrature weights and the mode index are recomputed each iteration to
+    # stay aligned with the current grid rows.
+    log_quad <- .hyper_log_quad_weights(theta_grid, specs,
+                                        refining = refining_axis)
+    lm_eff <- log_marginal
+    if (!is.null(log_quad) && length(log_quad) == length(lm_eff)) {
+      lm_eff <- lm_eff + log_quad
+      lm_eff[is.na(lm_eff)] <- -Inf
     }
     overall_mode_idx <- which.max(log_marginal)
-    axis_vals <- as.numeric(theta_grid[, axis])
-    vom_sd    <- .nl_wtd_mean_sd(axis_vals, iter_weights)$sd
-    if (vom_sd >= tolerance * sd_lap) next
+    marg <- .nl_axis_marginal_logdensity(as.numeric(theta_grid[, axis]), lm_eff)
+    ess  <- .nl_axis_quad_ess(marg$log_marg)
+    if (is.finite(ess) && ess >= min_ess) next
+    sd_lap <- as.numeric(.nl_laplace_at_mode_sd_axis(marg$vals, marg$log_marg))
+    if (!is.finite(sd_lap) || sd_lap <= 0) next
 
     lev  <- sort(unique(as.numeric(theta_grid[, axis])))
     spec <- .hyper_spec_by_name(specs, axis)
@@ -450,7 +532,8 @@
 
     anchor_lev <- as.numeric(theta_grid[overall_mode_idx, axis])
     pack <- .hyper_new_mode_tracked_triples(theta_grid, log_marginal, NULL,
-                                             axis, new_pts, anchor_lev)
+                                             axis, new_pts, anchor_lev,
+                                             refining_axis = refining_axis)
     if (is.null(pack)) next
     step <- .hyper_apply_axis_refinement(theta_grid, log_marginal, extras,
                                           refining_axis, list(pack), axis,
@@ -463,7 +546,7 @@
     refining_axis <- step$refining_axis
     info$axes        <- c(info$axes, axis)
     info$n_added     <- c(info$n_added, step$n_new)
-    info$vom_before  <- c(info$vom_before, vom_sd)
+    info$ess_before  <- c(info$ess_before, ess)
     info$sd_laplace  <- c(info$sd_laplace, sd_lap)
     n_added_total    <- n_added_total + step$n_new
   }
@@ -471,32 +554,4 @@
   list(theta_grid = theta_grid, log_marginal = log_marginal,
        extras = extras, refining_axis = refining_axis, info = info,
        n_added = n_added_total)
-}
-
-# ============================================================================
-# Per-axis moment recalibration when slice cells are present. Weighted
-# mean / SD on each axis over its own refinement slice (own-axis and
-# consistency cells), skipping axes with no foreign-slice contamination.
-# ============================================================================
-.hyper_recalibrate_axis_moments <- function(theta_grid, log_marginal,
-                                            refining_axis, theta_mean,
-                                            theta_sd) {
-  if (is.null(refining_axis) || all(refining_axis == "")) {
-    return(list(theta_mean = theta_mean, theta_sd = theta_sd))
-  }
-  cols <- colnames(theta_grid)
-  for (col in cols) {
-    keep <- refining_axis == "" | refining_axis == col |
-            refining_axis == paste0("consistency_", col)
-    if (all(keep)) next
-    lm_k <- log_marginal[keep]
-    m    <- max(lm_k)
-    if (!is.finite(m)) next
-    w    <- exp(lm_k - m); w <- w / sum(w)
-    vals <- theta_grid[keep, col]
-    ms   <- .nl_wtd_mean_sd(vals, w)
-    theta_mean[[col]] <- ms$mean
-    theta_sd[[col]]   <- ms$sd
-  }
-  list(theta_mean = theta_mean, theta_sd = theta_sd)
 }

@@ -72,7 +72,13 @@ validate_spatial <- function(spatial, data) {
 #' variables, elevation) because the spatial random effect can "steal"
 #' variance from these covariates, leading to biased coefficient estimates.
 #'
-#' @param spatial A spatial specification (`spatial_gp`, `spatial_car`, etc.)
+#' @param spatial An areal specification -- `spatial_car()`, `spatial_icar()`,
+#'   `spatial_bym2()` or a proper-CAR spec -- or an NNGP one, `spatial_gp()`.
+#'   The projection is applied by the binomial Polya-Gamma Gibbs sampler, which
+#'   carries the field's own prior precision as an adjacency or as Vecchia
+#'   factors; an HSGP basis (`spatial_gp(approx = "hsgp")`) and an SPDE mesh
+#'   (`spatial_spde()`) are neither, and are refused at construction rather
+#'   than accepted and then unfittable.
 #' @param restrict_to Formula specifying which covariates to orthogonalize
 #'   against (e.g., `~ depth + temp`). The spatial effect will be constrained
 #'   to be orthogonal to the column space of these covariates.
@@ -86,22 +92,50 @@ validate_spatial <- function(spatial, data) {
 #' \deqn{w_{RSR} = (I - P_X) w}
 #'
 #' where \eqn{P_X = X(X'X)^{-1}X'} is the projection matrix onto the column
-#' space of X.
+#' space of X. The projector is built at the FIELD's own resolution: one row
+#' per areal unit, or one per unique location for an NNGP field, with the
+#' restricted design averaged over the observations at each.
+#'
+#' **What RSR estimates.** The restriction puts no part of the shared, smooth
+#' signal in the field, so the fixed effect takes all of it: RSR targets the
+#' MARGINAL association between the covariate and the response, where the
+#' unrestricted spatial model targets the association conditional on the
+#' field. The two differ by exactly the covariate's projection onto the field,
+#' so they are different estimands rather than a biased and an unbiased
+#' version of one (Bradley, 2024). Measured on a confounded continuous
+#' fixture (5 seeds, conditional slope 1.0, marginal 1.71): the restricted fit
+#' averaged 0.06 from the marginal value and 0.74 from the conditional one,
+#' the unrestricted fit 0.10 and 0.63.
+#'
+#' **The restriction is not free.** In the geostatistical setting Hanks et al.
+#' (2015) measured POORER coverage under RSR than under the spatial model that
+#' does not restrict, and credible intervals that can be inappropriately
+#' narrow under model misspecification; Khan and Calder (2022) report the same
+#' on areal structure, with a non-spatial model competitive on coverage and
+#' higher Type-S error rates under RSR. Read an RSR interval as an interval
+#' for the marginal association under a correctly specified model, and prefer
+#' a posterior-predictive check (Hanks et al., 2015) where that is in doubt.
 #'
 #' **When to use RSR:**
 #' - Covariates are spatially smooth (environmental gradients)
-#' - Interested in causal interpretation of covariate effects
+#' - The marginal association is the quantity of interest
 #' - Coefficients appear attenuated toward zero
 #'
 #' **When NOT to use RSR:**
 #' - Covariates are spatially uncorrelated
 #' - Spatial effect is the primary quantity of interest
-#' - Prediction is the main goal (not causal inference)
+#' - Prediction is the main goal
+#' - Interval coverage matters more than the point estimate
+#'
+#' RSR fits are binomial, through `mode = "gibbs"` (which `mode = "auto"`
+#' selects for it).
 #'
 #' @examples
-#' # Create RSR spatial structure
+#' # Create RSR spatial structure on an areal field
+#' W <- matrix(0, 4, 4)
+#' for (i in 1:3) W[i, i + 1] <- W[i + 1, i] <- 1
 #' rsr <- spatial_rsr(
-#'   spatial_gp(~ lon + lat),
+#'   spatial_car(W, level = "obs"),
 #'   restrict_to = ~ depth + temp
 #' )
 #' print(rsr)
@@ -127,6 +161,24 @@ validate_spatial <- function(spatial, data) {
 #'   control = list(n_iter = 500L, warmup = 250L)
 #' )
 #' summary(fit)
+#'
+#' # The same modifier on a continuous field: one observation per location,
+#' # the projector built at the unique coordinates.
+#' set.seed(7)
+#' n <- 80
+#' pts <- data.frame(lon = runif(n), lat = runif(n))
+#' pts$x <- as.numeric(scale(pts$lon + pts$lat + rnorm(n, 0, 0.3)))
+#' pts$y <- rbinom(n, 25, plogis(-0.2 + pts$x))
+#' fit_gp <- tulpa(
+#'   y ~ x,
+#'   data = pts,
+#'   family = "binomial",
+#'   n_trials = rep(25L, n),
+#'   spatial = spatial_rsr(spatial_gp(~ lon + lat), restrict_to = ~ x),
+#'   mode = "gibbs",
+#'   control = list(n_iter = 500L, warmup = 250L)
+#' )
+#' summary(fit_gp)
 #' }
 #'
 #' @references
@@ -137,6 +189,19 @@ validate_spatial <- function(spatial, data) {
 #' Hodges, J. S., & Reich, B. J. (2010). Adding spatially-correlated errors
 #' can mess up the fixed effect you love. The American Statistician, 64(4),
 #' 325-334.
+#'
+#' Hanks, E. M., Schliep, E. M., Hooten, M. B., & Hoeting, J. A. (2015).
+#' Restricted spatial regression in practice: geostatistical models,
+#' confounding, and robustness under model misspecification. Environmetrics,
+#' 26(4), 243-254.
+#'
+#' Khan, K., & Calder, C. A. (2022). Restricted spatial regression methods:
+#' implications for inference. Journal of the American Statistical
+#' Association, 117(537), 482-494.
+#'
+#' Bradley, J. R. (2024). Restricted spatial regression is reasonable
+#' statistical practice: clarifications, interpretations, and new
+#' developments. arXiv:2408.05106.
 #'
 #' @seealso [spatial_gp()], [spatial_car()]
 #'
@@ -149,6 +214,24 @@ spatial_rsr <- function(spatial, restrict_to) {
 
   if (!inherits(restrict_to, "formula")) {
     stop("`restrict_to` must be a formula", call. = FALSE)
+  }
+
+  # Two kernels apply the projection: `cpp_pg_binomial_gibbs_rsr()` on an areal
+  # neighbour list and `cpp_pg_binomial_gibbs_gp_rsr()` on an NNGP field
+  # (gcol33/tulpa#848). A field shape neither of them carries is refused here,
+  # where the argument that caused it is still in hand, rather than downstream
+  # by a message about a backend the user never chose (gcol33/tulpa#815).
+  sp_type <- tolower(spatial$type %||% "")
+  if (!sp_type %in% .RSR_FIELDS) {
+    stop(sprintf(paste0(
+      "spatial_rsr() restricts an areal or NNGP field (%s); got '%s'.\n",
+      "The projection is applied by the binomial Polya-Gamma Gibbs sampler, ",
+      "which carries an areal neighbour list or an NNGP field and neither an ",
+      "HSGP basis nor an SPDE mesh. Build the RSR field on spatial_car() / ",
+      "spatial_icar() / spatial_bym2() / spatial_gp(), or drop spatial_rsr() ",
+      "and fit the field directly."),
+      paste(.RSR_FIELDS, collapse = ", "), spatial$type %||% "<none>"),
+      call. = FALSE)
   }
 
   # Store RSR information in the spatial object
@@ -277,10 +360,13 @@ apply_rsr_projection <- function(w, P_perp) {
 #'   (Bolin & Kirchner 2020; Hofreither 2021); supported by the Laplace fitter
 #'   `fit_spde()` (single-point and nested over range/sigma). NUTS and analytic
 #' marginal SEs remain integer-only. Default 1.
-#' @param prior_range Prior for the spatial range. A numeric vector `c(U, alpha)`
-#'   where P(range < U) = alpha. Default `c(0.5, 0.5)`.
-#' @param prior_sigma Prior for the marginal standard deviation. A numeric vector
-#'   `c(U, alpha)` where P(sigma > U) = alpha. Default `c(1, 0.5)`.
+#' @param prior_range PC prior on the spatial range, `c(U, alpha)` with
+#'   P(range < U) = alpha. `NULL` (the default) anchors it on the data: `U` is
+#'   a fifth of the diagonal of the coordinates' bounding box and `alpha = 0.5`,
+#'   so `U` is the prior median.
+#' @param prior_sigma PC prior on the marginal standard deviation, `c(U, alpha)`
+#'   with P(sigma > U) = alpha. `NULL` (the default) is `c(3, 0.01)`, the
+#'   engine's prior on every field scale.
 #'
 #' @return A `tulpa_spatial` object with type `"spde"`.
 #'
@@ -294,8 +380,8 @@ apply_rsr_projection <- function(w, P_perp) {
 spatial_spde <- function(coords, data = NULL, mesh = NULL,
                          boundary = NULL, max_edge = NULL, cutoff = 0,
                          nu = 1,
-                         prior_range = c(0.5, 0.5),
-                         prior_sigma = c(1, 0.5)) {
+                         prior_range = NULL,
+                         prior_sigma = NULL) {
 
   .validate_spde_nu(nu)
 
@@ -312,6 +398,14 @@ spatial_spde <- function(coords, data = NULL, mesh = NULL,
   }
 
   if (ncol(obs_coords) != 2) stop("coords must have 2 columns", call. = FALSE)
+  prior_stated <- c(range = !is.null(prior_range), sigma = !is.null(prior_sigma))
+  prior_range <- prior_range %||% .nl_default_range_prior(obs_coords)
+  prior_sigma <- prior_sigma %||% .nl_scale_anchor()
+  if (is.null(prior_range)) {
+    stop("spatial_spde(): the coordinates span a single point, so no default ",
+         "range prior can be anchored on them; pass `prior_range = c(U, alpha)`.",
+         call. = FALSE)
+  }
 
   # Build mesh if not provided
   if (is.null(mesh)) {
@@ -343,6 +437,7 @@ spatial_spde <- function(coords, data = NULL, mesh = NULL,
       nu = nu,
       prior_range = prior_range,
       prior_sigma = prior_sigma,
+      prior_stated = prior_stated,
       # FEM matrices (sparse)
       C = fem$C,
       G = fem$G,
@@ -367,16 +462,32 @@ spatial_spde <- function(coords, data = NULL, mesh = NULL,
 #' @param nu Matern smoothness parameter. A positive number; integer values
 #'   give the exact FEM construction, fractional values the BRASIL rational SPDE
 #' approximation (supported by `fit_spde()`;). Default 1.
-#' @param prior_range Prior for the spatial range. Default `c(0.5, 0.5)`.
-#' @param prior_sigma Prior for the marginal standard deviation. Default `c(1, 0.5)`.
+#' @param prior_range PC prior on the spatial range, `c(U, alpha)` with
+#'   P(range < U) = alpha. `NULL` (the default) anchors it on `coords` as
+#'   [spatial_spde()] does, and needs them.
+#' @param prior_sigma PC prior on the marginal standard deviation, `c(U, alpha)`
+#'   with P(sigma > U) = alpha. `NULL` (the default) is `c(3, 0.01)`.
+#' @param coords Observation coordinates (an `n_obs x 2` matrix), read only to
+#'   anchor the default range prior. Not needed when `prior_range` is given.
 #'
 #' @return A `tulpa_spatial` object with type `"spde"`.
 #'
 #' @export
 spatial_spde_custom <- function(C, G, A, nu = 1,
-                                prior_range = c(0.5, 0.5),
-                                prior_sigma = c(1, 0.5)) {
+                                prior_range = NULL,
+                                prior_sigma = NULL,
+                                coords = NULL) {
   .validate_spde_nu(nu)
+  prior_stated <- c(range = !is.null(prior_range), sigma = !is.null(prior_sigma))
+  if (is.null(prior_range)) {
+    if (!is.null(coords)) prior_range <- .nl_default_range_prior(coords)
+    if (is.null(prior_range)) {
+      stop("spatial_spde_custom() needs `prior_range = c(U, alpha)`, or the ",
+           "`coords` its default is anchored on: the FEM matrices carry no ",
+           "coordinate scale.", call. = FALSE)
+    }
+  }
+  prior_sigma <- prior_sigma %||% .nl_scale_anchor()
   if (!inherits(C, "Matrix")) C <- as(C, "CsparseMatrix")
   if (!inherits(G, "Matrix")) G <- as(G, "CsparseMatrix")
   if (!inherits(A, "Matrix")) A <- as(A, "CsparseMatrix")
@@ -400,6 +511,7 @@ spatial_spde_custom <- function(C, G, A, nu = 1,
       nu = nu,
       prior_range = prior_range,
       prior_sigma = prior_sigma,
+      prior_stated = prior_stated,
       C = C, G = G, A = A,
       A_x = A_csc@x, A_i = A_csc@i, A_p = A_csc@p,
       C0_diag = C0_diag,

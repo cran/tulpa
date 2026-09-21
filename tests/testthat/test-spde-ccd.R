@@ -57,6 +57,10 @@ test_that("fit_spde(method='ccd') returns a usable nested-Laplace result", {
 })
 
 test_that("fit_spde(method='ccd') falls back to grid on degenerate data", {
+  # Noise data leaves the likelihood nothing to identify a mode from. Under the
+  # default PC priors the posterior is then the prior and the mode-find lands
+  # inside, so the degenerate regime is reached with priors the caller has made
+  # nearly flat on both axes.
   skip_if_not_installed("fmesher")
   skip_on_cran()
 
@@ -67,7 +71,9 @@ test_that("fit_spde(method='ccd') falls back to grid on degenerate data", {
                               max.edge = c(0.15, 0.4), cutoff = 0.05)
   fem  <- fmesher::fm_fem(mesh)
   A    <- as(fmesher::fm_basis(mesh, loc = coords), "CsparseMatrix")
-  spec <- spatial_spde_custom(C = fem$c0, G = fem$g1, A = A, nu = 1)
+  spec <- spatial_spde_custom(C = fem$c0, G = fem$g1, A = A, nu = 1,
+                              prior_range = c(1e-6, 1e-6),
+                              prior_sigma = c(1e6, 0.9999))
 
   y <- rbinom(n_obs, 1, 0.4)        # noise only, no spatial structure
   X <- matrix(1, nrow = n_obs, ncol = 1)
@@ -282,4 +288,60 @@ test_that("SPDE CCD recovers (range, sigma) on a genuine field (#98)", {
   expect_gt(n_ccd, 0)
   expect_gte(sum(cov_r[used_ccd]), ceiling(0.70 * n_ccd))
   expect_gte(sum(cov_s[used_ccd]), ceiling(0.70 * n_ccd))
+})
+
+# The analytic (log range, log sigma) gradient of the log-marginal
+# (cpp_spde_laplace_gradient(), gcol33/tulpa#809) replaces the outer mode-find's
+# central-difference gradient whenever nu = 1, there is no offset and no
+# random-effect term. Forcing that call to fail routes gr() through its own
+# fallback central difference of `obj`, exactly what the mode-find used before
+# #809 -- so the two must agree on the found mode.
+test_that("the analytic SPDE mode-find gradient reproduces the FD fallback's mode", {
+  skip_if_not_installed("fmesher")
+  skip_on_cran()
+
+  d <- helper_make_spde_for_ccd(n_obs = 250, range_true = 0.3,
+                                 sigma_true = 0.6, seed = 11L,
+                                 prior_sigma = c(0.6, 0.05))
+  y <- rpois(length(d$eta), lambda = exp(2.0 + d$eta))
+  X <- matrix(1, nrow = length(y), ncol = 1)
+
+  fit_analytic <- suppressWarnings(
+    fit_spde(y, X, d$spec, family = "poisson", control = list(method = "ccd"))
+  )
+
+  testthat::local_mocked_bindings(
+    cpp_spde_laplace_gradient = function(...) stop("forced FD fallback"),
+    .package = "tulpa")
+  fit_fd <- suppressWarnings(
+    fit_spde(y, X, d$spec, family = "poisson", control = list(method = "ccd"))
+  )
+
+  expect_equal(fit_analytic$nested$range_mean, fit_fd$nested$range_mean,
+               tolerance = 1e-4)
+  expect_equal(fit_analytic$nested$sigma_mean, fit_fd$nested$sigma_mean,
+               tolerance = 1e-4)
+  expect_identical(fit_analytic$nested$method, fit_fd$nested$method)
+})
+
+test_that("the analytic gradient is not offered outside its scope", {
+  skip_if_not_installed("fmesher")
+  skip_on_cran()
+
+  d <- helper_make_spde_for_ccd(n_obs = 120, range_true = 0.3,
+                                sigma_true = 0.6, seed = 21L,
+                                prior_sigma = c(0.6, 0.05))
+  y <- rpois(length(d$eta), lambda = exp(2.0 + d$eta))
+  X <- matrix(1, nrow = length(y), ncol = 1)
+
+  # An offset takes the fit outside cpp_spde_laplace_gradient's scope; if the
+  # eligibility gate were wrong, this would call the mocked (failing) analytic
+  # gradient and error instead of quietly falling back to the FD one.
+  testthat::local_mocked_bindings(
+    cpp_spde_laplace_gradient = function(...) stop("must not be called"),
+    .package = "tulpa")
+  expect_no_error(suppressWarnings(
+    fit_spde(y, X, d$spec, family = "poisson", offset = rep(0, length(y)),
+            control = list(method = "ccd"))
+  ))
 })

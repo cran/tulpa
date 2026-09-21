@@ -727,18 +727,18 @@ quantity integrated out, so a model is not rewarded for the extra
 flexibility of a field unless that flexibility buys real fit. Compare
 the same mean structure with and without the field on this scale.</p>
 <p>A nested fit reports its log marginal likelihood per grid point in
-<code>$log_marginal</code>, one value for each <span class="math inline">\(\tau\)</span> on the integration grid. The single
-integrated evidence is the log-sum-exp of that vector, which adds the
-per-grid evidences on the probability scale before taking logs again.
-The non-spatial Laplace fit has no grid and reports a scalar log
-marginal likelihood directly through <code>logLik()</code>.</p>
+<code>$log_marginal</code>, one value for each <span class="math inline">\(\tau\)</span> on the integration grid. Each point
+stands for a cell of the grid whose prior mass (<code>$log_quad</code>)
+is part of the integral, so the evidence adds the per-point marginal
+likelihoods weighted by those masses, on the probability scale, before
+taking logs again. <code>logLik()</code> returns that sum. The
+non-spatial Laplace fit has no grid, and its scalar log marginal
+likelihood is already the evidence of a model with nothing left to
+integrate.</p>
 <div class="sourceCode" id="cb16"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb16-1"><a href="#cb16-1" tabindex="-1"></a>m0 <span class="ot">&lt;-</span> <span class="fu">tulpa</span>(y <span class="sc">~</span> x, <span class="at">data =</span> ds, <span class="at">family =</span> <span class="st">&quot;binomial&quot;</span>, <span class="at">mode =</span> <span class="st">&quot;laplace&quot;</span>)</span>
-<span id="cb16-2"><a href="#cb16-2" tabindex="-1"></a></span>
-<span id="cb16-3"><a href="#cb16-3" tabindex="-1"></a>lse  <span class="ot">&lt;-</span> <span class="cf">function</span>(z) { m <span class="ot">&lt;-</span> <span class="fu">max</span>(z); m <span class="sc">+</span> <span class="fu">log</span>(<span class="fu">sum</span>(<span class="fu">exp</span>(z <span class="sc">-</span> m))) }</span>
-<span id="cb16-4"><a href="#cb16-4" tabindex="-1"></a>ev_spatial    <span class="ot">&lt;-</span> <span class="fu">lse</span>(fit<span class="sc">$</span>log_marginal)</span>
-<span id="cb16-5"><a href="#cb16-5" tabindex="-1"></a>ev_nonspatial <span class="ot">&lt;-</span> <span class="fu">as.numeric</span>(<span class="fu">logLik</span>(m0))</span>
-<span id="cb16-6"><a href="#cb16-6" tabindex="-1"></a><span class="fu">c</span>(<span class="at">nonspatial =</span> ev_nonspatial, <span class="at">spatial =</span> ev_spatial)</span></code></pre></div>
-<div class="sourceCode" id="cb17"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb17-1"><a href="#cb17-1" tabindex="-1"></a>ev_spatial <span class="sc">-</span> ev_nonspatial</span></code></pre></div>
+<span id="cb16-2"><a href="#cb16-2" tabindex="-1"></a>cmp <span class="ot">&lt;-</span> <span class="fu">compare_models</span>(<span class="at">nonspatial =</span> m0, <span class="at">spatial =</span> fit, <span class="at">criterion =</span> <span class="st">&quot;loglik&quot;</span>)</span>
+<span id="cb16-3"><a href="#cb16-3" tabindex="-1"></a>cmp</span></code></pre></div>
+<div class="sourceCode" id="cb17"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb17-1"><a href="#cb17-1" tabindex="-1"></a><span class="fu">diff</span>(cmp<span class="sc">$</span>logLik)</span></code></pre></div>
 <p>The spatial fit carries the higher evidence by a wide margin,
 matching how the data were built. The difference is the log Bayes factor
 for the field, and a value this large is decisive: the data are vastly
@@ -748,15 +748,12 @@ precision, so adding the field is not rewarded for free. It has to pay
 for its parameters through the integration and still come out ahead,
 which guards against the overfitting that a raw goodness-of-fit
 comparison would invite.</p>
-<p><code>compare_models()</code> ranks fits by
-<code>criterion = &quot;loglik&quot;</code>, reading each fit’s
-<code>logLik()</code>. On a nested fit <code>logLik()</code> returns the
-integrated evidence, the log-sum-exp of <code>$log_marginal</code> shown
-above, so <code>compare_models()</code> reports one row per model and
-the areal-versus-flat ranking matches the manual differencing. The same
-comparison runs for two spatial models, an ICAR against a BYM2 for
-instance, by taking the log-sum-exp of each fit’s
-<code>$log_marginal</code> and differencing.</p>
+<p><code>compare_models()</code> reads each fit’s <code>logLik()</code>
+and reports one row per model. The same comparison runs for two spatial
+models, an ICAR against a BYM2 for instance, as long as both integrate
+their hyperparameters over grids with the same support: an axis on the
+engine’s default flat measure is uniform over the span the fit
+integrated, so the evidence depends on that span.</p>
 </div>
 <div id="practical-guidance" class="section level2">
 <h2>Practical guidance</h2>

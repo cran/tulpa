@@ -657,7 +657,7 @@
       for (f in gfs) blk2[[f]] <- blk[[f]][map_idx]
       cargs2 <- utils::modifyList(cargs_no_ckpt,
                                   list(compute_skew = TRUE, skew_idx = probe_idx))
-      .nl_dispatch(type, cargs2, blk2)
+      .nl_dispatch(type, cargs2, blk2, blk)
     } else {
       NULL
     }
@@ -957,14 +957,24 @@
 # `ess_grid = 1 / sum(w_k^2)`, its share of the cell count `rel_ess_grid`, the
 # largest single weight, and the number of grid cells. NULL when the fit
 # carries no outer-grid weights.
+#
+# `n_grid` counts the cells the fit SOLVED, not the ones that kept usable
+# weight (gcol33/tulpa#663). The two coincide on a healthy grid and diverge on
+# exactly the fit this band exists to flag: a posterior sharp enough to underflow
+# every cell but one leaves `length(w) == 1` after the filter, and reporting that
+# as the cell count read as a one-cell grid integrated perfectly rather than a
+# 124-cell grid collapsed onto one of them. `ess_grid` and `max_weight` are
+# unaffected either way -- dropping zero weights changes neither `sum(w^2)` nor
+# `max(w)` -- so only the denominator moved, and `rel_ess_grid` now measures the
+# share of the solved grid the quadrature actually uses.
 .tulpa_grid_reliability <- function(fit) {
   jf <- if (!is.null(fit$joint_fit)) fit$joint_fit else fit
-  w <- jf$weights
-  if (is.null(w)) return(NULL)
-  w <- w[is.finite(w) & w > 0]
+  w_all <- jf$weights
+  if (is.null(w_all)) return(NULL)
+  w <- w_all[is.finite(w_all) & w_all > 0]
   if (length(w) == 0L) return(NULL)
   w <- w / sum(w)
-  n_grid <- length(w)
+  n_grid <- length(w_all)
   ess <- 1 / sum(w^2)
   list(ess_grid = ess, n_grid = n_grid,
        rel_ess_grid = ess / n_grid, max_weight = max(w))
@@ -993,6 +1003,8 @@
   list(pareto_k = k,
        pareto_k_is_ess = jf$pareto_k_is_ess %||% NA_real_,
        pareto_k_scope = jf$pareto_k_scope %||% NA_character_,
+       pareto_k_proposal_source = jf$pareto_k_proposal_source %||% NA_character_,
+       pareto_k_first_pass = jf$pareto_k_first_pass %||% NA_real_,
        pareto_k_declined = declined)
 }
 
@@ -1020,31 +1032,51 @@
   if (is.null(rg)) return(NULL)
   sk <- jf$pareto_k_outer_skew
   sk <- if (is.null(sk) || !any(is.finite(sk))) NA_real_ else max(abs(sk[is.finite(sk)]))
-  list(regime         = as.character(rg),
-       edge_axes      = jf$pareto_k_grid_edge_axes  %||% character(0),
-       edge_sides     = jf$pareto_k_grid_edge_sides %||% character(0),
-       outer_skew_max = sk)
+  list(regime          = as.character(rg),
+       edge_axes       = jf$pareto_k_grid_edge_axes  %||% character(0),
+       edge_sides      = jf$pareto_k_grid_edge_sides %||% character(0),
+       edge_mass_axes  = jf$pareto_k_grid_edge_mass_axes  %||% character(0),
+       edge_mass_sides = jf$pareto_k_grid_edge_mass_sides %||% character(0),
+       outer_skew_max  = sk)
 }
 
 # One-line reading of an outer regime, for `print` and `diagnostic_summary()`.
-# Returns NULL for a spread grid (nothing to explain) or an unknown regime.
+# Returns NULL for a spread grid carrying no boundary mass (nothing to explain)
+# or an unknown regime.
+#
+# A grid that spreads can still truncate its own marginal at a boundary node, so
+# that note is produced in every regime (gcol33/tulpa#622) and is appended to
+# the collapse notes rather than replacing them.
 .tulpa_outer_regime_note <- function(rg) {
   if (is.null(rg) || is.na(rg$regime)) return(NULL)
+  mass_note <- NULL
+  if (length(rg$edge_mass_axes)) {
+    mass_note <- paste0(
+      "outer grid holds material weight on a boundary node of ",
+      paste(sprintf("%s (%s)", rg$edge_mass_axes, rg$edge_mass_sides),
+            collapse = ", "),
+      ": that axis truncates its own marginal there, whether or not its mode ",
+      "sits on the node -- widen it and refit to see what is outside")
+  }
+  if (identical(rg$regime, "spread")) return(mass_note)
+  with_mass <- function(x) if (is.null(mass_note)) x else paste0(x, "; ", mass_note)
   if (identical(rg$regime, "collapsed_interior")) {
-    return(paste("outer grid collapsed onto an interior mode: hyperparameter",
-                 "uncertainty is not integrated (empirical Bayes at the mode);",
-                 "pareto_k here scores the mode-Gaussian's fit to the",
-                 "hyperparameter marginal, not the point estimates"))
+    return(with_mass(paste(
+      "outer grid collapsed onto an interior mode: hyperparameter",
+      "uncertainty is not integrated (empirical Bayes at the mode);",
+      "pareto_k here scores the mode-Gaussian's fit to the",
+      "hyperparameter marginal, not the point estimates")))
   }
   if (identical(rg$regime, "collapsed_edge")) {
     ax <- if (length(rg$edge_axes))
       paste(sprintf("%s (%s)", rg$edge_axes, rg$edge_sides), collapse = ", ")
       else "an axis"
-    return(paste0("outer grid collapsed against a boundary node on ", ax,
-                  ": the grid may be too narrow -- widen that axis and refit ",
-                  "to confirm the mode is bracketed"))
+    return(with_mass(paste0(
+      "outer grid collapsed against a boundary node on ", ax,
+      ": the grid may be too narrow -- widen that axis and refit ",
+      "to confirm the mode is bracketed")))
   }
-  NULL
+  mass_note
 }
 
 # Outer-grid PLACEMENT of a nested-Laplace fit: which
@@ -1070,6 +1102,7 @@
   cl <- jf$outer_grid_recenter_sd_clamp
   list(placement = as.character(placed %||% NA_character_),
        railed    = as.character(railed %||% character(0)),
+       edge_mass = as.character(jf$outer_grid_edge_mass_axes %||% character(0)),
        moved     = as.character(jf$outer_grid_recenter_axes %||% character(0)),
        clamped   = if (is.null(cl)) character(0) else
                      stats::setNames(as.character(cl), names(cl)),
@@ -1099,7 +1132,18 @@
     }
     return(msg)
   }
-  if (!length(pl$railed)) return(NULL)
+  if (!length(pl$railed)) {
+    # The weaker statement, on a fit whose axes all contain their own mode: an
+    # axis can still hold material weight on a boundary node, and truncate its
+    # marginal there (gcol33/tulpa#622).
+    em <- pl$edge_mass %||% character(0)
+    if (!length(em)) return(NULL)
+    return(paste0("outer grid axis holding weight on its own boundary node on ",
+                  paste(em, collapse = ", "),
+                  ": that axis truncates its marginal there even though its ",
+                  "mode is inside the span -- widen it and refit to see what ",
+                  "is outside"))
+  }
   ax <- paste(pl$railed, collapse = ", ")
   why <- if (is.na(pl$declined)) "" else
     paste0(" (not moved: ", pl$declined, ")")
@@ -1248,11 +1292,49 @@
        max       = if (any(ok)) max(r[ok]) else NA_real_,
        coarsest  = if (any(ok)) nm[ok][which.max(r[ok])] else NA_character_,
        declined  = dec,
+       # Why the placement pass left an axis where it was, per axis
+       # (`.nl_decline_axis()`). The note below reads it on the COARSEST axis:
+       # "add nodes on that axis" is the right advice for an axis the engine
+       # could have placed and did not need to, and the wrong advice for one it
+       # was not allowed to -- there the lever is the pin, not the node count
+       # (gcol33/tulpa#663).
+       axis_declined = jf$outer_grid_axis_declined %||% character(0),
        unscored  = nm[!ok],
        railed    = railed,
        n_scored  = sum(ok),
        n_axes    = length(r),
        resolved  = all(ok) && all(r[ok] <= .nl_diag("grid_resolved")))
+}
+
+# The lever a caller actually has on the coarsest axis, given why the placement
+# pass left it alone. NULL when the pass never spoke about that axis, which is
+# the ordinary case -- an axis no rescue was built for, or a fit whose grid was
+# never a placement candidate -- and the generic advice stands.
+.tulpa_grid_axis_lever <- function(rs) {
+  ax <- rs$coarsest
+  if (is.na(ax) || !length(rs$axis_declined)) return(NULL)
+  if (!ax %in% names(rs$axis_declined)) return(NULL)
+  why <- rs$axis_declined[[ax]]
+  if (is.null(why) || is.na(why)) return(NULL)
+  switch(
+    why,
+    axis_pinned = paste0(
+      "the auto-placement pass reads that axis as PINNED, so it was left ",
+      "exactly where it was declared: mark it with `auto_grid()` (or drop it ",
+      "and let the engine place it) to have the pass size it to the posterior ",
+      "instead of adding nodes by hand"),
+    default_axis_pinned = paste0(
+      "that axis is a DEFAULT of the package that built this fit, declared to ",
+      "be integrated as written, so the auto-placement pass left it there: ",
+      "state your own nodes for it through that package's argument, wrapped ",
+      "in `auto_grid()`, to have the pass size it to the posterior instead"),
+    auto_recenter_disabled = paste0(
+      "`control$auto_recenter = FALSE` holds every axis where it was ",
+      "declared, this one included"),
+    no_usable_curvature = paste0(
+      "the auto-placement pass could not read a curvature to re-place that ",
+      "axis from, so it was left where it was declared"),
+    paste0("the auto-placement pass declined to move that axis (", why, ")"))
 }
 
 # Reading of a resolution. NULL when every axis scored AND every one is at or
@@ -1286,13 +1368,15 @@
       "rather than adding nodes inside it"))
   }
   if (!is.na(rs$max) && rs$max > .nl_diag("grid_resolved")) {
+    lever <- .tulpa_grid_axis_lever(rs)
     out <- c(out, paste0(
       "outer grid coarser than its own posterior on ", rs$coarsest,
       " (cell width / posterior SD = ", sprintf("%.2f", rs$max),
       ", both in that axis's own coordinate): the reported interval's ",
       "endpoints are resolved to within one cell, so part of their width ",
       "and their realized coverage are properties of where the grid fell ",
-      "rather than of the posterior -- add nodes on that axis to reduce it"))
+      "rather than of the posterior -- ",
+      lever %||% "add nodes on that axis to reduce it"))
   }
   if (!length(out)) return(NULL)
   out
@@ -1376,33 +1460,37 @@
   c(s, list(declined = reason[1L], arms_declined = arms))
 }
 
-# Per-parameter posterior summary + i.i.d.-draw Monte-Carlo diagnostics on a
+# Per-parameter posterior summary + i.i.d.-draw Monte-Carlo error on a
 # [n_draws x n_par] draws matrix. Returns a data frame with `parameter`, `mean`,
-# `sd`, `ess_bulk`, `ess_tail`, `rhat`. The split-Rhat / ESS estimators are the
-# convergence.R ones (Vehtari et al. 2021); on i.i.d. draws split-Rhat sits at
-# ~1 and ESS ~ n_draws, so these certify the summaries are not MC-limited rather
-# than diagnosing chain mixing.
-.tulpa_iid_param_table <- function(draws, pars = NULL) {
+# `sd`, `n_draws`, `mcse_mean`.
+#
+# It carries NO `rhat` / `ess_bulk` / `ess_tail` (gcol33/tulpa#713). The
+# draws-provenance gate withholds those on a non-chain fit precisely because
+# they are vacuous there -- split-Rhat sits at ~1 and ESS at ~n_draws by
+# construction -- and this table is where it dispatches instead, so emitting
+# them again under their own names hands them straight back to
+# `check_diagnostics()`, `plot_rhat()` and any programmatic read. A prose
+# disclaimer in the print method does not reach those.
+#
+# `mcse_mean` is the quantity the vacuous columns were standing in for: on
+# independent draws the Monte-Carlo error of the reported mean is sd/sqrt(n),
+# which says directly whether a summary is draw-limited.
+.tulpa_iid_param_table <- function(draws, pars = NULL, fit = NULL) {
   draws <- as.matrix(draws)
-  nm <- colnames(draws)
-  if (is.null(nm)) nm <- paste0("param", seq_len(ncol(draws)))
+  nm <- .tulpa_draw_names(colnames(draws), fit, ncol(draws))
   keep <- if (is.null(pars)) seq_along(nm) else which(nm %in% pars)
   if (length(keep) == 0L) return(NULL)
   n <- nrow(draws)
   out <- data.frame(parameter = nm[keep],
                     mean = NA_real_, sd = NA_real_,
-                    ess_bulk = NA_real_, ess_tail = NA_real_,
-                    rhat = NA_real_,
+                    n_draws = n, mcse_mean = NA_real_,
                     stringsAsFactors = FALSE, row.names = NULL)
   for (i in seq_along(keep)) {
     x <- draws[, keep[i]]
     out$mean[i] <- mean(x)
     out$sd[i]   <- stats::sd(x)
-    if (n >= 4L && is.finite(out$sd[i]) && out$sd[i] > 0) {
-      sims <- matrix(x, ncol = 1L)
-      out$ess_bulk[i] <- tryCatch(.tulpa_ess_bulk(sims), error = function(e) NA_real_)
-      out$ess_tail[i] <- tryCatch(.tulpa_ess_tail(sims), error = function(e) NA_real_)
-      out$rhat[i]     <- tryCatch(.tulpa_rhat(sims),     error = function(e) NA_real_)
+    if (n >= 2L && is.finite(out$sd[i])) {
+      out$mcse_mean[i] <- out$sd[i] / sqrt(n)
     }
   }
   out
@@ -1414,6 +1502,113 @@
 .tulpa_iid_param_table_empty <- function() {
   .tulpa_iid_param_table(matrix(0.0, 1L, 1L,
                                 dimnames = list(NULL, "x")))[0L, , drop = FALSE]
+}
+
+# What the approximation-reliability table describes, per backend: the header
+# `title`, the reliability `layers` the backend has, and the `scope` sentence.
+# A backend with both layers -- an outer hyperparameter integration scored by
+# PSIS k-hat and grid quadrature ESS, around an inner Gaussian Laplace scored by
+# gamma_3 and the inner importance k-hat -- names in `scope` what its outer layer
+# integrates over. A backend with no such layers describes literally what its
+# draws are and which reliability quantity, if any, it computes. Every registry
+# backend that emits i.i.d. draws has an entry, as does each fitter that stamps
+# its own i.i.d. backend name.
+.NL_LAYERS <- c("outer", "inner")
+.APPROX_SCOPE <- list(
+  nested_laplace = list(
+    title = "Nested-Laplace", layers = .NL_LAYERS,
+    scope = "the outer hyperparameter-grid integration"),
+  nested_laplace_joint = list(
+    title = "Nested-Laplace", layers = .NL_LAYERS,
+    scope = "the outer hyperparameter-grid integration"),
+  spatial_field_nested_laplace = list(
+    title = "Nested-Laplace", layers = .NL_LAYERS,
+    scope = "the outer hyperparameter-grid integration"),
+  temporal_field_nested_laplace = list(
+    title = "Nested-Laplace", layers = .NL_LAYERS,
+    scope = "the outer hyperparameter-grid integration"),
+  spde = list(
+    title = "SPDE nested-Laplace", layers = .NL_LAYERS,
+    scope = "the outer (range, sigma) integration"),
+  re_cov_nested = list(
+    title = "RE-covariance nested-Laplace", layers = .NL_LAYERS,
+    scope = "the outer integration over the random-effect covariance Sigma"),
+  smc = list(
+    title = "Sequential Monte Carlo", layers = character(0),
+    scope = paste(
+      "the draws are the particle population after the final tempering stage,",
+      "resampled to equal weights and moved by MCMC mutation steps; no",
+      "pareto_k or other reliability quantity is computed for this backend.")),
+  vi = list(
+    title = "Variational inference", layers = character(0),
+    scope = paste(
+      "the draws are sampled from the fitted variational approximation; the",
+      "VI kernel does not compute the PSIS pareto_k of that approximation,",
+      "so no reliability quantity is computed for this backend.")),
+  pathfinder = list(
+    title = "Pathfinder", layers = character(0),
+    scope = paste(
+      "single-path: the draws are sampled from the Gaussian at the L-BFGS",
+      "mode with the inverse-Hessian covariance, whose ELBO is recorded in",
+      "`$elbo`; no pareto_k is computed for this backend.")),
+  tgmrf_vi = list(
+    title = "tgmrf variational inference", layers = character(0),
+    scope = paste(
+      "single-path Pathfinder over the block hyperparameters: the draws are",
+      "sampled from the Gaussian at the L-BFGS mode of the log marginal, whose",
+      "ELBO is recorded in `$elbo`; no pareto_k is computed for this backend.")),
+  ep = list(
+    title = "Expectation propagation", layers = character(0),
+    scope = paste(
+      "the draws are sampled from the EP Gaussian approximation; no",
+      "reliability quantity is computed for this backend.")),
+  agq = list(
+    title = "Adaptive Gauss-Hermite quadrature", layers = character(0),
+    scope = paste(
+      "the marginal-likelihood optimum over the fixed effects and the",
+      "random-effect SD, with its inverse-Hessian covariance; no reliability",
+      "quantity is computed for this backend.")),
+  laplace = list(
+    title = "Laplace", layers = character(0),
+    scope = paste(
+      "the Gaussian approximation at the posterior mode; no reliability",
+      "quantity is computed for this backend.")),
+  eb = list(
+    title = "Empirical Bayes", layers = character(0),
+    scope = paste(
+      "the fixed effects conditional on the mode of the random-effect",
+      "covariances; no reliability quantity is computed for this backend.")),
+  multinomial_laplace = list(
+    title = "Multinomial Laplace", layers = character(0),
+    scope = paste(
+      "the draws are sampled from the Laplace Gaussian at the posterior mode;",
+      "no reliability quantity is computed for this backend.")),
+  ordinal_laplace = list(
+    title = "Ordinal Laplace", layers = character(0),
+    scope = paste(
+      "the draws are sampled from the Laplace Gaussian at the optimum, with",
+      "the cutpoint block mapped to ordered cutpoints; no reliability quantity",
+      "is computed for this backend."))
+)
+
+# The `.APPROX_SCOPE` entry describing `fit`, keyed by the fit's own backend,
+# then by the backend of the nested fit it wraps (`$joint_fit`). A fit whose
+# backend has no entry is described by the layers it carries: an outer
+# integration (grid weights, or an outer k-hat with its scope) makes it a
+# two-layer nested fit, anything else a fit with no recorded scope.
+.tulpa_approx_scope <- function(fit, grid, psis) {
+  keys <- c(fit$backend, fit$joint_fit$backend)
+  hit <- keys[keys %in% names(.APPROX_SCOPE)]
+  if (length(hit)) return(c(list(backend = hit[1L]), .APPROX_SCOPE[[hit[1L]]]))
+  backend <- if (length(keys)) keys[1L] else NA_character_
+  if (!is.null(grid) || !is.na(psis$pareto_k_scope)) {
+    return(c(list(backend = backend), .APPROX_SCOPE$nested_laplace))
+  }
+  list(backend = backend, title = "Approximation", layers = character(0),
+       scope = sprintf(
+         paste("no scope is registered for backend '%s'; the lines below are",
+               "the reliability quantities the fit records."),
+         if (is.na(backend)) "?" else backend))
 }
 
 # Approximation-reliability table for an i.i.d. deterministic fit. The
@@ -1444,9 +1639,11 @@
   iread <- .tulpa_interval_read(fit)
   resolution <- .tulpa_grid_resolution(fit)
   k          <- psis$pareto_k
+  scope      <- .tulpa_approx_scope(fit, grid, psis)
 
   draws <- .fit_draws(fit)
-  tab <- if (is.null(draws)) NULL else .tulpa_iid_param_table(draws, pars = pars)
+  tab <- if (is.null(draws)) NULL else
+    .tulpa_iid_param_table(draws, pars = pars, fit = fit)
   param_declined <- NA_character_
   if (is.null(draws)) {
     has_band <- !is.null(grid) || !is.null(inner) || !is.null(inner_k) ||
@@ -1459,7 +1656,7 @@
     }
     param_declined <- paste(
       "the fit carries no posterior draws, so the per-parameter mean / sd /",
-      "ESS / rhat columns are empty; tulpa_posterior_draws(fit) samples the",
+      "per-parameter columns are empty; tulpa_posterior_draws(fit) samples the",
       "retained outer-grid mixture if a sample is wanted")
     tab <- .tulpa_iid_param_table_empty()
   } else if (is.null(tab)) {
@@ -1476,6 +1673,17 @@
   attr(tab, "pareto_k_band")   <- outer_band
   attr(tab, "pareto_k_is_ess") <- psis$pareto_k_is_ess
   attr(tab, "scope")           <- psis$pareto_k_scope
+  attr(tab, "scope_backend")   <- scope$backend
+  attr(tab, "scope_title")     <- scope$title
+  attr(tab, "scope_layers")    <- scope$layers
+  attr(tab, "scope_text")      <- scope$scope
+  # Which proposal family produced the number, and what the backend's own
+  # placement scored before any rescue. The GAP between the two is the
+  # actionable reading -- a large one says the nodes are badly scaled around the
+  # posterior even though the verdict is fine -- and neither field reached this
+  # table, so a rescued fit read as unconditionally clean (gcol33/tulpa#715).
+  attr(tab, "pareto_k_proposal_source") <- psis$pareto_k_proposal_source
+  attr(tab, "pareto_k_first_pass")      <- psis$pareto_k_first_pass
   if (!is.na(psis$pareto_k_declined)) {
     attr(tab, "pareto_k_declined")      <- psis$pareto_k_declined
     attr(tab, "pareto_k_declined_note") <- .k_decline_note(psis$pareto_k_declined)
@@ -1502,12 +1710,22 @@
     attr(tab, "outer_regime")    <- regime$regime
     attr(tab, "grid_edge_axes")  <- regime$edge_axes
     attr(tab, "grid_edge_sides") <- regime$edge_sides
+    # One spelling for the boundary-mass label, `axis:side`, the same
+    # `grid_railed_axes` carries -- the two are read side by side.
+    attr(tab, "grid_edge_mass_axes") <- if (length(regime$edge_mass_axes))
+      paste0(regime$edge_mass_axes, ":", regime$edge_mass_sides) else
+      character(0)
     attr(tab, "outer_skew_max")  <- regime$outer_skew_max
     attr(tab, "outer_regime_note") <- .tulpa_outer_regime_note(regime)
   }
   if (!is.null(placement)) {
     attr(tab, "grid_placement")        <- placement$placement
     attr(tab, "grid_railed_axes")      <- placement$railed
+    # A fit that carries no regime (the single-block nested paths) still reports
+    # its boundary mass, off the field the provenance attach stamped.
+    if (!length(attr(tab, "grid_edge_mass_axes"))) {
+      attr(tab, "grid_edge_mass_axes") <- placement$edge_mass
+    }
     attr(tab, "grid_recentred_axes")   <- placement$moved
     attr(tab, "grid_placement_declined") <- placement$declined
     attr(tab, "grid_placement_note")   <- .tulpa_grid_placement_note(placement)
@@ -1548,11 +1766,13 @@
   }
   inner_declined <- if (is.null(inner)) NA_character_ else inner$declined
   inner_k_declined <- if (is.null(inner_k)) NA_character_ else inner_k$declined
-  reliability <- .tulpa_combined_reliability(outer_band, inner_band,
-                                            inner_declined,
-                                            psis$pareto_k_declined,
-                                            inner_k_band,
-                                            inner_k_declined)
+  # The whole-fit verdict combines the outer and inner layers, so a backend
+  # without them has no verdict to state.
+  reliability <- if (length(scope$layers)) {
+    .tulpa_combined_reliability(outer_band, inner_band, inner_declined,
+                                psis$pareto_k_declined, inner_k_band,
+                                inner_k_declined)
+  } else NA_character_
   attr(tab, "reliability") <- reliability
 
   summary_row <- data.frame(
@@ -1582,244 +1802,6 @@
   tab
 }
 
-#' Approximation-reliability diagnostics for a deterministic nested-Laplace fit
-#'
-#' @description
-#' `r lifecycle::badge("deprecated")`
-#'
-#' Use [diagnostics()], which returns this table for any fit whose draws are an
-#' i.i.d. approximation sample. The sections below document that table; they
-#' remain the reference for its columns and attributes.
-#'
-#' Per-parameter reliability diagnostics for a fit whose posterior draws are
-#' i.i.d. samples from a deterministic approximation (the nested-Laplace
-#' grid-mixture posterior `sum_k w_k N(mode_k, V_k)`), where the between-chain
-#' Gelman-Rubin Rhat that [diagnostics()] reports for a chain fit does not apply. This is
-#' the accessor that plays Rhat's role for the deterministic engine: it answers
-#' "did the approximation work", not "did the chains mix".
-#'
-#' The headline is a Pareto-smoothed importance-sampling (PSIS) reliability
-#' diagnostic for the OUTER hyperparameter-grid integration. The nested
-#' integrator scores its hyperparameter grid against the exact inner-Laplace
-#' marginal posterior with a generalized-Pareto fit to the upper tail of the
-#' importance ratios `log p_target(theta) - log q_proposal(theta)`
-#' (see [tulpa_psis()]); the resulting tail-shape `pareto_k` is the "did the
-#' outer integration work" number -- `k-hat < 0.5` good, `0.5-0.7` usable,
-#' `>= 0.7` unreliable (Vehtari et al. 2024; Yao et al. 2018). It is computed at
-#' fit time and read back here; a fit that did not run the diagnostic, or whose
-#' grid proposal degenerated, reports it as `NA` and is assessed on the grid
-#' quadrature reliability instead.
-#'
-#' `pareto_k` scores the outer integration only. A high `pareto_k` on a fit
-#' whose grid quadrature is healthy (`ess_grid` well above 1, largest cell
-#' weight modest) flags outer-integration (CI-width) calibration in the
-#' right-skewed hyperparameter tail and does not by itself invalidate the
-#' point estimates, which the grid quadrature governs.
-#'
-#' `outer_regime` qualifies what a high `pareto_k` means, and is the reason a
-#' bare threshold on `pareto_k` is not a reliability verdict. A sharp
-#' hyperparameter posterior collapses the grid onto ~1 cell (`ess_grid` near
-#' 1); the outer integration has then degenerated to a point evaluation at the
-#' modal hyperparameter, so `pareto_k` is scoring how well a Gaussian at that
-#' mode stands in for the hyperparameter marginal, not how well a grid
-#' integrated it. Where the dominant cell is INTERIOR to the grid the collapse
-#' is benign -- the grid bracketed the mode, the estimate is empirical Bayes
-#' there, and only integrated hyperparameter uncertainty is missing. Where it
-#' sits at a grid BOUNDARY the grid may simply be too narrow: `grid_edge_axes`
-#' / `grid_edge_sides` name the axes to widen. On a fit whose `pareto_k`
-#' cleared the good band, the outer diagnostic also fits a skew-normal proposal
-#' and reports the marginal's estimated skewness as `outer_skew_max`, so an
-#' inflated k-hat that was purely the symmetric proposal's mismatch with a
-#' skewed variance-component marginal is both corrected and explained. A
-#' skew-normal has Gaussian tails, so this can never mask a genuinely
-#' heavy-tailed target.
-#'
-#' The grid quadrature reliability -- the effective sample size
-#' `ess_grid = 1 / sum(w_k^2)` of the outer integration weights and the largest
-#' single cell weight -- is always computed from the stored grid: a grid that
-#' collapses onto one cell (`ess_grid` near 1) integrates no hyperparameter
-#' uncertainty, while a spread grid does.
-#'
-#' A SEPARATE layer -- the inner Gaussian Laplace approximation to the
-#' latent-field conditional posterior `pi(x | theta, y)`, which `pareto_k`
-#' does not cover -- is scored by `inner_skew`: the leading-order Edgeworth
-#' skewness estimate `gamma_3` (Rue, Martino & Chopin 2009 Sec 3.2.3) at the
-#' fitted MAP grid cell, computed when `control$diagnose_skew = TRUE` (the
-#' default) on the fitting call. Reading a high `pareto_k` alone as "the fit
-#' is broken" conflates the two layers: an occu_cover batch flagged 42/78
-#' species "unreliable" on outer k-hat alone when their point estimates,
-#' governed by the healthy inner layer, were fine -- the
-#' `reliability` attribute is the combined verdict that names which layer
-#' degrades, if either does.
-#'
-#' Each parameter row also carries the rank-normalized split-Rhat and bulk /
-#' tail effective sample size of the draws (Vehtari et al. 2021). On i.i.d.
-#' draws these sit at `~1.00` and `~n_draws` by construction; they are reported,
-#' clearly as i.i.d.-draw Monte-Carlo diagnostics and not chain mixing, to
-#' document that the reported posterior summaries are not Monte-Carlo-limited.
-#'
-#' A posterior sample is what those per-parameter rows are computed from, and
-#' nothing else here needs one: every reliability quantity above is read off the
-#' fit. So a fit that carries no draws -- a default single-block nested-Laplace
-#' fit, whose posterior is the retained outer-grid mixture rather than a sample
-#' -- reports the full band with an empty per-parameter body and `n_draws = NA`,
-#' and records why in the `param_table_declined` attribute.
-#' [tulpa_posterior_draws()] samples that mixture where the rows are wanted.
-#' The one case that still returns `NULL` is a fit with neither draws nor any
-#' reliability quantity, such as a plain Laplace fit with no outer grid to
-#' score.
-#'
-#' @section Scope:
-#' The PSIS `pareto_k` diagnoses the OUTER (hyperparameter) integration: whether
-#' the Gaussian-proposal-over-grid approximation of the marginal hyperparameter
-#' posterior `p(theta | data)` can be importance-corrected to the exact inner
-#' marginal. This is the dominant approximation in nested Laplace and the one
-#' with an exactly evaluable target. A full latent-space PSIS against the exact
-#' joint posterior `pi(x)` is not computed: the latent prior marginal
-#' `p(x) = integral p(x | theta) p(theta) dtheta` has no closed form, and for
-#' the marginalized-occupancy / cover-hurdle likelihoods the exact joint density
-#' is evaluable only inside the C++ kernel, so a stored fit cannot reconstruct
-#' it. The grid quadrature reliability is the complementary stored-fit number.
-#'
-#' The inner layer carries a SECOND score, `inner_pareto_k`, which needs no
-#' likelihood derivative at all and therefore answers where `inner_skew`
-#' declines. The inner Gaussian at the fitted hyperparameter is an importance
-#' proposal for the exact conditional posterior, and the joint density is the
-#' target, so PSIS on that ratio scores the inner approximation directly. It is
-#' computed on the same probed indices along the same conditional-mean curve,
-#' one dimension per index, since importance sampling degrades with dimension
-#' and a k-hat over the whole latent field would report `n_x` rather than the
-#' approximation. A Pareto shape index is scale-free, so it is banded only on
-#' indices whose realized importance efficiency shows a correction worth
-#' describing; `inner_pareto_k_uniform` records that none did, which is what a
-#' well-approximated inner layer looks like.
-#'
-#' `inner_skew` diagnoses the INNER (latent-field) Laplace: whether the
-#' Gaussian approximation to `pi(x_i | theta, y)` is itself a good fit, at
-#' each scored latent index `i`. `gamma_3` is exact for a gaussian-family
-#' coefficient (the log-likelihood is exactly quadratic in eta) and
-#' declines to `NA` -- never a silently-wrong `0` ("perfectly Gaussian") --
-#' whenever no per-observation third-derivative oracle is available: a
-#' coupled multi-process likelihood (e.g. tulpaObs's `occu_cover`, whose
-#' arms combine non-separably through a `CellCouplingSpec`) or a family with
-#' no registered third derivative. Only the requested latent indices are
-#' scored (every arm's fixed-effects coefficients by default -- see
-#' `control$skew_idx`), since each index costs one extra linear solve; the
-#' full latent field is not scored by default on a large spatial field.
-#'
-#' @param fit A `tulpa_fit` (or subclass, e.g. a `tobs_fit`) whose draws are an
-#'   i.i.d. approximation sample (`$draws_kind == "iid"`).
-#' @param pars Optional character vector of parameter names to restrict to.
-#' @return A data frame with one row per parameter -- `parameter`, `mean`, `sd`,
-#'   `ess_bulk`, `ess_tail`, `rhat` -- carrying attributes:
-#'   \describe{
-#'     \item{`pareto_k`}{the outer PSIS reliability k-hat (`NA` if not computed).}
-#'     \item{`pareto_k_band`}{`"good"` / `"ok"` / `"unreliable"` / `NA`.}
-#'     \item{`pareto_k_declined`, `pareto_k_declined_note`}{when `pareto_k` is
-#'       `NA`, WHY: `"not_requested"`, `"not_applicable"`,
-#'       `"unguessable_axis"` (naming the axis -- a permanent limitation of that
-#'       family, so read `ess_grid` instead), `"draws_too_few"`,
-#'       `"grid_too_small"`, `"no_varying_axis"`, `"degenerate_proposal"`, or
-#'       `"internal_inconsistency"` (an engine bug worth reporting), plus a
-#'       one-line reading of it.}
-#'     \item{`pareto_k_is_ess`}{importance-sampling ESS on the smoothed weights.}
-#'     \item{`ess_grid`, `n_grid`, `rel_ess_grid`, `max_weight`}{grid quadrature
-#'       reliability.}
-#'     \item{`outer_regime`}{`"spread"` / `"collapsed_interior"` /
-#'       `"collapsed_edge"` -- whether the outer grid integrated hyperparameter
-#'       uncertainty at all, and if not whether its dominant cell is interior
-#'       (empirical Bayes at the mode: point estimates sound, hyperparameter
-#'       uncertainty not integrated) or against a grid boundary (widen it).}
-#'     \item{`grid_edge_axes`, `grid_edge_sides`}{for an edge collapse, the axes
-#'       the dominant cell sits against and on which side.}
-#'     \item{`outer_skew_max`}{largest estimated |skewness| of the hyperparameter
-#'       marginal, computed only when the k-hat triggered the skew-normal
-#'       proposal rescue (`NA` means the Gaussian proposal already fit, not
-#'       "symmetric and unchecked").}
-#'     \item{`outer_regime_note`}{a one-line reading of a collapsed regime, or
-#'       absent on a spread grid.}
-#'     \item{`grid_railed_axes`}{outer axes whose OWN marginal is maximal at one
-#'       of their own endpoints, as `axis:side` -- the span does not contain that
-#'       axis's posterior mode, so its marginal is a truncated tail at any
-#'       spacing. Reported whether or not the engine was allowed to, able to, or
-#'       built to move the axis.}
-#'     \item{`grid_placement`, `grid_recentred_axes`,
-#'       `grid_placement_declined`, `grid_placement_note`}{whether the outer grid
-#'       was re-centred, on which axes, and -- when it was not -- why.}
-#'     \item{`scope`}{the outer diagnostic's scope string.}
-#'     \item{`inner_skew_max`}{the largest `|gamma_3|` among the scored latent
-#'       indices (`NA` if `control$diagnose_skew = FALSE` or nothing scored).}
-#'     \item{`inner_skew_band`}{`"good"` / `"ok"` / `"unreliable"` / `NA`, banded
-#'       on `inner_skew_max` by the general skewness-magnitude convention
-#'       (Bulmer 1979) -- not a Rue-Martino-Chopin-specific cutoff.}
-#'     \item{`inner_skew_scored`, `inner_skew_probed`}{how many of the probed
-#'       latent indices returned a finite `gamma_3` vs how many were probed.}
-#'     \item{`inner_skew_declined`, `inner_skew_arms_declined`,
-#'       `inner_skew_declined_note`}{when nothing was scored, WHY:
-#'       `"coupled_arm"` (STRUCTURAL -- the coupled arms have neither a
-#'       per-observation sum nor a cell third-derivative tensor to read, so the
-#'       outer k-hat is the only reliability number this fit has),
-#'       `"curvature3_unavailable"`, `"no_finite_contribution"`,
-#'       `"no_probe_indices"`, `"not_requested"`, `"backend_unsupported"`,
-#'       `"solve_failed"`, or `"not_converged"` (the probe re-solve stopped
-#'       short of a mode, so neither inner score has a point to read); the arms
-#'       (1-based) a joint fit had no oracle for, which is also set on a
-#'       PARTIALLY scored fit; and a one-line reading.} \item{`inner_pareto_k`,
-#'       `inner_pareto_k_band`}{the inner-Laplace importance k-hat over the
-#'       probed subspace, and its band on the same convention as the outer
-#'       k-hat. Available wherever a mode was found, including a fit `gamma_3`
-#'       cannot score.} \item{`inner_pareto_k_rel_ess`,
-#'       `inner_pareto_k_is_ess`}{the smallest realized importance efficiency
-#'       and effective sample size across the probed indices -- how much
-#'       correcting the inner Gaussian actually needs, which is what makes the
-#'       scale-free shape above readable.}
-#'       \item{`inner_pareto_k_uniform`}{`TRUE` when no probed index carried a
-#'       material correction, i.e. the inner Gaussian reproduces the
-#'       conditional posterior over the sampled region.}
-#'       \item{`inner_pareto_k_scored`, `inner_pareto_k_probed`}{how many
-#'       probed indices returned a finite k-hat vs how many were probed.}
-#'       \item{`inner_pareto_k_declined`, `inner_pareto_k_declined_note`}{when
-#'       it is `NA`, WHY, from the same closed vocabulary the outer k-hat
-#'       uses.} \item{`reliability`}{the combined whole-fit verdict:
-#'       `"reliable"` only when both layers are good; otherwise names which
-#'       layer is scoped or flags both as unreliable. The inner layer enters
-#'       through the worse of its two scores, so a fit whose cubic term
-#'       declined is still assessed.} } and a trailing `summary` attribute (a
-#'       one-row data frame of the headline numbers) for printing.
-#'
-#' @references
-#' Vehtari, Simpson, Gelman, Yao & Gabry (2024). Pareto smoothed
-#'   importance sampling. \emph{JMLR} 25(72):1-58.
-#'
-#' Yao, Vehtari, Simpson & Gelman (2018). Yes, but did it work?: Evaluating
-#'   variational inference. \emph{ICML}, PMLR 80:5581-5590.
-#'
-#' Vehtari, Gelman, Simpson, Carpenter & Burkner (2021). Rank-normalization,
-#'   folding, and localization: an improved Rhat for assessing convergence of
-#'   MCMC. \emph{Bayesian Analysis} 16(2):667-718.
-#'
-#' Rue, Martino & Chopin (2009). Approximate Bayesian inference for latent
-#'   Gaussian models by using integrated nested Laplace approximations.
-#'   \emph{JRSS-B} 71(2):319-392.
-#' @seealso [diagnostics()] (the front door, which returns this table for
-#'   i.i.d. fits), [tulpa_psis()].
-#' @examples
-#' \donttest{
-#' set.seed(1)
-#' n <- 200L; x <- rnorm(n)
-#' y <- rbinom(n, 1, plogis(-0.2 + 0.6 * x))
-#' # `mode = "laplace"` returns a mode + covariance and carries no draws; a
-#' # sampled deterministic backend is what this table describes.
-#' fit <- tulpa(y ~ x, data.frame(y = y, x = x), family = "binomial",
-#'              mode = "smc")
-#' diagnostics(fit)
-#' }
-#' @export
-laplace_diagnostics <- function(fit, pars = NULL) {
-  lifecycle::deprecate_warn("0.0.95", "laplace_diagnostics()", "diagnostics()")
-  .tulpa_approx_diag_table(fit, pars = pars)
-}
-
 #' @export
 print.laplace_diagnostics <- function(x, ...) {
   s <- attr(x, "summary")
@@ -1837,24 +1819,47 @@ print.laplace_diagnostics <- function(x, ...) {
     # cubic term's decline as though nothing were known.
     inner_note <- NULL
   }
-  if (has_inner) {
-    cat("Nested-Laplace WHOLE-FIT reliability (i.i.d. draws)\n")
-    cat("  two layers: the outer hyperparameter-grid integration, and the",
-        "inner Gaussian Laplace on the latent field\n")
+  title  <- attr(x, "scope_title") %||% .APPROX_SCOPE$nested_laplace$title
+  layers <- attr(x, "scope_layers") %||% .APPROX_SCOPE$nested_laplace$layers
+  scope  <- attr(x, "scope_text") %||% .APPROX_SCOPE$nested_laplace$scope
+  layered <- length(layers) > 0L
+  wrap <- function(...) {
+    cat(strwrap(paste0(...), width = 78, indent = 2, exdent = 4), sep = "\n")
+  }
+  if (!layered) {
+    cat(title, " approximation reliability (i.i.d. draws)\n", sep = "")
+    wrap("scope: ", scope)
+  } else if (has_inner) {
+    cat(title, " WHOLE-FIT reliability (i.i.d. draws)\n", sep = "")
+    wrap("two layers: ", scope,
+         ", and the inner Gaussian Laplace on the latent field")
   } else {
     # The inner layer is unscored -- say WHY. Attributing a
     # structural impossibility to `control$diagnose_skew` sent readers looking
     # for a knob they never touched.
-    cat("Nested-Laplace OUTER-integration reliability (i.i.d. draws)\n")
-    cat("  scope: the outer hyperparameter-grid integration; the latent-field\n",
-        "  Laplace is a separate, unscored layer",
-        if (!is.null(inner_note)) paste0(":\n    ", inner_note, "\n") else ".\n",
-        sep = "")
+    cat(title, " OUTER-integration reliability (i.i.d. draws)\n", sep = "")
+    wrap("scope: ", scope, "; the latent-field Laplace is a separate, ",
+         "unscored layer", if (is.null(inner_note)) "." else ":")
+    if (!is.null(inner_note)) cat("    ", inner_note, "\n", sep = "")
   }
   if (is.finite(k)) {
-    cat(sprintf("  outer PSIS pareto_k = %.3f (%s); IS-ESS = %.1f\n",
+    cat(sprintf("  %s pareto_k = %.3f (%s); IS-ESS = %.1f\n",
+                if (layered) "outer PSIS" else "PSIS",
                 k, band, attr(x, "pareto_k_is_ess")))
-  } else {
+    # Which proposal family the number came from, and what the backend's own
+    # placement scored before any rescue. A large gap says the NODES are badly
+    # scaled around the posterior even though the verdict is fine; no gap says
+    # the placement was already right (gcol33/tulpa#715).
+    src <- attr(x, "pareto_k_proposal_source")
+    fp  <- attr(x, "pareto_k_first_pass")
+    if (!is.null(src) && !is.na(src)) {
+      cat(sprintf("    proposal: %s%s\n", src,
+                  if (!is.null(fp) && is.finite(fp))
+                    sprintf("; as the backend placed it, %.3f (%s)",
+                            fp, .tulpa_khat_band(fp))
+                  else ""))
+    }
+  } else if (layered) {
     # Every decline path says which one it was instead of
     # the old "not run or proposal degenerate" disjunction.
     knote <- attr(x, "pareto_k_declined_note")
@@ -1913,7 +1918,7 @@ print.laplace_diagnostics <- function(x, ...) {
       cat("  inner Laplace importance pareto_k = NA:\n    ", knote, "\n", sep = "")
     }
   }
-  if (!is.null(attr(x, "reliability"))) {
+  if (!is.null(attr(x, "reliability")) && !is.na(attr(x, "reliability"))) {
     cat(sprintf("  whole-fit verdict: %s\n", attr(x, "reliability")))
   }
   # The reliability band above scores THIS fit's internal approximation; the SBC
@@ -1930,9 +1935,10 @@ print.laplace_diagnostics <- function(x, ...) {
     cat("  per-parameter columns: none.\n    ", pdecl, "\n", sep = "")
     return(invisible(x))
   }
-  cat(sprintf("  %d parameters, %d draws; per-parameter rhat / ESS below are\n",
+  cat(sprintf("  %d parameters, %d draws; mcse_mean below is the i.i.d.\n",
               nrow(x), if (is.null(s)) NA_integer_ else s$n_draws))
-  cat("  i.i.d.-draw Monte-Carlo diagnostics (not chain mixing).\n\n")
+  cat("  Monte-Carlo error of each reported mean (not chain mixing:\n")
+  cat("  Rhat and ESS are not defined for these draws).\n\n")
   print(as.data.frame(x), ...)
   invisible(x)
 }

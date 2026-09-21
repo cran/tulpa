@@ -78,7 +78,7 @@ test_that("gamma_3 is exactly zero for a gaussian intercept (the log-lik is exac
   n <- 300L
   x <- rnorm(n)
   y <- 1 + 0.5 * x + rnorm(n, 0, 1)
-  fit <- tulpa:::cpp_laplace_fit(
+  fit <- ref_laplace_fit_single(
     y = as.numeric(y), n = rep(1L, n), X = cbind(1, x),
     re_idx = numeric(0), n_re_groups = 0L, sigma_re = 1.0,
     family = "gaussian", compute_skew = TRUE, skew_idx = as.integer(1:2)
@@ -101,7 +101,7 @@ test_that("gamma_3 stays near zero for a large-count poisson fit (CLT regime)", 
   n <- 600L
   x <- rnorm(n)
   y <- rpois(n, exp(3 + 0.1 * x))   # mu ~ 20: large counts, CLT applies
-  fit <- tulpa:::cpp_laplace_fit(
+  fit <- ref_laplace_fit_single(
     y = as.numeric(y), n = rep(1L, n), X = cbind(1, x),
     re_idx = numeric(0), n_re_groups = 0L, sigma_re = 1.0,
     family = "poisson", compute_skew = TRUE, skew_idx = as.integer(1:2)
@@ -146,7 +146,7 @@ test_that("gamma_3 tracks the exact posterior skewness of a rare-event binomial 
   for (cs in cases) {
     N <- cs[["N"]]; S <- cs[["S"]]
     y <- c(rep(1, S), rep(0, N - S))
-    fit <- tulpa:::cpp_laplace_fit(
+    fit <- ref_laplace_fit_single(
       y = as.numeric(y), n = rep(1L, N), X = matrix(1, N, 1),
       re_idx = numeric(0), n_re_groups = 0L, sigma_re = 1.0,
       family = "binomial", compute_skew = TRUE, skew_idx = 1L
@@ -165,7 +165,7 @@ test_that("gamma_3 tracks the exact posterior skewness of a rare-event binomial 
   extreme_exact <- .exact_intercept_skew(15, 1)
   expect_gt(abs(extreme_exact), 1.0)
   y <- c(1, rep(0, 14))
-  fit <- tulpa:::cpp_laplace_fit(
+  fit <- ref_laplace_fit_single(
     y = as.numeric(y), n = rep(1L, 15), X = matrix(1, 15, 1),
     re_idx = numeric(0), n_re_groups = 0L, sigma_re = 1.0,
     family = "binomial", compute_skew = TRUE, skew_idx = 1L
@@ -175,7 +175,7 @@ test_that("gamma_3 tracks the exact posterior skewness of a rare-event binomial 
   # And the well-balanced N=500 case (roughly symmetric binomial) must read
   # "good" -- the diagnostic does not cry wolf on a healthy fit.
   y_bal <- c(rep(1, 230), rep(0, 270))
-  fit_bal <- tulpa:::cpp_laplace_fit(
+  fit_bal <- ref_laplace_fit_single(
     y = as.numeric(y_bal), n = rep(1L, 500), X = matrix(1, 500, 1),
     re_idx = numeric(0), n_re_groups = 0L, sigma_re = 1.0,
     family = "binomial", compute_skew = TRUE, skew_idx = 1L
@@ -460,7 +460,7 @@ test_that("tulpa_nested_laplace_joint() scores real gamma_3 for a separable 2-ar
               sigma_re = 1.0, family = "binomial", phi = 1.0),
     pos = list(y = y_pos, n_trials = rep(1L, length(y_pos)), X = Xpos,
               spatial_idx = spi_pos, re_idx = rep(0, length(y_pos)),
-              n_re_groups = 0L, sigma_re = 1.0, family = "gaussian", phi = 0.5,
+              n_re_groups = 0L, sigma_re = 1.0, family = "gaussian", phi = 0.25,
               field_coef = list(name = "alpha", grid = c(0.5, 1.0, 1.5)))
   )
 
@@ -538,7 +538,7 @@ test_that("tulpa_nested_laplace_joint() wires gamma_3 through the multi-block di
               n_re_groups = 0L, sigma_re = 1.0, family = "binomial", phi = 1.0),
     pos = list(y = y_pos, n_trials = rep(1L, length(y_pos)), X = Xpos,
               spatial_idx = as.integer(iAp), re_idx = rep(0, length(y_pos)),
-              n_re_groups = 0L, sigma_re = 1.0, family = "gaussian", phi = 0.5))
+              n_re_groups = 0L, sigma_re = 1.0, family = "gaussian", phi = 0.25))
   prior <- list(
     list(type = "icar", n_spatial_units = n_s,
          adj_row_ptr = adjA$adj_row_ptr, adj_col_idx = adjA$adj_col_idx,

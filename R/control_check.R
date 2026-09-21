@@ -17,7 +17,10 @@
 # once, rather than aliased per fitter.
 #
 # Names the target fitter already accepts are never rewritten, so a fitter that
-# genuinely reads `n_warmup` keeps receiving it.
+# genuinely reads `n_warmup` keeps receiving it. The pair is SYMMETRIC: a
+# fitter wanting either spelling can be reached from a caller using the other
+# (gcol33/tulpa#767 -- a one-directional alias silently dropped `warmup` on
+# `nuts_spde` / `nuts_beta`, which list `n_warmup` only).
 #' @keywords internal
 .CONTROL_ALIASES <- c(n_warmup = "warmup")
 
@@ -33,10 +36,14 @@
     to <- .CONTROL_ALIASES[[from]]
     # Rewrite only when the target fitter wants the other spelling, and only
     # when it has not been given explicitly -- an explicit value wins over one
-    # arriving under an alias.
+    # arriving under an alias. Tried in both directions, since either spelling
+    # may be the one a given fitter reads.
     if (from %in% nm && !(from %in% allowed) &&
         to %in% allowed && !(to %in% nm)) {
       nm[nm == from] <- to
+    } else if (to %in% nm && !(to %in% allowed) &&
+               from %in% allowed && !(from %in% nm)) {
+      nm[nm == to] <- from
     }
   }
   names(control) <- nm
@@ -97,31 +104,54 @@ tulpa_check_control <- function(control, allowed, where) {
   keys <- list(
     nested_laplace = c("max_iter", "tol", "n_threads", "x_init",
                        "keep_grid_hessians", "diagnose_k", "k_samples",
+                       "k_tail_points",
                        "diagnose_skew", "skew_idx", "skew_correct",
                        "auto_recenter", "subspace_debias", "cila",
                        "max_grid_cells", "within_cell",
+                       "prune", "prune_tol", "prune_log_gap", "screen_iters",
+                       "fitted_var",
                        "checkpoint", progress),
     nested_laplace_joint = c(
       "max_iter", "tol", "n_threads", "n_threads_outer", "n_threads_scatter",
       "x_init", "verbose", "hessian", "store_Q", "keep_grid_hessians",
       "force_sparse", "inner_factorization",
       "inner_refresh", "integration", "local_ccd", "tile_warm",
-      "prune", "prune_tol",
+      "ccd_budget", "ccd_budget_floor",
+      "prune", "prune_tol", "prune_log_gap", "screen_iters", "fitted_var",
       "adaptive_grid", "adaptive_grid_cutoff", "adaptive_grid_edge_thresh",
       "adaptive_grid_max_frac", "adaptive_grid_max_passes",
-      "adaptive_grid_min_cells", "adaptive_grid_stride",
-      "var_of_means_consistency", "var_of_means_tolerance",
+      "adaptive_grid_min_cells", "adaptive_grid_stride", "axis_refine",
+      "var_of_means_consistency", "var_of_means_min_ess",
+      "copy_atom_mass", "copy_slab",
       "diagnose_k", "k_samples", "k_threads", "k_quality", "k_refine",
       "k_max_rounds", "k_bootstrap", "k_tail_points", "k_conf_bands",
       "diagnose_skew", "skew_idx", "skew_correct", "auto_recenter",
+      "recenter_pilot",
       "subspace_debias", "cila", "max_grid_cells", "within_cell",
       "checkpoint", progress),
+    # `tulpa_hyper_grid()`'s own surface: the refinement / consistency passes
+    # it drives and nothing else, since the inner solve is the caller's own
+    # callback and takes no knobs from here.
+    hyper_grid = c("adaptive_grid", "adaptive_grid_edge_thresh",
+                   "adaptive_grid_max_passes", "var_of_means_consistency",
+                   "var_of_means_min_ess"),
+    st_nested = c("n_grid_spatial", "n_grid_temporal", "n_grid_rho",
+                  "tau_lower", "tau_upper", "rho_lower", "rho_upper",
+                  "rho_spatial", "sigma_lower", "sigma_upper",
+                  "max_iter", "tol", "n_threads",
+                  "auto_recenter", "within_cell"),
     spde = c("method", "n_grid", "max_iter", "tol", "n_threads",
-             "diagnose_k", "k_samples", "checkpoint", "mode_find"),
+             "diagnose_k", "k_samples", "k_tail_points", "checkpoint",
+             "mode_find",
+             # Reachable since the SPDE grid entry went through the shared
+             # entry bundle (gcol33/tulpa#699); it hand-rolled its driver call
+             # and hardcoded prune_tol = 0 before that.
+             "prune", "prune_tol", "prune_log_gap", "screen_iters",
+             "fitted_var", "subspace_debias", "cila"),
     re_cov_nested = c("integration", "n_per_axis", "span", "n_draws", "seed",
                       "max_iter", "tol", "n_threads", "diagnose_k",
-                      "k_samples", "checkpoint", "outer_maxit",
-                      "subspace_debias"),
+                      "k_samples", "k_tail_points", "checkpoint",
+                      "outer_maxit", "subspace_debias"),
     re_cov_gibbs = c("n_iter", "warmup", "thin", "seed", "max_iter", "tol",
                      "n_threads"),
     # EB stops at the maximizer, so beyond the inner-solve knobs and the outer
@@ -148,39 +178,91 @@ tulpa_check_control <- function(control, allowed, where) {
                     "n_particles", "n_mcmc_steps", "mclmc_adjusted",
                     "vi_variant", "vi_mc_samples", "vi_max_iter",
                     "vi_max_grad_norm",
+                    # The VI stopping rule. `vi_max_iter` is a ceiling the run
+                    # rarely reaches; these three are what decide where it
+                    # actually stops (gcol33/tulpa#821).
+                    "vi_tol_grad", "vi_tol_rel_elbo", "vi_patience",
                     # Elliptical-slice kernel. Note `ess_threshold` above is
                     # SMC's resampling threshold, not one of these -- the two
                     # unrelated meanings of "ess" are why these carry the
                     # prefix.
                     "ess_adapt_during_warmup",
                     "ess_adapt_interval", "ess_joint_sigma_re",
-                    "ess_joint_proposal_sd")
+                    "ess_joint_proposal_sd",
+                    # Per-chain checkpoint/resume (NUTS/HMC only; gcol33/tulpa#808).
+                    # Same `list(path =, resume =)` shape the nested-Laplace
+                    # fitters take, parsed by the same `.nl_checkpoint_args()`.
+                    "checkpoint"),
+    # The three R log-posterior samplers (gcol33/tulpa#770): each takes its
+    # tuning knobs as plain formals, not a `control` list, so tulpa() is the
+    # only place that can validate what it forwards. `mala()` / `imh_laplace()`
+    # both have a `thin` formal; `pathfinder()` has none.
+    mala        = c("n_iter", "warmup", "epsilon", "thin", "seed", "verbose"),
+    imh_laplace = c("n_iter", "warmup", "scale", "thin", "seed", "verbose"),
+    pathfinder  = c("n_draws", "max_iter", "tol", "seed", "verbose"),
+    # agq_fit() is a marginal-likelihood maximizer: no sampler knobs
+    # (n_iter / warmup / seed / n_chains / thin) do anything there.
+    agq = c("n_quad", "beta_init", "sigma_init", "max_iter", "tol", "verbose")
   )
   # tulpa() dispatches across the nested / spde / re_cov / gibbs / agq /
   # sampler backends and forwards `control` wholesale on the nested and
   # modeldata routes, so its surface is the union plus its own
   # backend-selection and conditioning knobs.
   # tulpa()'s control surface is the union of the backends it dispatches, minus
-  # the statistical hyperpriors -- those now ride the `re_prior` / `beta_prior`
+  # the statistical hyperpriors -- those ride the `re_prior` / `beta_prior`
   # signature arguments (design principle 6: statistical args in the signature,
-  # tuning knobs in control). The re_cov_nested / re_cov_gibbs sets still list
-  # prior_sigma / eta / prior_df / prior_scale for their DIRECT callers; the
-  # union drops them so tulpa(control = list(prior_sigma = )) errors and points
-  # the user to re_prior.
+  # tuning knobs in control), so `tulpa(control = list(prior_sigma = ))` errors
+  # and points the user at `re_prior`.
+  #
+  # The subtraction is defensive rather than active: `prior_sigma` / `eta` /
+  # `prior_df` / `prior_scale` are SIGNATURE arguments of the re_cov fitters,
+  # not control knobs, so no key set in the union carries them today and the
+  # setdiff removes nothing. It stays so that adding one to a backend's set
+  # cannot re-open a door on tulpa()'s. (The comment used to say those sets
+  # "still list" them, which sent the next reader looking for key sets that do
+  # not exist -- gcol33/tulpa#708.)
   .tulpa_hyperprior_keys <- c("prior_sigma", "eta", "prior_df", "prior_scale",
                               "sigma_re_scale", "prior_sigma_scale")
   keys$tulpa <- sort(unique(setdiff(c(
     keys$nested_laplace, keys$nested_laplace_joint, keys$spde,
     keys$re_cov_nested, keys$re_cov_gibbs, keys$eb,
     keys$sample_glmm, keys$ep, keys$nuts_spde,
+    keys$mala, keys$imh_laplace, keys$pathfinder, keys$agq,
     c("re_cov", "n_quad", "sigma_init", "beta_init",
-      "sigma_eps", "scale", "method")
+      "scale", "method")
   ), .tulpa_hyperprior_keys)))
   keys
 })
 
+# Drop the entries a caller did not set, so a `do.call` onto a fitter takes
+# that fitter's OWN formal default rather than one restated at the dispatch
+# site. Restating them put the same default in two files, where a bump on one
+# side is invisible from the other -- the drift gcol33/tulpa#632 measured on
+# `k_samples`, in the shape gcol33/tulpa#676 found it.
+#
+# NULL is the "unset" marker throughout `control`, so an argument a fitter
+# genuinely takes as NULL (an absent init) is unaffected: it means the same
+# thing either way.
+#' @keywords internal
+.drop_null <- function(x) x[!vapply(x, is.null, logical(1))]
+
+# The RE-covariance integrator a call asks for, validated once.
+#
+# Read at two sites with two different defaults, so the value is resolved here
+# rather than `match.arg`-ed at each (gcol33/tulpa#668). Validation is
+# unconditional: a typo errors even where the caller's model would not have been
+# redirected, instead of being accepted and ignored.
+#' @keywords internal
+.re_cov_method <- function(control, default) {
+  match.arg(control$re_cov %||% default, c("nested", "gibbs", "aghq"))
+}
+
 # Valid keys for the `re_prior = list()` statistical argument on tulpa(): the
 # random-effect / variance-component hyperpriors that used to hide in control.
 #' @keywords internal
+# `hyperprior` was documented in ?tulpa and read by the front door
+# (R/tulpa.R, the re_cov_nested / eb branches) and omitted here, so
+# tulpa_check_control() -- which runs first -- rejected the documented key
+# (gcol33/tulpa#667).
 .RE_PRIOR_KEYS <- c("prior_sigma", "eta", "prior_df", "prior_scale",
                     "prior_sigma_scale", "sigma_re_scale")

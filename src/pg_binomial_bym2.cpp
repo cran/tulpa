@@ -93,7 +93,8 @@ Rcpp::List cpp_pg_binomial_gibbs_bym2(
     double bym2_removed = 0.0;
     tulpa::update_spatial_bym2(C.kappa, C.omega, C.offset, spatial_group, adj,
                                phi_scaled, theta, sigma_spatial, rho,
-                               scale_factor, u, bym2_removed);
+                               scale_factor, C.beta[0], prior_beta_sd, u,
+                               bym2_removed);
     // Absorb the field level removed by centering phi into the intercept so eta
     // is unchanged (posterior-invariant), and refresh the cached X_beta /
     // offset that the sigma and rho conditionals below read.
@@ -145,6 +146,16 @@ Rcpp::List cpp_pg_binomial_gibbs_bym2(
       }
       sigma_spatial_draws[save_idx] = sigma_spatial;
       rho_draws[save_idx] = rho;
+      C.log_prob_draws[save_idx] =
+          C.log_joint_common(y, n, spatial_contrib.begin(), prior_beta_sd,
+                             prior_sigma_re_scale) +
+          tulpa::pg_log_icar(phi_scaled.begin(), adj, 1.0,
+                             tulpa::PG_ICAR_ISOLATED_PREC) +
+          tulpa::pg_log_normal_iid(theta.begin(), n_spatial_units, 1.0) +
+          (prior_sigma_spatial_scale > 0.0
+               ? tulpa::pg_log_halfnormal(sigma_spatial, prior_sigma_spatial_scale)
+               : 0.0) +
+          tulpa::pg_bym2_rho_log_prior(rho, prior_rho_alpha, prior_rho_beta);
       save_idx++;
     }
 
@@ -167,7 +178,8 @@ Rcpp::List cpp_pg_binomial_gibbs_bym2(
     Rcpp::Named("theta") = theta_draws,
     Rcpp::Named("spatial") = u_draws,
     Rcpp::Named("sigma_spatial") = sigma_spatial_draws,
-    Rcpp::Named("rho") = rho_draws
+    Rcpp::Named("rho") = rho_draws,
+    Rcpp::Named("log_prob") = C.log_prob_draws
   );
 
   if (store_eta) {

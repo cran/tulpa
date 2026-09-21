@@ -41,7 +41,7 @@ knitr::opts_chunk$set(eval = EVAL_FITS)
 # xL <- rnorm(nL)
 # dL <- data.frame(y = 0.5 + 1.2 * xL + rnorm(nL, sd = 0.8), x = xL)
 # fit_big <- tulpa(y ~ x, data = dL, family = "gaussian", mode = "auto",
-#                  phi = 0.8)
+#                  phi = 0.8^2)
 # c(backend = fit_big$backend, tier = fit_big$inference_tier)
 # fit_big$selection_reason
 
@@ -80,7 +80,9 @@ knitr::opts_chunk$set(eval = EVAL_FITS)
 # fit_imh$mean_accept
 
 ## ----gibbs-fields-------------------------------------------------------------
-# round(fit_auto$beta, 3)
+# round(coef(fit_auto), 3)
+# tail(fit_auto$param_names, 3)
+# round(fit_auto$means[c("log_tau_spatial", "phi_spatial[1]")], 3)
 
 ## ----re-cov-slope-------------------------------------------------------------
 # set.seed(20260531)
@@ -133,9 +135,6 @@ knitr::opts_chunk$set(eval = EVAL_FITS)
 #                      slope_se(f_pf)), 3),
 #   seconds  = round(c(t_lap, t_mala, t_pf), 3)
 # )
-
-## ----compare------------------------------------------------------------------
-# compare_models(laplace = f_lap, pathfinder = f_pf, criterion = "loglik")
 
 ## ----glance-------------------------------------------------------------------
 # glance(f_mala)[c("n_samples", "mean_accept", "n_divergent")]

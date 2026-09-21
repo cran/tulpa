@@ -671,22 +671,35 @@ parameter means for that likelihood, which is the quick way to check
 whether a family even has a dispersion or a temporal slot before you try
 to set it.</p>
 <p>These five slots cover the direct / conditioning paths and the
-ModelData samplers. Two backends sit outside them and follow a different
-convention. The nested-Laplace integrator’s own scale axes
+ModelData samplers. The nested-Laplace integrator states its hyperpriors
+on its own outer grid, and every default axis there carries a proper
+prior. A field’s standard deviation, variance or precision
 (<code>icar</code>, <code>rw1</code>, <code>rw2</code>,
-<code>ar1</code>’s <code>tau</code>, <code>iid</code>) carry no
-hyperprior at all: the grid is uniform in <code>log(theta)</code> and
-the outer weights are a plain softmax of the log marginal, so the
-effective prior is flat in log-scale, everywhere, by construction of the
-integration rather than by a <code>tulpa_priors()</code> slot.
-[tulpa_re_cov_nested()] and [tulpa_eb()] match that convention by
-default (<code>hyperprior = &quot;flat&quot;</code>); pass
-<code>hyperprior = &quot;pc_lkj&quot;</code> to opt into the PC + LKJ prior these
-two functions can also build via [re_cov_pc_lkj_prior()].
-[tulpa_re_cov_gibbs()] cannot go fully flat – its <code>Sigma | b</code>
-step is a conjugate Inverse-Wishart draw, which needs a proper prior to
-sample from – so it defaults to the weakest proper choice
-(<code>prior_df = n_coefs + 1</code>) instead.</p>
+<code>ar1</code>‘s <code>tau</code>, <code>bym2</code> and
+<code>iid</code>’s <code>sigma</code>, a GP variance) takes the PC prior
+<code>P(sigma &gt; 3) = 0.01</code>, carried to whichever of the three
+the axis integrates. That anchor is wider than the sampler slot’s
+<code>P(sigma &gt; 1) = 0.01</code>: on a binary response with a field
+of standard deviation 3, the tighter anchor pulled the posterior mean
+down to about 1.5. A Matern range or lengthscale takes the PC range
+prior with <code>P(range &lt; rho0) = 0.5</code>, where
+<code>rho0</code> is a fifth of the diagonal of the coordinates’
+bounding box. A correlation or mixing weight takes a uniform on its
+domain, and a negative-binomial size takes the PC prior on its
+overdispersion that R-INLA ships as <code>pc.mgamma</code>.
+[tulpa_re_cov_nested()] and [tulpa_eb()] use the same scale anchor
+through the PC + LKJ prior (<code>hyperprior = &quot;proper&quot;</code>, the
+default; see [re_cov_pc_lkj_prior()]); <code>hyperprior = &quot;flat&quot;</code>
+removes it, which for [tulpa_eb()] gives the unpenalized maximum
+marginal likelihood.</p>
+<p>Because these priors are proper, <code>logLik()</code> on a nested
+fit is the evidence under them and does not depend on where the grid was
+laid. An axis the engine has no proper prior for, such as a beta
+precision or a gamma shape, leaves the grid’s own measure in place, and
+<code>logLik()</code> then reports <code>NA</code> naming that axis.
+[tulpa_re_cov_gibbs()] needs a proper prior for its conjugate
+Inverse-Wishart <code>Sigma | b</code> step and defaults to the weakest
+one (<code>prior_df = n_coefs + 1</code>).</p>
 </div>
 <div id="priors-on-fixed-effects" class="section level2">
 <h2>Priors on fixed effects</h2>
@@ -939,16 +952,16 @@ range.</p>
 <div id="see-also" class="section level2">
 <h2>See also</h2>
 <ul>
-<li><code>?tulpa_priors</code>, <code>?prior_normal</code>,
+<li><p><code>?tulpa_priors</code>, <code>?prior_normal</code>,
 <code>?prior_pc</code> and the other <code>prior_*</code> constructor
-pages.</li>
-<li><code>?prior_predict</code> and <code>?tulpa_family</code> for prior
-predictive simulation.</li>
-<li>The getting-started vignette for fitting, prediction, and model
-comparison.</li>
-<li>Simpson, D., Rue, H., Riebler, A., Martins, T. G., &amp; Sorbye, S.
-H. (2017). Penalising model component complexity. <em>Statistical
-Science</em>, 32(1), 1-28.</li>
+pages.</p></li>
+<li><p><code>?prior_predict</code> and <code>?tulpa_family</code> for
+prior predictive simulation.</p></li>
+<li><p>The getting-started vignette for fitting, prediction, and model
+comparison.</p></li>
+<li><p>Simpson, D., Rue, H., Riebler, A., Martins, T. G., &amp; Sorbye,
+S. H. (2017). Penalising model component complexity. <em>Statistical
+Science</em>, 32(1), 1-28.</p></li>
 </ul>
 </div>
 

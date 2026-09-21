@@ -392,12 +392,14 @@ spatial units.</p>
 <span id="cb2-9"><a href="#cb2-9" tabindex="-1"></a>  lin <span class="ot">&lt;-</span> <span class="fl">0.2</span> <span class="sc">+</span> <span class="fl">0.5</span> <span class="sc">*</span> x <span class="sc">+</span> <span class="fl">0.8</span> <span class="sc">*</span> field[si]</span>
 <span id="cb2-10"><a href="#cb2-10" tabindex="-1"></a>  y   <span class="ot">&lt;-</span> <span class="cf">if</span> (fam <span class="sc">==</span> <span class="st">&quot;binomial&quot;</span>) <span class="fu">rbinom</span>(m, <span class="dv">1</span><span class="dt">L</span>, <span class="fu">plogis</span>(lin)) <span class="cf">else</span> lin <span class="sc">+</span> <span class="fu">rnorm</span>(m, <span class="dv">0</span>, <span class="fl">0.5</span>)</span>
 <span id="cb2-11"><a href="#cb2-11" tabindex="-1"></a>  <span class="fu">list</span>(<span class="at">y =</span> <span class="fu">as.numeric</span>(y), <span class="at">n_trials =</span> <span class="fu">rep</span>(<span class="dv">1</span><span class="dt">L</span>, m), <span class="at">X =</span> <span class="fu">cbind</span>(<span class="dv">1</span>, x),</span>
-<span id="cb2-12"><a href="#cb2-12" tabindex="-1"></a>       <span class="at">spatial_idx =</span> si, <span class="at">family =</span> fam, <span class="at">phi =</span> <span class="cf">if</span> (fam <span class="sc">==</span> <span class="st">&quot;gaussian&quot;</span>) <span class="fl">0.5</span> <span class="cf">else</span> <span class="dv">1</span>)</span>
-<span id="cb2-13"><a href="#cb2-13" tabindex="-1"></a>}</span>
-<span id="cb2-14"><a href="#cb2-14" tabindex="-1"></a></span>
-<span id="cb2-15"><a href="#cb2-15" tabindex="-1"></a>prior <span class="ot">&lt;-</span> <span class="fu">list</span>(<span class="at">type =</span> <span class="st">&quot;icar&quot;</span>, <span class="at">n_spatial_units =</span> S,</span>
-<span id="cb2-16"><a href="#cb2-16" tabindex="-1"></a>              <span class="at">adj_row_ptr =</span> <span class="fu">c</span>(<span class="dv">0</span><span class="dt">L</span>, <span class="fu">cumsum</span>(nn)), <span class="at">adj_col_idx =</span> <span class="fu">unlist</span>(nb) <span class="sc">-</span> <span class="dv">1</span><span class="dt">L</span>,</span>
-<span id="cb2-17"><a href="#cb2-17" tabindex="-1"></a>              <span class="at">n_neighbors =</span> nn, <span class="at">sigma_grid =</span> <span class="fu">seq</span>(<span class="fl">0.2</span>, <span class="fl">1.6</span>, <span class="at">length.out =</span> <span class="dv">7</span>))</span></code></pre></div>
+<span id="cb2-12"><a href="#cb2-12" tabindex="-1"></a>       <span class="at">spatial_idx =</span> si, <span class="at">family =</span> fam,</span>
+<span id="cb2-13"><a href="#cb2-13" tabindex="-1"></a>       <span class="co"># residual VARIANCE; the gaussian arm is simulated at residual SD 0.5</span></span>
+<span id="cb2-14"><a href="#cb2-14" tabindex="-1"></a>       <span class="at">phi =</span> <span class="cf">if</span> (fam <span class="sc">==</span> <span class="st">&quot;gaussian&quot;</span>) <span class="fl">0.5</span><span class="sc">^</span><span class="dv">2</span> <span class="cf">else</span> <span class="dv">1</span>)</span>
+<span id="cb2-15"><a href="#cb2-15" tabindex="-1"></a>}</span>
+<span id="cb2-16"><a href="#cb2-16" tabindex="-1"></a></span>
+<span id="cb2-17"><a href="#cb2-17" tabindex="-1"></a>prior <span class="ot">&lt;-</span> <span class="fu">list</span>(<span class="at">type =</span> <span class="st">&quot;icar&quot;</span>, <span class="at">n_spatial_units =</span> S,</span>
+<span id="cb2-18"><a href="#cb2-18" tabindex="-1"></a>              <span class="at">adj_row_ptr =</span> <span class="fu">c</span>(<span class="dv">0</span><span class="dt">L</span>, <span class="fu">cumsum</span>(nn)), <span class="at">adj_col_idx =</span> <span class="fu">unlist</span>(nb) <span class="sc">-</span> <span class="dv">1</span><span class="dt">L</span>,</span>
+<span id="cb2-19"><a href="#cb2-19" tabindex="-1"></a>              <span class="at">n_neighbors =</span> nn, <span class="at">sigma_grid =</span> <span class="fu">seq</span>(<span class="fl">0.2</span>, <span class="fl">1.6</span>, <span class="at">length.out =</span> <span class="dv">7</span>))</span></code></pre></div>
 <p>Fit the two arms together. The diagnostic runs by default, so the
 k-hat comes back on the fitted object with no extra request.</p>
 <div class="sourceCode" id="cb3"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb3-1"><a href="#cb3-1" tabindex="-1"></a>resp <span class="ot">&lt;-</span> <span class="fu">list</span>(<span class="at">occ =</span> <span class="fu">mk_arm</span>(<span class="dv">200</span><span class="dt">L</span>, <span class="st">&quot;binomial&quot;</span>),</span>
@@ -679,14 +681,18 @@ layout carried on <code>fit$arm_layout</code>);
 <li><code>tulpa_psis()</code> is the native Pareto-smoothed
 importance-sampling core the diagnostic is built on, callable directly
 on a vector of log importance ratios.</li>
-<li><code>mcmc_diagnostics()</code> is the chain-fit counterpart, the
-Rhat and ESS surface for sampled fits.</li>
-<li><code>?laplace_diagnostics</code> documents <code>gamma_3</code> and
-the combined whole-fit verdict <code>diagnostics()</code> reports when a
-fit carries posterior draws.</li>
+<li><code>diagnostics()</code> routes a chain fit to the Rhat and ESS
+surface for sampled fits, and an i.i.d. approximation fit to this
+reliability table; see its “Approximation reliability” sections for
+<code>gamma_3</code> and the combined whole-fit verdict.</li>
 <li>The inference-modes vignette runs the reliability ladder from a
 Laplace fit through an exact debias, and shows the k-hat on a
-random-effect covariance fit. ```</li>
+random-effect covariance fit.</li>
+<li><code>vignette(&quot;sbc&quot;)</code> is the instrument this one screens for.
+Everything above scores ONE fit; <code>sbc()</code> scores whether the
+backend’s posteriors are calibrated across the generative model, and the
+two verdicts have been measured to disagree in both directions, so a
+clean band here is a screen rather than a calibration result. ```</li>
 </ul>
 </div>
 

@@ -29,7 +29,8 @@
 //
 // CYCLIC RW2 is NOT affected: a linear ramp is not periodic, so rw2_rank
 // reports T - 1 there and the kernel is the constants alone. Nothing is added
-// for it.
+// for it. Nor is AR1: its precision is full rank, so null(Q_s (x) Q_t) is
+// null(Q_s) (x) R^T, already spanned by the column sums.
 #ifndef TULPA_ST_NULL_SPACE_H
 #define TULPA_ST_NULL_SPACE_H
 
@@ -41,11 +42,50 @@ namespace tulpa_st {
 using tulpa::STType;
 using tulpa::TemporalType;
 
+// Does the interaction's density read a temporal margin Q_t at all? Type II
+// applies Q_t within each spatial unit, Type IV carries it as a Kronecker
+// margin, and the HSGP-ST interaction applies it per spectral basis function.
+// Type I is iid over the whole grid and Type III's time margin is unstructured,
+// so neither reads SpatiotemporalData::temporal_type, and a correlation for it
+// would be a parameter nothing scores.
+inline bool st_reads_time_margin(STType type, bool is_hsgp) {
+    return is_hsgp || type == STType::TYPE_II || type == STType::TYPE_IV;
+}
+
+// Is the interaction sampled on the non-centered scale z = delta sqrt(tau)?
+// The transform and its tau-free prior are the Kronecker Type IV form. The
+// HSGP-ST interaction's coordinates are basis weights at a per-basis precision
+// tau / S_j(sigma2, lengthscale), a different operator with no such map, so
+// compute_param_layout refuses the flag there and this reads false for it.
+inline bool st_non_centered(STType type, int parameterization, bool is_hsgp) {
+    return parameterization == 1 && type == STType::TYPE_IV && !is_hsgp;
+}
+
+// The temporal margins the interaction density defines: the intrinsic RW1 and
+// RW2 precisions and the stationary AR1 one.
+inline bool st_time_margin_supported(TemporalType temporal) {
+    return temporal == TemporalType::RW1 || temporal == TemporalType::RW2 ||
+           temporal == TemporalType::AR1;
+}
+
+// Does the TEMPORAL marginal alone carry a null direction the field's own sum
+// does not pin? Non-cyclic RW2 only: its kernel is {1_T, v}, and a penalty on
+// the sum reaches the constant alone. This is the whole of the RW2 fact; where
+// it applies is the two questions below.
+inline bool temporal_has_trend_null(TemporalType temporal, bool cyclic) {
+    return temporal == TemporalType::RW2 && !cyclic;
+}
+
 // Does this interaction's kernel reach past what the row and column sums pin?
 inline bool st_needs_trend_pin(STType type, TemporalType temporal, bool cyclic) {
-    if (temporal != TemporalType::RW2 || cyclic) return false;
+    if (!temporal_has_trend_null(temporal, cyclic)) return false;
     return type == STType::TYPE_IV || type == STType::TYPE_II;
 }
+
+// The HSGP-ST interaction is M INDEPENDENT temporal fields, one per spectral
+// basis function, each with its own sum pinned. There is no Kronecker margin
+// to spread the ramp across, so the answer is the temporal fact by itself --
+// the STType does not enter (gcol33/tulpa#697).
 
 // The ramp direction over T time points, centred so it is orthogonal to the
 // constant the row sums already pin.

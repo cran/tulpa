@@ -112,6 +112,9 @@ tulpa_nuts_spde <- function(y, X, spatial,
                              c("auto", "diag", "dense", "block_diag"))
   n_iter        <- as.integer(control$n_iter %||% 2000L)
   n_warmup      <- as.integer(control$n_warmup %||% 1000L)
+  if (n_iter < 2L || n_warmup < 0L || n_warmup >= n_iter) {
+    stop("Need 0 <= n_warmup < n_iter and n_iter >= 2.", call. = FALSE)
+  }
   max_treedepth <- as.integer(control$max_treedepth %||% 10L)
   adapt_delta   <- control$adapt_delta %||% 0.8
   seed          <- control$seed
@@ -332,6 +335,9 @@ tulpa_nuts_spde <- function(y, X, spatial,
     mass_matrix       = mass_matrix
   )
 
+  p <- ncol(X)
+  res <- .nuts_name_fixed_effects(res, colnames(X), p)
+
   res$range   <- range
   res$sigma   <- sigma
   res$spatial <- spatial
@@ -394,5 +400,12 @@ tulpa_nuts_spde <- function(y, X, spatial,
     )
   }
 
-  res
+  .finalize_fit(res, backend = "hmc_spde_nuts", draws_kind = "chain",
+               n_fixed = p, fixed_names = colnames(res$draws)[seq_len(p)],
+               param_names = colnames(res$draws),
+               data = list(y = y, n_trials = n_trials, model_matrix = X,
+                          family = family,
+                          phi = if (!is.null(res$phi_summary)) {
+                            unname(res$phi_summary["mean"])
+                          } else NULL))
 }

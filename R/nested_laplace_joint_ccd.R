@@ -49,15 +49,227 @@
     if (.k_is_decline(tags)) NULL else tags
 }
 
-# Central-difference value / gradient / Hessian of an objective `eval1` (a
-# closure mapping an [S x d] u-space matrix to a length-S vector of values) at
-# point u. The centre, the 2d axial points (+/- h e_j) and the 4 * C(d, 2)
-# mixed corners are evaluated in ONE `eval1` call, so every inner solve in a
-# round fans out across the outer-grid threads.
-#   g_i  = (f(+e_i) - f(-e_i)) / (2 h_i)
-#   H_ii = (f(+e_i) - 2 f(0) + f(-e_i)) / h_i^2
-#   H_ij = (f(+i+j) - f(+i-j) - f(-i+j) + f(-i-j)) / (4 h_i h_j)
-.joint_ccd_fd_stencil <- function(u, eval1, h) {
+# --- placement cost: the budget, the running meter, the heartbeat ------------
+#
+# Placing a design is not free: every probe the mode-find issues is one full
+# inner Newton solve of the joint model, the same solve the outer grid pays for
+# once per cell. The round caps bound how many rounds a placement takes and know
+# nothing about what a round costs, so this section states the cost in inner
+# solves, projects it before any is paid, meters it while it is being paid, and
+# reports it afterwards. The numbers behind the projection live in
+# `.CCD_PLACEMENT` (R/settings.R).
+
+# Points one full finite-difference stencil evaluates at `d` axes: the centre,
+# the 2d axials and the 4 * C(d, 2) mixed corners.
+.ccd_stencil_evals <- function(d) 1 + 2 * d + 4 * choose(d, 2)
+
+# Points one mode-find round evaluates: the stencil plus the batched line search
+# over `max_halve + 1` candidates.
+.ccd_round_evals <- function(d, cfg) {
+    .ccd_stencil_evals(d) + cfg$max_halve + 1
+}
+
+# The cheapest placement over `d` free axes that can still produce a design: the
+# mode-find's opening centre evaluation, one round, and the closing stencil that
+# supplies the design's curvature. A budget below this cannot buy a design at
+# all, which is what the up-front decline tests.
+.ccd_min_evals <- function(d, cfg) {
+    if (d < 1L) return(0)
+    1 + 2 * .ccd_stencil_evals(d) + (cfg$max_halve + 1)
+}
+
+# The designed first attempt: grid-median seed, fixed step, `first_rounds`
+# rounds, closing stencil. Its cost is set by `d` alone and does not grow with
+# the grid.
+.ccd_first_evals <- function(d, cfg) {
+    if (d < 1L) return(0)
+    1 + cfg$first_rounds * .ccd_round_evals(d, cfg) + .ccd_stencil_evals(d)
+}
+
+# The escalation the first attempt falls through to: the joint-grid seed, the
+# step calibration, and the full-budget rescue mode-find. `n_seed` is what the
+# seed pass will evaluate (below).
+.ccd_rescue_evals <- function(d, n_seed, cfg) {
+    if (d < 1L) return(0)
+    n_seed + cfg$calibrate_rounds * .ccd_stencil_evals(d) +
+        1 + cfg$max_rounds * .ccd_round_evals(d, cfg) + .ccd_stencil_evals(d)
+}
+
+# What the seed pass will evaluate for a component whose free axes carry the
+# level counts `n_levels`: the joint Cartesian grid when it fits under the cap,
+# otherwise the coordinate-ascent sweep, which visits each axis carrying at
+# least two levels.
+.ccd_seed_evals <- function(n_levels, cfg) {
+    if (length(n_levels) == 0L) return(0)
+    n_pts <- prod(as.numeric(n_levels))
+    if (n_pts >= 2 && n_pts <= cfg$seed_max_pts) return(n_pts)
+    sum(as.numeric(n_levels[n_levels >= 2L]))
+}
+
+# Nodes the design itself will carry over `d` free axes, read off the design
+# builder rather than restated, so the two cannot drift. A component with no
+# free axis is the single cell at the origin of the copy coordinates.
+.ccd_design_nodes <- function(d) {
+    if (d < 1L) return(1)
+    as.numeric(ccd_grid(d)$n_points)
+}
+
+# The placement ceiling, in inner solves. `n_tensor` is the latent tensor grid
+# the design replaces and `n_nodes` the design that replaces it, so at
+# `evals_per_cell = 1` a placement plus its design costs no more than the
+# integration it avoids. The floor exempts the designed first attempt, whose
+# cost is a function of the axis count and not of the grid: without it a small
+# tensor grid declines every placement on arithmetic that was meant to bound the
+# escalation.
+.ccd_budget <- function(n_tensor, n_nodes, free_counts, cfg) {
+    if (!is.finite(cfg$evals_per_cell)) return(Inf)
+    cap <- ceiling(cfg$evals_per_cell * max(n_tensor - n_nodes, 0))
+    flr <- if (isTRUE(cfg$budget_floor))
+        sum(vapply(free_counts, .ccd_first_evals, numeric(1), cfg = cfg)) else 0
+    max(cap, flr)
+}
+
+# Wall-clock seconds, for the heartbeat's elapsed / per-eval fields. The outer
+# grid runs its cells across threads, so wall clock is the quantity a user
+# projects a phase from.
+.ccd_now <- function() as.numeric(Sys.time())
+
+# Human-readable duration, mirroring `tulpa_progress::format_secs()` in
+# inst/include/tulpa/nested_progress.h so a mode-find line and a grid line read
+# the same. ASCII only (logs, redirects).
+.ccd_format_secs <- function(s) {
+    if (!is.finite(s) || s < 0) return("?")
+    if (s < 90)   return(sprintf("%.0fs", s))
+    if (s < 5400) return(sprintf("%.1fmin", s / 60))
+    sprintf("%.1fh", s / 3600)
+}
+
+# The heartbeat's gate is the fit's own progress record, the same
+# `tulpa.nl_progress` the outer-grid reporter reads and the joint front door
+# sets once per fit, so the placement phase and the grid loop are on one switch.
+# Absent (a direct call outside a fit) is silent.
+.ccd_progress_opts <- function() {
+    p <- getOption("tulpa.nl_progress", NULL)
+    if (!is.list(p)) return(list(on = FALSE, file = ""))
+    list(on   = isTRUE(p$progress),
+         file = as.character(p$progress_file %||% ""))
+}
+
+# The placement knobs this fit runs under: the registry defaults, overridden
+# where the caller set a `control` key. `.joint_ccd_grid()` is reached through
+# the multi-block dispatch rather than from the front door's own frame, so the
+# resolved record travels on a scoped option, exactly as progress, the
+# checkpoint and the screening depth do.
+.ccd_placement_args <- function(control) {
+    cfg <- as.list(.CCD_PLACEMENT)
+    if (!is.null(control$ccd_budget)) {
+        v <- suppressWarnings(as.numeric(control$ccd_budget))
+        if (length(v) != 1L || is.na(v) || v < 0) {
+            stop("`control$ccd_budget` must be a single non-negative number ",
+                 "(a multiple of the tensor grid the design replaces), or Inf ",
+                 "to place without a ceiling.", call. = FALSE)
+        }
+        cfg$evals_per_cell <- v
+    }
+    if (!is.null(control$ccd_budget_floor)) {
+        cfg$budget_floor <- isTRUE(control$ccd_budget_floor)
+    }
+    cfg
+}
+
+.ccd_placement_cfg <- function() {
+    o <- getOption("tulpa.ccd_placement", NULL)
+    if (is.list(o)) return(o)
+    as.list(.CCD_PLACEMENT)
+}
+
+# The running meter: one per `.joint_ccd_grid()` call, shared by every mixture
+# component, so the ceiling bounds the whole placement rather than each design
+# separately. It is also the heartbeat's state (elapsed, rounds, spend).
+.ccd_meter_new <- function(budget, progress = .ccd_progress_opts()) {
+    e <- new.env(parent = emptyenv())
+    e$evals    <- 0
+    e$rounds   <- 0L
+    e$budget   <- budget
+    e$t0       <- .ccd_now()
+    e$progress <- progress
+    e
+}
+
+# Charge a batched evaluation BEFORE it is issued, so a batch that would cross
+# the ceiling is never paid for. Crossing signals `tulpa_ccd_budget`, which
+# unwinds to `.joint_ccd_grid()`: it declines to the tensor grid with the spend
+# recorded, and the only state the abort leaves behind is an advanced inner warm
+# start, which the tensor path does not read.
+.ccd_meter_spend <- function(meter, n) {
+    if (is.null(meter)) return(invisible(NULL))
+    if (is.finite(meter$budget) && meter$evals + n > meter$budget) {
+        stop(structure(
+            class = c("tulpa_ccd_budget", "error", "condition"),
+            list(message = sprintf(
+                     paste0("CCD placement budget exhausted: %.0f inner solves ",
+                            "spent, %.0f more requested, ceiling %.0f."),
+                     meter$evals, n, meter$budget),
+                 call = NULL)))
+    }
+    meter$evals <- meter$evals + n
+    invisible(NULL)
+}
+
+# One completed mode-find round, across every component of the placement.
+.ccd_meter_round <- function(meter) {
+    if (!is.null(meter)) meter$rounds <- meter$rounds + 1L
+    invisible(NULL)
+}
+
+# Re-raise a placement-budget signal from inside a `tryCatch(error =)` that
+# exists to absorb a failed stencil. A budget stop is not a numerical failure to
+# absorb: it has to unwind to `.joint_ccd_grid()` so the fit declines under its
+# own reason instead of being reported as a mode-find failure, and so the loop
+# it aborted does not go on to issue further probes.
+.ccd_rethrow_budget <- function(e) {
+    if (inherits(e, "tulpa_ccd_budget")) stop(e)
+    NULL
+}
+
+# One heartbeat line. The console channel is cat() + flush.console(), which is
+# what the outer-grid reporter's console line uses, so a placement line and a
+# grid line read the same and neither arrives as a condition a caller has to
+# handle. When a heartbeat file is configured it is overwritten with that
+# reporter's own four-number wire format ("<done> <total> <elapsed_s> <eta_s>"),
+# so a detached reader parsing the file sees liveness through the placement
+# phase instead of an empty file until the grid loop starts.
+.ccd_meter_beat <- function(meter, phase, detail = "") {
+    if (is.null(meter) || !isTRUE(meter$progress$on)) return(invisible(NULL))
+    elapsed <- .ccd_now() - meter$t0
+    per     <- if (meter$evals > 0) elapsed / meter$evals else 0
+    spent   <- if (is.finite(meter$budget))
+        sprintf("%.0f/%.0f evals", meter$evals, meter$budget) else
+        sprintf("%.0f evals", meter$evals)
+    line <- sprintf("[ccd mode-find] %s | %s%s | elapsed %s | %s/eval",
+                    phase, spent,
+                    if (nzchar(detail)) paste0(" | ", detail) else "",
+                    .ccd_format_secs(elapsed), .ccd_format_secs(per))
+    cat(line, "\n", sep = "")
+    utils::flush.console()
+    f <- meter$progress$file
+    if (length(f) == 1L && nzchar(f)) {
+        total <- if (is.finite(meter$budget)) meter$budget else 0
+        eta   <- if (is.finite(meter$budget) && meter$evals > 0)
+            max(0, meter$budget - meter$evals) * per else 0
+        tryCatch(
+            cat(sprintf("%.0f %.0f %.1f %.1f\n", meter$evals, total,
+                        elapsed, eta), file = f),
+            error = function(e) NULL, warning = function(w) NULL)
+    }
+    invisible(NULL)
+}
+
+# The axial half of a stencil: the centre and the 2d points at +/- h_j e_j, with
+# the keys the derivative readers index them by. Shared by the full stencil and
+# by the step calibration, so the point layout and the key convention have one
+# definition.
+.ccd_axial_rows <- function(u, h) {
     d <- length(u)
     rows <- list(u)                    # 1: centre
     key  <- c("0")
@@ -66,7 +278,16 @@
         dn <- u; dn[j] <- u[j] - h[j]; rows[[length(rows) + 1L]] <- dn
         key <- c(key, paste0("+", j), paste0("-", j))
     }
-    if (d >= 2L) for (i in seq_len(d - 1L)) for (j in (i + 1L):d) {  # corners
+    list(rows = rows, key = key)
+}
+
+# The mixed corners: the 4 * C(d, 2) points at (+/- h_i e_i) + (+/- h_j e_j),
+# which carry the off-diagonal second differences.
+.ccd_corner_rows <- function(u, h) {
+    d <- length(u)
+    rows <- list()
+    key  <- character(0)
+    if (d >= 2L) for (i in seq_len(d - 1L)) for (j in (i + 1L):d) {
         for (si in c(1, -1)) for (sj in c(1, -1)) {
             v <- u; v[i] <- u[i] + si * h[i]; v[j] <- u[j] + sj * h[j]
             rows[[length(rows) + 1L]] <- v
@@ -74,24 +295,47 @@
                                  if (sj > 0) "+" else "-", j))
         }
     }
-    U <- do.call(rbind, rows)
-    f <- eval1(U)
-    names(f) <- key
-    f0 <- f["0"]
-    g <- numeric(d)
-    H <- matrix(0, d, d)
+    list(rows = rows, key = key)
+}
+
+# Value, gradient and diagonal curvature from an axial-keyed value vector.
+#   g_i  = (f(+e_i) - f(-e_i)) / (2 h_i)
+#   H_ii = (f(+e_i) - 2 f(0) + f(-e_i)) / h_i^2
+.ccd_axial_derivs <- function(f, h, d) {
+    f0 <- f[["0"]]
+    g  <- numeric(d)
+    hd <- numeric(d)
     for (j in seq_len(d)) {
-        g[j]    <- (f[paste0("+", j)] - f[paste0("-", j)]) / (2 * h[j])
-        H[j, j] <- (f[paste0("+", j)] - 2 * f0 + f[paste0("-", j)]) / (h[j]^2)
+        g[j]  <- (f[[paste0("+", j)]] - f[[paste0("-", j)]]) / (2 * h[j])
+        hd[j] <- (f[[paste0("+", j)]] - 2 * f0 + f[[paste0("-", j)]]) / (h[j]^2)
     }
+    list(f0 = f0, grad = g, hdiag = hd)
+}
+
+# Central-difference value / gradient / Hessian of an objective `eval1` (a
+# closure mapping an [S x d] u-space matrix to a length-S vector of values) at
+# point u. The centre, the 2d axial points (+/- h e_j) and the 4 * C(d, 2)
+# mixed corners are evaluated in ONE `eval1` call, so every inner solve in a
+# round fans out across the outer-grid threads.
+#   H_ij = (f(+i+j) - f(+i-j) - f(-i+j) + f(-i-j)) / (4 h_i h_j)
+.joint_ccd_fd_stencil <- function(u, eval1, h) {
+    d  <- length(u)
+    ax <- .ccd_axial_rows(u, h)
+    co <- .ccd_corner_rows(u, h)
+    U <- do.call(rbind, c(ax$rows, co$rows))
+    f <- eval1(U)
+    names(f) <- c(ax$key, co$key)
+    der <- .ccd_axial_derivs(f, h, d)
+    H <- matrix(0, d, d)
+    diag(H) <- der$hdiag
     if (d >= 2L) for (i in seq_len(d - 1L)) for (j in (i + 1L):d) {
-        hij <- (f[paste0("+", i, "+", j)] - f[paste0("+", i, "-", j)] -
-                f[paste0("-", i, "+", j)] + f[paste0("-", i, "-", j)]) /
+        hij <- (f[[paste0("+", i, "+", j)]] - f[[paste0("+", i, "-", j)]] -
+                f[[paste0("-", i, "+", j)]] + f[[paste0("-", i, "-", j)]]) /
                (4 * h[i] * h[j])
         H[i, j] <- hij
         H[j, i] <- hij
     }
-    list(f0 = as.numeric(f0), grad = g, hess = H)
+    list(f0 = as.numeric(der$f0), grad = der$grad, hess = H)
 }
 
 # Per-axis finite-difference step calibrated to each axis's local curvature, so
@@ -104,12 +348,16 @@
 # sits below the noise floor), settling in a few rounds. Returns the per-axis
 # step. `span` is the per-axis box width (the supplied grid's u-range).
 .joint_ccd_calibrate_step <- function(u, eval1, span, h0 = 0.1,
-                                      h_min = 1e-3, rounds = 4L) {
+                                      h_min = 1e-3,
+                                      rounds = .ccd_placement("calibrate_rounds"),
+                                      meter = NULL) {
     d     <- length(u)
     h_max <- pmin(0.6, pmax(0.5 * span, h0))
     h     <- rep(h0, d)
     for (it in seq_len(rounds)) {
-        st <- tryCatch(.joint_ccd_fd_stencil(u, eval1, h), error = function(e) NULL)
+        st <- tryCatch(.joint_ccd_fd_stencil(u, eval1, h),
+                       error = .ccd_rethrow_budget)
+        .ccd_meter_beat(meter, sprintf("step calibration %d/%d", it, as.integer(rounds)))
         if (is.null(st) || any(!is.finite(diag(st$hess)))) break
         dH    <- diag(st$hess)
         neg   <- dH < -1e-8
@@ -133,7 +381,8 @@
 # so a jump is taken only when the axis's log-posterior range exceeds `min_gain`.
 # `u_vals` is the per-axis grid in u-space; `eval1` maps a [S x d] u-matrix to
 # log-posterior values.
-.joint_ccd_pilot_seed <- function(u0, u_vals, eval1, min_gain = 1) {
+.joint_ccd_pilot_seed <- function(u0, u_vals, eval1, min_gain = 1,
+                                  meter = NULL) {
     u <- u0
     for (j in seq_along(u)) {
         gv <- u_vals[[j]]
@@ -144,6 +393,8 @@
         fin <- is.finite(lp)
         if (any(fin) && (max(lp[fin]) - min(lp[fin]) > min_gain))
             u[j] <- gv[which.max(lp)]
+        .ccd_meter_beat(meter, sprintf("coordinate seed, axis %d/%d",
+                                       j, length(u)))
     }
     u
 }
@@ -155,14 +406,19 @@
 # rounds rather than crawling. Capped at `max_pts` so it never rebuilds the dense
 # tensor CCD exists to avoid; above the cap (or on an all-failed eval) it falls
 # back to the coordinate-ascent sweep.
-.joint_ccd_grid_seed <- function(u0, u_vals, eval1, max_pts = 256L) {
+.joint_ccd_grid_seed <- function(u0, u_vals, eval1,
+                                 max_pts = .ccd_placement("seed_max_pts"),
+                                 meter = NULL) {
     n_pts <- prod(vapply(u_vals, length, integer(1)))
     if (n_pts < 2L || n_pts > max_pts)
-        return(.joint_ccd_pilot_seed(u0, u_vals, eval1))
+        return(.joint_ccd_pilot_seed(u0, u_vals, eval1, meter = meter))
+    .ccd_meter_beat(meter, sprintf("grid seed (%d points)", as.integer(n_pts)))
     grid <- as.matrix(expand.grid(u_vals))
     dimnames(grid) <- NULL
     lp <- eval1(grid)
-    if (!any(is.finite(lp))) return(.joint_ccd_pilot_seed(u0, u_vals, eval1))
+    if (!any(is.finite(lp)))
+        return(.joint_ccd_pilot_seed(u0, u_vals, eval1, meter = meter))
+    .ccd_meter_beat(meter, "grid seed done")
     as.numeric(grid[which.max(lp), ])
 }
 
@@ -234,13 +490,17 @@
 # Returns list(par, hess, value, converged, status) with status in
 # {"ok", "ridge", "fail"}; only "ok" yields a usable CCD scale.
 .joint_ccd_modefind <- function(u0, eval1, lower, upper, h,
-                                max_rounds = 30L, tol = 1e-3,
-                                max_halve = 6L, trust = NULL,
-                                on_accept = NULL) {
+                                max_rounds = .ccd_placement("max_rounds"),
+                                tol = 1e-3,
+                                max_halve = .ccd_placement("max_halve"),
+                                trust = NULL,
+                                on_accept = NULL, meter = NULL) {
     d <- length(u0)
     if (is.null(trust)) trust <- rep(Inf, d)
-    fail <- function(u, H, f) list(par = u, hess = H, value = f,
-                                   converged = FALSE, status = "fail")
+    fail <- function(u, H, f) {
+        .ccd_meter_beat(meter, "declined", "mode-find failed")
+        list(par = u, hess = H, value = f, converged = FALSE, status = "fail")
+    }
     u   <- pmin(pmax(u0, lower), upper)
     f0e <- eval1(matrix(u, nrow = 1L))
     f_u <- as.numeric(f0e)
@@ -253,14 +513,16 @@
     converged <- FALSE
     for (iter in seq_len(max_rounds)) {
         st <- tryCatch(.joint_ccd_fd_stencil(u, eval1, h),
-                       error = function(e) NULL)
-        if (is.null(st) || any(!is.finite(st$grad)) || any(!is.finite(st$hess)))
-            return(fail(u, H, f_u))
+                       error = .ccd_rethrow_budget)
+        if (is.null(st) || any(!is.finite(st$grad)) ||
+            any(!is.finite(st$hess))) return(fail(u, H, f_u))
         H <- st$hess
         # Fast decline on a ridge / flat curvature: the centre Hessian already
         # tells us the Gaussian CCD scale is ill-defined, so bail BEFORE the
         # expensive backtracking line search.
         if (iter == 1L && !.joint_ccd_outer_hess_ok(H)) {
+            .ccd_meter_beat(meter, "declined",
+                            "outer curvature flat / ridged")
             return(list(par = u, hess = H, value = f_u,
                         converged = FALSE, status = "ridge"))
         }
@@ -294,12 +556,21 @@
         delta <- max(abs(u_try - u))
         u <- u_try; f_u <- f_try
         if (!is.null(on_accept) && !is.null(mode_try)) on_accept(mode_try)
-        if (delta < tol) { converged <- TRUE; break }
+        .ccd_meter_round(meter)
+        .ccd_meter_beat(meter, sprintf("round %d/%d", iter, as.integer(max_rounds)),
+                        sprintf("|step| %.3g | logpost %.7g", delta, f_u))
+        if (delta < tol) {
+            converged <- TRUE
+            break
+        }
     }
-    # Clean Hessian at the final point for the CCD scale.
+    # Clean Hessian at the final point for the CCD scale. Always the full
+    # stencil: this is the curvature the design is oriented by.
     st_fin <- tryCatch(.joint_ccd_fd_stencil(u, eval1, h),
-                       error = function(e) NULL)
+                       error = .ccd_rethrow_budget)
     if (!is.null(st_fin) && all(is.finite(st_fin$hess))) H <- st_fin$hess
+    .ccd_meter_beat(meter, "mode-find done",
+                    sprintf("logpost %.7g", f_u))
     list(par = u, hess = H, value = f_u, converged = converged, status = "ok")
 }
 
@@ -321,26 +592,76 @@
 #   "modefind_failed"     the mode-find did not converge.
 #   "hessian_singular"    the outer Hessian would not invert.
 #   "hessian_not_pd"      its inverse has no Cholesky factor.
+#   "copy_atom_components" more copy atoms than the component cap: the mixture
+#                         below expands into 2^n designs, and past the cap the
+#                         tensor rule is the cheaper one.
+#   "copy_atom_mass"      the declared atom mass is not a probability.
+#   "placement_budget"    placing the design costs more inner solves than
+#                         integrating the tensor grid it replaces. The only
+#                         reason here about whether a definable design is WORTH
+#                         placing rather than whether one exists: it fires
+#                         up-front when even the cheapest placement cannot fit
+#                         the ceiling, and mid-placement when the running spend
+#                         reaches it.
 .CCD_DECLINE_REASONS <- c("axis_count", "unguessable_axis", "degenerate_axis",
                           "modefind_ridge", "modefind_boundary",
                           "modefind_degenerate", "modefind_failed",
-                          "hessian_singular", "hessian_not_pd")
+                          "hessian_singular", "hessian_not_pd",
+                          "copy_atom_components", "copy_atom_mass",
+                          "placement_budget")
 
-# Build the CCD node grid for the joint multi-block path. `eval_logpost` maps a
-# user-facing [S x d] theta matrix (columns = `axis_names`) to a length-S
-# log-posterior vector (inner log-marginal + baked hyperprior). `axis_values`
-# is a length-d list of the per-axis grid values the user supplied (used to set
-# the mode-find box and the initial point). Returns
-#   list(grid, dnode, u_hat, L_scale, tags)
-# with `grid` the [n_node x d] physical node matrix (colnames = axis_names) and
-# `dnode` the corrected CCD design weights, or `list(declined = <reason>)` to
-# fall back to the tensor grid. A caller tests `is.null(x$grid)`.
-.joint_ccd_grid <- function(axis_names, axis_offsets, prepared, axis_values,
-                            eval_logpost, verbose = FALSE, set_warm = NULL) {
-    d <- length(axis_names)
+# The coordinate each CCD axis is DESIGNED on.
+#
+# `.joint_pareto_block_tags()` answers the neighbouring question for the outer
+# Pareto-k proposal, where a copy `alpha` is carried as an unconstrained real:
+# there the nodes already exist and the tag only says how to reweight them. A
+# CCD places nodes instead, so it needs the coordinate the axis's declared
+# measure lives on. `.joint_axis_specs()` declares the copy scale a point mass
+# at 0 plus a log continuum on (0, Inf), so its continuum is designed in
+# log alpha; an affine design on the identity coordinate puts nodes at negative
+# alpha, which is outside the model's support.
+.joint_ccd_coord_tags <- function(axis_names, tags) {
+    tags[sub("^b[0-9]+\\.", "", axis_names) == "alpha"] <- "log"
+    tags
+}
+
+# The copy-scale axes whose supplied levels carry the "no coupling" atom.
+.joint_ccd_atom_axes <- function(axis_names, axis_values) {
+    bare <- sub("^b[0-9]+\\.", "", axis_names)
+    has_zero <- vapply(axis_values,
+                       function(v) any(as.numeric(v) == 0), logical(1))
+    unname(which(bare == "alpha" & has_zero))
+}
+
+# Cap on the mixture components an atom-carrying grid expands into (2^n_atom).
+.JOINT_CCD_MAX_COMPONENTS <- 8L
+
+# One mixture component: a CCD over the `free` axes with the `pinned` copy
+# axes held at alpha = 0. Returns the component's [n_node x d] node matrix in
+# FULL width (pinned columns zero) with its design weights, or
+# `list(declined = <reason>)`.
+.joint_ccd_component <- function(free, pinned, axis_names, tags, axis_values,
+                                 eval_logpost, verbose = FALSE,
+                                 set_warm = NULL, meter = NULL,
+                                 cfg = .ccd_placement_cfg()) {
+    d  <- length(axis_names)
+    dk <- length(free)
     declined <- function(reason) list(declined = reason)
-    tags <- .joint_ccd_axis_tags(axis_names, axis_offsets, prepared)
-    if (is.null(tags)) return(declined("unguessable_axis"))
+
+    # Widen a design over the free axes back to the full axis set. The pinned
+    # copy axes are exactly zero here, which is the "no coupling" node the
+    # tensor rule carries as a level.
+    fill <- function(M_free, n) {
+        M <- matrix(0, n, d, dimnames = list(NULL, axis_names))
+        if (dk > 0L) M[, free] <- M_free
+        M
+    }
+    # Every copy axis switched off: the component is the single cell at the
+    # origin of the copy coordinates, carrying its whole prior mass.
+    if (dk == 0L) {
+        return(list(grid = fill(NULL, 1L), dnode = 1,
+                    u_hat = numeric(0), L_scale = matrix(0, 0L, 0L)))
+    }
 
     # u-space search box, generously wider than the supplied per-axis grid
     # range so the mode-find can reach a posterior mode that sits beyond the
@@ -349,7 +670,7 @@
     # runs to a numerically-infeasible hyperparameter; the box also bounds the
     # mode-find, and a mode pinned to its (wide) edge is treated as a runaway /
     # boundary fit and declined to the tensor grid.
-    u_vals <- lapply(seq_len(d), function(j)
+    u_vals <- lapply(free, function(j)
         .joint_pareto_fwd(tags[j], as.numeric(axis_values[[j]])))
     lower0 <- vapply(u_vals, min, numeric(1))
     upper0 <- vapply(u_vals, max, numeric(1))
@@ -371,13 +692,16 @@
 
     # Map a u-space matrix to physical theta (per-axis inverse transform).
     u_to_theta <- function(U) {
-        M <- matrix(0, nrow(U), ncol(U), dimnames = list(NULL, axis_names))
-        for (j in seq_len(ncol(U))) {
-            M[, j] <- .joint_pareto_inv(tags[j], U[, j])$theta
+        M <- matrix(0, nrow(U), dk)
+        for (j in seq_len(dk)) {
+            M[, j] <- .joint_pareto_inv(tags[free[j]], U[, j])$theta
         }
-        M
+        fill(M, nrow(U))
     }
     eval1 <- function(U) {
+        # Charged before the solves are issued, so a batch that would cross the
+        # placement ceiling is declined rather than paid for.
+        .ccd_meter_spend(meter, nrow(U))
         out <- eval_logpost(u_to_theta(U))
         md  <- attr(out, "modes")
         lp  <- as.numeric(out)
@@ -396,10 +720,11 @@
     # a flat / indefinite curvature -- none of which define a usable Gaussian CCD
     # scale (its nodes would land at extreme hyperparameters where the inner
     # Newton fails).
-    try_modefind <- function(u_start, h_step, max_rounds = 30L) {
+    try_modefind <- function(u_start, h_step, max_rounds = cfg$max_rounds) {
         mf <- .joint_ccd_modefind(u_start, eval1, lower, upper, h_step,
                                   trust = trust, on_accept = on_accept,
-                                  max_rounds = max_rounds)
+                                  max_rounds = max_rounds, meter = meter,
+                                  max_halve = cfg$max_halve)
         if (is.null(mf) || !identical(mf$status, "ok"))
             return(list(reason = if (!is.null(mf) && identical(mf$status, "ridge"))
                                  "ridge" else "fail"))
@@ -426,10 +751,14 @@
     # uses a per-axis step calibrated to the local curvature (a single fixed step
     # cannot resolve a sharp field-SD axis beside a wide / weakly-curved one), then
     # runs the mode-find to convergence from there.
-    got <- try_modefind(u0, rep(0.1, d), max_rounds = 8L)
+    got <- try_modefind(u0, rep(0.1, dk), max_rounds = cfg$first_rounds)
     if (is.null(got$u_hat)) {
-        u_seed <- .joint_ccd_grid_seed(u0, u_vals, eval1)
-        h_cal  <- .joint_ccd_calibrate_step(u_seed, eval1, span)
+        u_seed <- .joint_ccd_grid_seed(u0, u_vals, eval1,
+                                       max_pts = cfg$seed_max_pts,
+                                       meter = meter)
+        h_cal  <- .joint_ccd_calibrate_step(u_seed, eval1, span,
+                                            rounds = cfg$calibrate_rounds,
+                                            meter = meter)
         got    <- try_modefind(u_seed, h_cal)
     }
     if (is.null(got$u_hat)) {
@@ -459,15 +788,178 @@
     # with the matching corrected design weights (single source of truth with
     # the SPDE / RE-cov paths; see ccd_grid.R). Map z -> u_hat + L z, clamp to
     # the box, inverse-transform to physical theta.
-    ccd   <- ccd_grid(d, f_0 = sqrt(d) * 1.1)
+    ccd   <- ccd_grid(dk, f_0 = sqrt(dk) * 1.1)
     dnode <- ccd_weights(ccd)
     u_grid <- ccd_to_theta(ccd$z, u_hat, L_scale)
-    for (j in seq_len(d)) {
+    for (j in seq_len(dk)) {
         u_grid[, j] <- pmin(pmax(u_grid[, j], lower[j]), upper[j])
     }
-    grid <- u_to_theta(u_grid)
-    list(grid = grid, dnode = dnode, u_hat = u_hat, L_scale = L_scale,
-         tags = tags)
+    list(grid = u_to_theta(u_grid), dnode = dnode, u_hat = u_hat,
+         L_scale = L_scale)
+}
+
+# Build the CCD node grid for the joint multi-block path. `eval_logpost` maps a
+# user-facing [S x d] theta matrix (columns = `axis_names`) to a length-S
+# log-posterior vector (inner log-marginal + baked hyperprior). `axis_values`
+# is a length-d list of the per-axis grid values the user supplied (used to set
+# the mode-find box and the initial point). Returns
+#   list(grid, dnode, u_hat, L_scale, tags)
+# with `grid` the [n_node x d] physical node matrix (colnames = axis_names) and
+# `dnode` the corrected CCD design weights, or `list(declined = <reason>)` to
+# fall back to the tensor grid. A caller tests `is.null(x$grid)`. Either shape
+# also carries what the placement COST -- `modefind_evals` / `modefind_budget` /
+# `modefind_rounds` / `modefind_seconds` -- which is what the fit reports as
+# `ccd_modefind_*`, so a decline says how much was paid before it fired.
+#
+# A copy `alpha` carries a point mass at 0 beside its log continuum
+# (`.joint_axis_specs()`), so the outer posterior over a grid with `n_atom` such
+# axes is a MIXTURE of 2^n_atom components -- one per subset of copy couplings
+# switched off. An affine CCD is a single Gaussian and represents one of them,
+# so the design is built per component and the components are combined by the
+# prior mass their configuration declares. Without the split the atom is
+# unreachable: no design node lands exactly at alpha = 0, so "no coupling"
+# carries no posterior weight at all, while the tensor rule integrates it as a
+# level.
+.joint_ccd_grid <- function(axis_names, axis_offsets, prepared, axis_values,
+                            eval_logpost, verbose = FALSE, set_warm = NULL,
+                            atom_mass = .TULPA_COPY_ATOM_MASS,
+                            cfg = .ccd_placement_cfg(),
+                            n_tensor_cells = NULL) {
+    d <- length(axis_names)
+    # The placement meter exists from the moment the design's shape is known;
+    # `finish()` stamps whatever it holds onto every return, so a decline
+    # reports the cost it had already paid rather than leaving the caller to
+    # read it off the absence of a field.
+    meter <- NULL
+    finish <- function(x) {
+        if (is.null(meter)) return(x)
+        x$modefind_evals   <- as.numeric(meter$evals)
+        x$modefind_budget  <- as.numeric(meter$budget)
+        x$modefind_rounds  <- as.integer(meter$rounds)
+        x$modefind_seconds <- .ccd_now() - meter$t0
+        x
+    }
+    declined <- function(reason) finish(list(declined = reason))
+    tags <- .joint_ccd_axis_tags(axis_names, axis_offsets, prepared)
+    if (is.null(tags)) return(declined("unguessable_axis"))
+    tags <- .joint_ccd_coord_tags(axis_names, tags)
+
+    atom   <- .joint_ccd_atom_axes(axis_names, axis_values)
+    n_atom <- length(atom)
+    if (bitwShiftL(1L, n_atom) > .JOINT_CCD_MAX_COMPONENTS) {
+        if (verbose)
+            message("tulpa CCD: ", n_atom, " copy atoms expand into ",
+                    bitwShiftL(1L, n_atom), " designs; using the tensor grid.")
+        return(declined("copy_atom_components"))
+    }
+
+    a <- as.numeric(atom_mass)
+    if (n_atom > 0L && (length(a) != 1L || !is.finite(a) || a < 0 || a >= 1)) {
+        return(declined("copy_atom_mass"))
+    }
+
+    # The design coordinate reaches the continuum only, so the box is set from
+    # the positive levels; the atom enters as its own component.
+    cont_values <- axis_values
+    for (j in atom) {
+        v <- as.numeric(axis_values[[j]])
+        cont_values[[j]] <- v[v > 0]
+    }
+    if (any(vapply(cont_values, length, integer(1)) == 0L)) {
+        return(declined("degenerate_axis"))
+    }
+
+    # Subsets of the copy axes, as bit patterns: component `m` switches off
+    # every copy axis whose bit is set.
+    offs <- lapply(seq_len(bitwShiftL(1L, n_atom)) - 1L, function(m)
+        if (n_atom == 0L) integer(0)
+        else atom[bitwAnd(bitwShiftR(m, seq_len(n_atom) - 1L), 1L) == 1L])
+
+    # What the placement costs, against what it replaces. `n_tensor` is the
+    # latent tensor grid the design stands in for -- the product of the supplied
+    # per-axis level counts, which is what the fallback below expands -- and
+    # `n_nodes` the design that replaces it. A caller who knows the replaced
+    # cell count exactly (a block grid that is not a full cross of its own axes)
+    # supplies it rather than having it inferred.
+    free_counts <- vapply(offs, function(off) length(setdiff(seq_len(d), off)),
+                          integer(1))
+    n_tensor <- if (is.null(n_tensor_cells))
+        prod(vapply(axis_values, function(v) length(unique(as.numeric(v))),
+                    integer(1))) else as.numeric(n_tensor_cells)
+    n_nodes  <- sum(vapply(free_counts, .ccd_design_nodes, numeric(1)))
+    budget   <- .ccd_budget(n_tensor, n_nodes, free_counts, cfg)
+    meter    <- .ccd_meter_new(budget)
+
+    # Up-front decline: the cheapest placement that could still produce a design
+    # over these axes, against the ceiling. Above it there is nothing to buy, so
+    # the fit falls back to the tensor grid without paying for a single inner
+    # solve.
+    min_evals <- sum(vapply(free_counts, .ccd_min_evals, numeric(1), cfg = cfg))
+    if (min_evals > budget) {
+        if (verbose)
+            message("tulpa CCD: placing the design needs at least ", min_evals,
+                    " inner solves against a ceiling of ", budget,
+                    " (tensor grid ", n_tensor, " cells); using the tensor grid.")
+        return(declined("placement_budget"))
+    }
+    max_evals <- sum(vapply(seq_along(offs), function(i) {
+        dk <- free_counts[[i]]
+        if (dk < 1L) return(0)
+        n_lv <- vapply(cont_values[setdiff(seq_len(d), offs[[i]])],
+                       function(v) length(unique(as.numeric(v))), integer(1))
+        .ccd_first_evals(dk, cfg) +
+            .ccd_rescue_evals(dk, .ccd_seed_evals(n_lv, cfg), cfg)
+    }, numeric(1)))
+    .ccd_meter_beat(meter, "placement start",
+                    sprintf("tensor %.0f cells | design %.0f nodes | worst case %.0f evals",
+                            n_tensor, n_nodes, max_evals))
+
+    grids  <- vector("list", length(offs))
+    dnodes <- vector("list", length(offs))
+    full   <- NULL
+    # A budget reached mid-placement unwinds here. Nothing the abort leaves
+    # behind is read by the tensor fallback: the components already designed are
+    # dropped with the design, and the only other state advanced is the inner
+    # warm start, which the fallback does not consume.
+    why <- tryCatch({
+        reason <- NULL
+        for (i in seq_along(offs)) {
+            off  <- offs[[i]]
+            free <- setdiff(seq_len(d), off)
+            cmp  <- .joint_ccd_component(free, off, axis_names, tags,
+                                         cont_values, eval_logpost,
+                                         verbose = verbose,
+                                         set_warm = set_warm, meter = meter,
+                                         cfg = cfg)
+            # A component carries declared prior mass, so one that cannot be
+            # designed cannot be dropped: the whole CCD declines to the tensor
+            # rule, which integrates every component as levels.
+            if (is.null(cmp$grid)) {
+                reason <- as.character(cmp$declined %||% "modefind_failed")
+                break
+            }
+            mass <- if (n_atom == 0L) 1
+                    else prod(ifelse(atom %in% off, a, 1 - a))
+            grids[[i]]  <- cmp$grid
+            dnodes[[i]] <- cmp$dnode * mass
+            if (length(off) == 0L) full <- cmp
+        }
+        reason
+    }, tulpa_ccd_budget = function(e) {
+        if (verbose)
+            message("tulpa CCD: ", conditionMessage(e),
+                    " Using the tensor grid.")
+        .ccd_meter_beat(meter, "declined", "placement budget exhausted")
+        "placement_budget"
+    })
+    if (!is.null(why)) return(declined(why))
+
+    # `u_hat` / `L_scale` describe the all-continuum component, the one defined
+    # on all d axes. `atom_split` says whether there are others beside it, which
+    # is what decides if a single Gaussian describes the design at all.
+    finish(list(grid = do.call(rbind, grids), dnode = unlist(dnodes),
+                u_hat = full$u_hat, L_scale = full$L_scale, tags = tags,
+                atom_split = n_atom > 0L))
 }
 
 # Announce the engaged outer integrator under verbose, at selection time
@@ -505,8 +997,16 @@
 # inner Newton returns NaN log_marginal, and an unguarded max() would propagate
 # that NaN to every weight, poisoning the whole vector (the dense tensor path is
 # the one tulpa_posterior_draws / theta_mean read directly).
-.joint_integration_weights <- function(log_marginal, dnode = NULL) {
-    if (is.null(dnode)) return(.nl_normalise_weights_safe(log_marginal, "outer grid"))
+# `log_quad` is the tensor grid's per-cell prior mass (R/hyper_quadrature.R). It
+# applies only where the nodes ARE the tensor rule; a CCD design carries its own
+# integration weights in `dnode`, which already encode the volume each node
+# stands for, so folding cell widths in on top would count it twice.
+.joint_integration_weights <- function(log_marginal, dnode = NULL,
+                                       log_quad = NULL) {
+    if (is.null(dnode)) {
+        return(.nl_normalise_weights_safe(log_marginal, "outer grid",
+                                          log_quad = log_quad))
+    }
     fin <- is.finite(log_marginal)
     if (!any(fin)) return(rep(NA_real_, length(log_marginal)))
     w <- dnode * exp(log_marginal - max(log_marginal[fin]))

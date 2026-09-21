@@ -25,7 +25,7 @@ knitr::opts_chunk$set(eval = EVAL_FITS)
 # df <- data.frame(y = y0, x = x)
 # 
 # fit <- tulpa(y ~ x, data = df, family = "gaussian",
-#              mode = "laplace", phi = 0.8)
+#              mode = "laplace", phi = 0.8^2)
 # logLik(fit)
 
 ## ----evidence-attrs-----------------------------------------------------------
@@ -42,13 +42,13 @@ knitr::opts_chunk$set(eval = EVAL_FITS)
 
 ## ----fit-ladder---------------------------------------------------------------
 # m0 <- tulpa(y ~ 1, data = dat, family = "gaussian",
-#             mode = "laplace", phi = 0.8)
+#             mode = "laplace", phi = 0.8^2)
 # m1 <- tulpa(y ~ x, data = dat, family = "gaussian",
-#             mode = "laplace", phi = 0.8)
+#             mode = "laplace", phi = 0.8^2)
 # m2 <- tulpa(y ~ x + (1 | g), data = dat, family = "gaussian",
-#             mode = "laplace", sigma_re = 0.7, phi = 0.8)
+#             mode = "laplace", sigma_re = 0.7, phi = 0.8^2)
 # m3 <- tulpa(y ~ x + z + (1 | g), data = dat, family = "gaussian",
-#             mode = "laplace", sigma_re = 0.7, phi = 0.8)
+#             mode = "laplace", sigma_re = 0.7, phi = 0.8^2)
 
 ## ----ladder-evidence----------------------------------------------------------
 # ll <- c(intercept = as.numeric(logLik(m0)),
@@ -72,7 +72,7 @@ knitr::opts_chunk$set(eval = EVAL_FITS)
 ## ----noise-term---------------------------------------------------------------
 # dat$w <- rnorm(n)
 # m4 <- tulpa(y ~ x + z + w + (1 | g), data = dat, family = "gaussian",
-#             mode = "laplace", sigma_re = 0.7, phi = 0.8)
+#             mode = "laplace", sigma_re = 0.7, phi = 0.8^2)
 # c(full = round(as.numeric(logLik(m3)), 2),
 #   plus_noise = round(as.numeric(logLik(m4)), 2),
 #   gain = round(as.numeric(logLik(m4)) - as.numeric(logLik(m3)), 2))
@@ -94,9 +94,9 @@ knitr::opts_chunk$set(eval = EVAL_FITS)
 
 ## ----non-nested---------------------------------------------------------------
 # mx <- tulpa(y ~ x, data = dat, family = "gaussian",
-#             mode = "laplace", phi = 0.8)
+#             mode = "laplace", phi = 0.8^2)
 # mz <- tulpa(y ~ z, data = dat, family = "gaussian",
-#             mode = "laplace", phi = 0.8)
+#             mode = "laplace", phi = 0.8^2)
 # compare_models(x_only = mx, z_only = mz, criterion = "loglik")
 
 ## ----interpret-gap------------------------------------------------------------
