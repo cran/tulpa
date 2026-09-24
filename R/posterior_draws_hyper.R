@@ -60,13 +60,36 @@
 # itself, which both reads already turn into the level exactly -- the same
 # degenerate interval a `clamp` support's extreme cell takes above, reached
 # from the other direction.
+#
+# On an axis a refinement pass re-tiled (`rows`, `.nl_axis_cell_rows()`) a
+# cell's box depends on its row as well as its value, so the box-uniform
+# geometry is PER CELL: `values` is the axis coordinate of every cell and
+# `lo` / `hi` the box that cell owns (`.nl_cell_boxes()`), flagged `per_cell`.
 .nl_hyper_axis_geometry <- function(v, w, domain, within, outside,
-                                    atom = NA_real_) {
+                                    atom = NA_real_, rows = NULL) {
   none <- function(declined) {
     list(kind = "none", values = numeric(0), lo = numeric(0),
          hi = numeric(0), declined = declined)
   }
   if (is.na(outside)) return(none("support_moment_rule"))
+
+  if (!is.null(rows) && !identical(within, "chord")) {
+    ia <- length(atom) == 1L && is.finite(atom) && any(v == atom) &&
+          !any(v < atom, na.rm = TRUE)
+    cont <- if (ia) is.na(v) | v != atom else rep(TRUE, length(v))
+    rc <- list(row = rows$row[cont], base = rows$base[cont])
+    bx <- .nl_cell_boxes(v[cont], domain, rc)
+    if (is.null(bx)) {
+      g <- .nl_hyper_axis_geometry(v, w, domain, "chord", outside, atom)
+      g$declined <- "boxes_do_not_tile"
+      return(g)
+    }
+    lo <- hi <- v
+    lo[cont] <- bx$lo
+    hi[cont] <- bx$hi
+    return(list(kind = "box_uniform", per_cell = TRUE, values = v,
+                lo = lo, hi = hi, declined = NA_character_))
+  }
 
   # A declared point mass is not a cell: its box is its own coordinate, so a
   # draw landing in it IS the level and the continuum's partition is laid over
@@ -118,28 +141,246 @@
        lo = e[-length(e)], hi = e[-1L], declined = NA_character_)
 }
 
+# The geometry coordinate each cell value is matched to: the cell itself on a
+# per-cell geometry, otherwise the position of its value among the geometry's
+# coordinates (NA for a value the axis read filtered out).
+.nl_hyper_axis_index <- function(geom, v_cell, cells) {
+  if (isTRUE(geom$per_cell)) cells else match(v_cell, geom$values)
+}
+
 # One axis's per-draw coordinate: the cell value continuized across that cell's
-# own geometry. A draw whose cell value is not one of the geometry's
-# coordinates -- reachable only where the draws were allocated over a cell set
-# the axis read filtered out -- keeps its node value rather than being matched
-# to a neighbouring box.
-.nl_hyper_axis_draw <- function(geom, v_cell) {
+# own geometry, by the inverse CDF of the cell-conditional at `u`. A draw whose
+# cell value is not one of the geometry's coordinates -- reachable only where
+# the draws were allocated over a cell set the axis read filtered out -- keeps
+# its node value rather than being matched to a neighbouring box.
+#
+# `u` is the draw's uniform on this axis. Each cell-conditional is reached by
+# its inverse CDF, so ANY uniform input -- independent across axes or tied
+# through a copula -- reproduces the per-axis marginal exactly.
+.nl_hyper_axis_draw <- function(geom, v_cell, cells = NULL,
+                                u = stats::runif(length(v_cell))) {
   if (identical(geom$kind, "none")) return(v_cell)
-  k <- match(v_cell, geom$values)
-  n <- length(v_cell)
-  u <- stats::runif(n)
+  k <- .nl_hyper_axis_index(geom, v_cell, cells)
   out <- if (identical(geom$kind, "box_uniform")) {
     geom$lo[k] + u * (geom$hi[k] - geom$lo[k])
   } else {
-    # Half the cell's mass on either side, each uniform on its own segment.
-    left <- stats::runif(n) < 0.5
+    # Half the cell's mass on either side, each uniform on its own segment:
+    # the lower half of `u` spans the left segment, the upper half the right.
+    left <- u < 0.5
     ifelse(left,
-           geom$lo[k] + u * (geom$values[k] - geom$lo[k]),
-           geom$values[k] + u * (geom$hi[k] - geom$values[k]))
+           geom$lo[k] + 2 * u * (geom$values[k] - geom$lo[k]),
+           geom$values[k] + (2 * u - 1) * (geom$hi[k] - geom$values[k]))
   }
   miss <- is.na(k) | !is.finite(out)
   out[miss] <- v_cell[miss]
   out
+}
+
+# Every cell's within-cell conditional on one axis, read on the axis's
+# unconstrained coordinate `to` (`.NL_DOMAIN_TRANSFORM`): its mean `m`, its
+# standard deviation `s`, and the coordinate span `width` the cell's mass is
+# spread over. Taken by Gauss-Legendre quadrature over the uniform that
+# `.nl_hyper_axis_draw()` itself inverts, on each half of (0, 1) separately so
+# the chord's kink at 1/2 falls on a panel edge -- the moments are those of the
+# draws, not of a second description of the geometry. A cell the axis does not
+# continuize carries zero spread.
+.nl_hyper_axis_cell_moments <- function(geom, v, to) {
+  n <- length(v)
+  none <- list(m = to(v), s = numeric(n), width = rep(NA_real_, n))
+  if (identical(geom$kind, "none")) return(none)
+  gl <- .nl_gauss_legendre_unit(16L)
+  uq <- c(gl$x / 2, 0.5 + gl$x / 2)
+  wq <- c(gl$w, gl$w) / 2
+  cells <- seq_len(n)
+  tq <- vapply(uq, function(u) {
+    to(.nl_hyper_axis_draw(geom, v, cells, rep(u, n)))
+  }, numeric(n))
+  tq <- matrix(tq, n)
+  m <- drop(tq %*% wq)
+  s <- sqrt(pmax(drop(tq^2 %*% wq) - m^2, 0))
+  k <- .nl_hyper_axis_index(geom, v, cells)
+  width <- rep(NA_real_, n)
+  ok <- !is.na(k)
+  width[ok] <- to(geom$hi[k[ok]]) - to(geom$lo[k[ok]])
+  bad <- is.na(k) | !is.finite(m) | !is.finite(s)
+  m[bad] <- none$m[bad]
+  s[bad] <- 0
+  list(m = m, s = s, width = width)
+}
+
+# Nodes and weights of the n-point Gauss-Legendre rule on (0, 1)
+# (Golub-Welsch: eigen-decomposition of the Jacobi matrix).
+.nl_gauss_legendre_unit <- function(n) {
+  k <- seq_len(n - 1L)
+  b <- k / sqrt(4 * k^2 - 1)
+  J <- matrix(0, n, n)
+  J[cbind(k, k + 1L)] <- b
+  J[cbind(k + 1L, k)] <- b
+  e <- eigen(J, symmetric = TRUE)
+  o <- order(e$values)
+  list(x = (e$values[o] + 1) / 2, w = e$vectors[1L, o]^2)
+}
+
+# The Gaussian-copula correlation that ties the axes' within-cell uniforms
+# together (gcol33/tulpa#859).
+#
+# Jittering each axis independently keeps every marginal but not the joint: in
+# the cells where two axes both spread the within-cell covariance is zero, so
+# a derived quantity along the direction the posterior pins down -- a product
+# of anticorrelated scales -- picks up the full box variance of both axes. Any
+# coupling of the uniforms leaves every marginal exactly as it is
+# (`.nl_hyper_axis_draw()` inverts each cell-conditional at its own uniform),
+# so the joint is free to set, and it is set to the posterior's own
+# orientation.
+#
+# That orientation is read off the grid's LOG DENSITY, not off its node
+# weights. On the unconstrained coordinate t of every axis
+# (`.NL_DOMAIN_TRANSFORM`), each cell's density is its mass over the span its
+# mass is spread across, and a weighted quadratic fit of the log density over
+# the cells where every continuized axis spreads gives the local Gaussian's
+# precision; its inverse gives the target correlation `rho*` of each pair. The
+# node weights' own correlation is NOT a usable target: where the grid does
+# not resolve the ridge-orthogonal direction (a tensor grid under a strong
+# correlation), the weights concentrate on a few cells along the ridge and
+# understate the posterior's spread across it, which the curvature does not.
+#
+# For a pair (i, j), with the cell-conditional means `m` and sds `s` on t
+# (`.nl_hyper_axis_cell_moments()`), the draws carry
+#
+#   Var(t_i)      = Var_w(m_i) + E_w[s_i^2]
+#   Cov(t_i, t_j) = Cov_w(m_i, m_j) + rho_u E_w[s_i s_j]
+#
+# with `rho_u` the correlation the copula induces between the two within-cell
+# coordinates (to first order in the cell's width on t), and `rho_u` solves
+# Cov / sqrt(Var Var) = rho*. A Gaussian copula at `r` gives uniforms with
+# Pearson correlation (6 / pi) asin(r / 2), inverted here, and the matrix is
+# projected to the nearest correlation matrix by clipping its eigenvalues,
+# since pairwise solves need not be jointly positive definite.
+#
+# No coupling (the identity) is returned where the orientation is not
+# identified: fewer than two continuized axes, fewer cells than the quadratic
+# has coefficients, or a fitted curvature that is not negative definite.
+#
+# The quadratic is exact on a Gaussian and an approximation elsewhere. Two
+# alternatives were measured against it on skewed and curved posteriors with
+# exact reference moments (gcol33/tulpa#861): the mass-weighted mean of the
+# cells' own finite-difference curvatures, and the law of total covariance over
+# the box partition with each box shaped by its local quadratic. Both are
+# exact on a Gaussian too, and both read the log product of two anticorrelated
+# skewed scales 13-60% (respectively up to 30%) wide at K = 4 .. 9, where the
+# global quadratic stays within -5% / +3%. The moment form is also unstable
+# on a grid that does not resolve the posterior: a box's local quadratic
+# extrapolated to its corners can outweigh the grid's own mass by orders of
+# magnitude.
+.nl_hyper_copula <- function(tg, w, geoms, domains) {
+  p <- ncol(tg)
+  R <- diag(p)
+  dimnames(R) <- list(colnames(tg), colnames(tg))
+  act <- which(vapply(geoms, function(g) !identical(g$kind, "none"), TRUE))
+  q <- length(act)
+  if (q < 2L) return(R)
+  to <- lapply(act, function(j) {
+    d <- if (length(domains) < j) NA_character_ else domains[[j]]
+    tr <- if (is.na(d)) NULL else .NL_DOMAIN_TRANSFORM[[d]]
+    if (is.null(tr)) identity else tr$to
+  })
+  mom <- lapply(seq_len(q), function(a) {
+    .nl_hyper_axis_cell_moments(geoms[[act[a]]], as.numeric(tg[, act[a]]),
+                                to[[a]])
+  })
+  t_node <- vapply(seq_len(q), function(a) to[[a]](as.numeric(tg[, act[a]])),
+                   numeric(nrow(tg)))
+  t_node <- matrix(t_node, nrow(tg))
+  S <- vapply(mom, `[[`, numeric(nrow(tg)), "s")
+  M <- vapply(mom, `[[`, numeric(nrow(tg)), "m")
+  W <- vapply(mom, `[[`, numeric(nrow(tg)), "width")
+  S <- matrix(S, nrow(tg)); M <- matrix(M, nrow(tg)); W <- matrix(W, nrow(tg))
+  ld <- log(w) - rowSums(log(W))
+  use <- is.finite(w) & w > 0 & rowSums(S > 0) == q & is.finite(ld) &
+         rowSums(!is.finite(t_node)) == 0L
+  n_coef <- 1L + q + q * (q + 1L) / 2L
+  if (sum(use) <= n_coef) return(R)
+
+  ww <- w[use] / sum(w[use])
+  tt <- t_node[use, , drop = FALSE]
+  ctr <- colSums(ww * tt)
+  sc <- sqrt(colSums(ww * sweep(tt, 2L, ctr)^2))
+  if (any(!is.finite(sc) | sc <= 0)) return(R)
+  z <- sweep(sweep(tt, 2L, ctr), 2L, sc, "/")
+  pr <- which(upper.tri(diag(q), diag = TRUE), arr.ind = TRUE)
+  X <- cbind(1, z, z[, pr[, 1L], drop = FALSE] * z[, pr[, 2L], drop = FALSE])
+  # The fit's weights are floored where `lm.wfit()`'s rank test (tolerance
+  # `tol` on the sqrt-weighted columns) can still see a cell, a factor 100
+  # above it. Under a strong correlation on a coarse grid the off-ridge cells
+  # carry masses far below that (about 1e-130 at K = 3, rho = -0.97), and at
+  # their raw masses the design reads as rank 3 of 6 although every cell's log
+  # density is finite and, on a Gaussian, exactly quadratic. A floored cell
+  # still weighs at most 1e-10 of the modal one, so a grid whose cells are all
+  # above the floor is fitted exactly as before (gcol33/tulpa#860).
+  tol <- 1e-7
+  wfit <- pmax(ww, (100 * tol)^2 * max(ww))
+  fitq <- stats::lm.wfit(X, ld[use], wfit, tol = tol)
+  if (fitq$rank < ncol(X)) return(R)
+  b <- fitq$coefficients[-(seq_len(1L + q))]
+  H <- matrix(0, q, q)
+  H[pr] <- b
+  H <- H + t(H)                # d2/dz^2: 2 b_jj on the diagonal, b_jk off it
+  P <- -H / outer(sc, sc)      # precision on t
+  eP <- eigen(P, symmetric = TRUE, only.values = TRUE)$values
+  if (min(eP) <= 0) return(R)
+  Sig <- solve(P)
+  rho_star <- stats::cov2cor(Sig)
+
+  mt <- M[use, , drop = FALSE]
+  st <- S[use, , drop = FALSE]
+  wcov <- function(a, b) sum(ww * (a - sum(ww * a)) * (b - sum(ww * b)))
+  Ru <- diag(q)
+  for (a in seq_len(q - 1L)) for (c in (a + 1L):q) {
+    va <- wcov(mt[, a], mt[, a]) + sum(ww * st[, a]^2)
+    vc <- wcov(mt[, c], mt[, c]) + sum(ww * st[, c]^2)
+    ess <- sum(ww * st[, a] * st[, c])
+    ru <- (rho_star[a, c] * sqrt(va * vc) - wcov(mt[, a], mt[, c])) / ess
+    if (!is.finite(ru)) ru <- 0
+    ru <- min(max(ru, -1), 1)
+    Ru[a, c] <- Ru[c, a] <- 2 * sin(pi * ru / 6)
+  }
+  Ru <- .nl_nearest_correlation(Ru)
+
+  # The within-cell coupling carries the posterior's LOCAL dependence, and the
+  # sign of each pair's conditional dependence given the other axes is the
+  # sign of the posterior precision's entry. Where the cells' means already
+  # correlate more strongly than the target, a pairwise solve can ask for a
+  # conditional dependence of the opposite sign inside the cell: a dependence
+  # the posterior does not have, which on a curved posterior read the log
+  # product 19.6% wide instead of 1.8% (gcol33/tulpa#861). Such a pair is made
+  # conditionally independent inside the cell. The CONDITIONAL sign is the one
+  # to hold: with three axes a pair's marginal within-cell coupling can
+  # legitimately oppose the target's (-0.6, -0.6, -0.2 couples the last pair at
+  # +0.94), and it is its partial correlation that agrees.
+  Qu <- solve(Ru)
+  flip <- Qu * P < 0
+  diag(flip) <- FALSE
+  if (any(flip)) {
+    Qu[flip] <- 0
+    Qu <- .nl_nearest_correlation(Qu, cor = FALSE)
+    Ru <- .nl_nearest_correlation(stats::cov2cor(solve(Qu)))
+  }
+  R[act, act] <- Ru
+  R
+}
+
+# The nearest positive-definite matrix to a symmetric one by clipping its
+# eigenvalues at `floor`, rescaled to a unit diagonal when `cor` is TRUE.
+.nl_nearest_correlation <- function(M, floor = 1e-8, cor = TRUE) {
+  ev <- eigen(M, symmetric = TRUE)
+  if (min(ev$values) < floor) {
+    M <- ev$vectors %*% (pmax(ev$values, floor) * t(ev$vectors))
+  }
+  if (cor) {
+    d <- sqrt(diag(M))
+    M <- M / outer(d, d)
+  }
+  M
 }
 
 #' Hyperparameter draws from a nested-Laplace fit
@@ -184,7 +425,11 @@
 #'   columns, or `NULL` when the fit carries no outer-grid axis. Carries
 #'   `attr(., "cells")` -- the cell each row's coordinates were drawn in --
 #'   plus `attr(., "within_cell")` and `attr(., "within_cell_declined")`, the
-#'   per-axis construction that ran and why a requested one did not.
+#'   per-axis construction that ran and why a requested one did not, and
+#'   `attr(., "within_cell_copula")`, the Gaussian-copula correlation matrix
+#'   that ties the axes' within-cell draws together so the draws keep the
+#'   grid's own correlation between axes (the identity where the grid's axes
+#'   are uncorrelated). Each axis's marginal is the same whatever the copula.
 #'
 #' @seealso [tulpa_posterior_draws()], [tulpa_nested_laplace()]
 #' @export
@@ -231,17 +476,27 @@ tulpa_hyper_draws <- function(fit, cells = NULL, n = 1000, within = NULL) {
   out <- matrix(0.0, length(cells), ncol(tg), dimnames = list(NULL, nms))
   used <- stats::setNames(rep(NA_character_, ncol(tg)), nms)
   decl <- stats::setNames(rep(NA_character_, ncol(tg)), nms)
-  for (j in seq_len(ncol(tg))) {
+  geoms <- lapply(seq_len(ncol(tg)), function(j) {
     dm <- if (length(doms) < j) NA_character_ else doms[[j]]
     at <- if (length(atoms) < j) NA_real_ else atoms[[j]]
-    g <- .nl_hyper_axis_geometry(as.numeric(tg[, j]), w, dm, req, outside, at)
-    out[, j] <- .nl_hyper_axis_draw(g, as.numeric(tg[cells, j]))
+    .nl_hyper_axis_geometry(as.numeric(tg[, j]), w, dm, req, outside, at,
+                            .nl_axis_cell_rows(tg, j, fit$refining_axis))
+  })
+  # One uniform per draw and axis, tied across axes by the copula that keeps
+  # the grid's own correlation (`.nl_hyper_copula()`).
+  cop <- .nl_hyper_copula(tg, w, geoms, doms)
+  z <- matrix(stats::rnorm(length(cells) * ncol(tg)), length(cells), ncol(tg))
+  u <- stats::pnorm(z %*% chol(cop))
+  for (j in seq_len(ncol(tg))) {
+    g <- geoms[[j]]
+    out[, j] <- .nl_hyper_axis_draw(g, as.numeric(tg[cells, j]), cells, u[, j])
     used[j] <- if (identical(g$kind, "none")) NA_character_ else g$kind
     decl[j] <- if (is.na(g$declined)) fell else g$declined
   }
   attr(out, "cells") <- cells
   attr(out, "within_cell") <- used
   attr(out, "within_cell_declined") <- decl
+  attr(out, "within_cell_copula") <- cop
   out
 }
 

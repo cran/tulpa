@@ -1,3 +1,228 @@
+# tulpa 0.6.0
+
+## The hyperparameter share reaches both reporting doors
+
+* `hyper_share` reached `attr(diagnostics(fit), "summary")` but not
+  `diagnostic_summary()`, which already carries the other outer-grid facts
+  (`quad_ess`, `outer_regime`, `interval_read`). `diagnostic_summary()` now
+  reports `hyper_share_min` / `hyper_share_max` and prints the range. Both
+  doors read one helper, so they cannot drift. It carries no threshold and
+  never moves `status`: a marginal that rides almost entirely on the
+  within-cell Gaussian may be perfectly calibrated, which is what the new
+  coverage gate measures (gcol33/tulpa#862).
+
+## The fixed-effect interval is gated with a spatial field present
+
+* Coverage of the nested-Laplace fixed-effect interval was gated only on an
+  IID region-grouped random-effect block; the spatial recovery tests gate the
+  hyperparameters and never the coefficients. `test-spatial-beta-coverage.R`
+  closes that gap, measuring `confint()` against a simulated truth on an ICAR
+  lattice in a well-identified and a weakly identified regime: 0.981 pooled
+  over 160 trials. Tier 3, so it runs on the release gate
+  (gcol33/tulpa#862).
+
+## A nested fit reports how much of its marginal the hyperparameter carried
+
+* The nested fixed-effect marginal is `within + between` under the law of total
+  variance over the outer grid, and `between` is the part that exists BECAUSE
+  the hyperparameter was integrated rather than held at a point. Nothing
+  reported that split, so a fit whose marginal barely moves when its
+  hyperparameter posterior does looked identical to one that integrated
+  properly. `diagnostics()` now carries `hyper_share` per coefficient with
+  `hyper_share_min` / `hyper_share_max` beside it, prints the range, and the
+  summary row a consumer writes to a reliability CSV carries the two bounds.
+  On the occu_cover fixture behind gcol33/tulpa#862 the affected coefficient
+  reads 3.4% -- its interval is almost entirely the within-cell Gaussian --
+  while another coefficient on the same fit reads 25%, so the number
+  discriminates rather than restating the grid size. Reported without a
+  threshold: what counts as too little depends on the model. A fit that
+  retained no per-cell pieces reports the share as ABSENT rather than zero,
+  since zero would be a claim about the fit rather than about the record
+  (gcol33/tulpa#862).
+
+## A flagged inner layer names the correction it did not run
+
+* A fit whose inner Gaussian bands `unreliable` reports the marginal read off
+  that same Gaussian, and the engine ships two corrections for exactly that
+  condition -- `control$subspace_debias` (exact Metropolis on the flagged
+  coordinates, the rest carried at their Gaussian conditional) and
+  `control$cila` (the whole inner Gaussian reweighted by the exact joint
+  density). Both are off by default and nothing in the reporting said they
+  existed, so the measured misfit and its remedy never met. `diagnostics()`
+  now carries the remedy as `inner_debias_note`, prints it with the other
+  notes, and `diagnostic_summary()` lists it last in `recommendations`, after
+  the bands that motivate it rather than before them. It is silent on a fit
+  that already ran a correction, which would otherwise read as though the
+  correction had not taken (gcol33/tulpa#862).
+
+## The subspace-debias coupling closure works on a grid fit
+
+* `control$subspace_debias$closure` grows the corrected set over strongly
+  coupled precision-graph neighbours, because a coordinate coupled to a member
+  of the set and left out of it is carried linearly -- precisely the error the
+  correction exists to remove. It needs the joint precision, and a grid or
+  joint fit computed one per cell and then discarded it, so the closure
+  declined with `closure_needs_joint_hessian` on every such fit.
+  `.nl_modal_joint_precision()` assembles the MODAL cell's copy from the CSC
+  scratch the inner solves already return, and both drivers read that one
+  assembler, so they cannot disagree about which cell the coupling came from.
+  One cell, not `n_grid`: the closure is a selection decision made once. The
+  retention rides the closure request, so a fit that did not ask for one
+  retains nothing extra; the joint driver turns `store_Q` on for it and hands
+  back only the assembled precision, not the per-cell scratch. Measured on a
+  sparse ICAR fit banding both inner scores `unreliable`, the corrected set
+  grows 1 -> 2 -> 3 -> 5 -> 9 as the coupling threshold loosens where it
+  previously could not grow at all (gcol33/tulpa#862).
+
+## A collapsed outer grid carries its reading, not only its code
+
+* `attr(diagnostics(fit), "summary")` -- the one-row frame a consumer writes to
+  a reliability CSV -- carried `outer_regime` without the note saying what a
+  collapse means and which axis to widen, so the reading was reachable only
+  from the printed form and each consumer re-derived an
+  `ess_grid >= 2 && max_weight <= 0.9` rule of its own. It now carries
+  `outer_regime_note` beside the code. The classification itself was already
+  correct and independent of the opt-in k-hat: the quadrature numbers come from
+  the stored weights unconditionally and the regime is attached before the
+  `diagnose_k` branch, so a collapse is reported whether or not `pareto_k` ran.
+  Nothing asserted that end to end, which is how an occu_cover batch shipped
+  `ess_grid = 1.0000067` of 27 cells at `max_weight = 0.99999` with its
+  consumer reporting nothing; `test-outer-grid-collapse-reporting.R` now pins
+  all four doors (gcol33/tulpa#863).
+
+# tulpa 0.5.4
+
+## The hyperparameter copula holds on coarse grids and curved posteriors
+
+* The within-cell copula of `tulpa_hyper_draws()` no longer falls back to
+  independent draws on a coarse grid under a strong correlation. The quadratic
+  that sets its target is fitted to the grid's log density with each cell
+  weighted by its mass, and the off-ridge cells' masses (about 1e-130 at
+  3 x 3 nodes, log correlation -0.97) fell below the fit's rank test, so it
+  read as rank-deficient and returned the identity. Those weights are now
+  floored where the rank test sees them, a factor 1e-10 of the modal cell,
+  which leaves every grid with all cells above that fitted exactly as before.
+  On two log scales at log correlation -0.97 and 3 x 3 nodes, the log
+  product's sd goes from 0.580 to 0.182 against an exact 0.122. At -0.99 on
+  4 x 4 and 5 x 5 nodes it goes from 0.398 / 0.302 to 0.109 / 0.086 against
+  0.071 (gcol33/tulpa#860).
+* A pair's within-cell coupling no longer takes a conditional dependence of the
+  opposite sign from the posterior's. Where the cells' means already correlate
+  more strongly than the target, the pairwise solve asked for one, and a
+  curved posterior with log correlation -0.76 was coupled at +0.55 inside the
+  cell: the log product read 19.6% wide at 5 x 5 nodes and 6.4% wide at 7 x 7.
+  Such a pair is now conditionally independent inside the cell, and the same
+  two read 1.8% and 1.1% wide. The sign held is the partial correlation's:
+  with three axes one pair's marginal within-cell coupling can legitimately
+  oppose its target (gcol33/tulpa#861).
+* Every configuration of a Gaussian, two skewed and one curved posterior at
+  3 to 9 nodes per axis that neither change touches reads the same copula
+  and the same log-product sd to four digits.
+  The skewed posteriors keep the target's known bias: the log product of two
+  anticorrelated skewed scales reads up to 5.4% narrow at 4 to 9 nodes. The
+  two alternative targets measured against it (the mass-weighted mean of the
+  cells' finite-difference curvatures, and the law of total covariance over
+  the box partition) are exact on a Gaussian too, and read the same product
+  13-60% and up to 30% wide. On a curved posterior at 3 x 3 nodes, which the
+  grid does not resolve, the now-coupled draws read 16% narrow where the
+  identity read 65% wide.
+
+# tulpa 0.5.3
+
+## Hyperparameter draws keep the posterior's correlation between axes
+
+* `tulpa_hyper_draws()` (and so the `"theta"` attribute of
+  `tulpa_posterior_draws()`) ties the within-cell draws of the outer axes
+  together through a Gaussian copula. Each axis's marginal is unchanged: every
+  cell-conditional is still reached by its own inverse CDF, so the draws
+  reproduce `theta_ci_lo` / `theta_median` / `theta_ci_hi` exactly as before.
+  The joint follows the posterior's orientation. The copula correlation is
+  solved so the draws' total correlation between two axes equals that of the
+  local Gaussian fitted to the grid's log density on each axis's unconstrained
+  coordinate. Independent jitter added the full box variance of both axes in
+  the direction a strongly correlated posterior pins down, so a product of
+  anticorrelated scales came out too wide: `sigma_pos_field` on the
+  cover-glaser HP760 J = 10 fit, where log sigma and log alpha correlate at
+  -0.936 (gcol33/tulpa#859). On an analytic two-scale posterior with log
+  correlation -0.9 (exact log-product sd 0.224) and a 7 x 7 box grid, the
+  draws' log correlation goes from -0.852 to -0.900 and the log product's sd
+  from 0.281 to 0.232. On a 5 x 5 grid it goes from 0.309 to 0.239, where the
+  node weights' own correlation would give 0.072. The copula matrix is returned
+  as `attr(., "within_cell_copula")`.
+
+# tulpa 0.5.2
+
+## A refined axis reads each cell's box from its own row
+
+* On an outer axis a refinement pass placed slice points on, the box-uniform
+  interval read and `tulpa_hyper_draws()` (and so the `"theta"` attribute of
+  `tulpa_posterior_draws()`) give every cell the box the quadrature measured
+  it with. A slice point re-tiles only the row it was placed in
+  (`.hyper_refined_log_quad()`); every other row keeps the declared levels'
+  cells. Both reads used to lay one partition over every distinct value the
+  axis carried, so a base cell in an untouched row was drawn on the narrow box
+  between the slice points beside its level while it held its whole base
+  box's mass. On the cover-glaser HP760 J = 10 reference fit the `phi_pos`
+  draws' interquartile range held 0.453 of the fit's own measure instead of
+  0.5; the J = 3 fit, with no consistency slices on that axis, held 0.497
+  (#858). An axis no pass refined is read exactly as before.
+
+# tulpa 0.5.1
+
+## The copy axis is declared at nine slab nodes, and the consistency pass bisects where the mass is
+
+* The copy coefficient's default outer axis (`tulpa_grid_axis("copy_alpha")`)
+  is the atom at 0 plus **nine** log-spaced nodes on [0.1, 3], a node ratio of
+  1.53, the resolution the other outer axes of a copy fit run at. With five
+  (ratio 2.34) a posterior over alpha sat on two adjacent nodes; an SBC on the
+  cover-glaser HP760 fixture (occu_cover beta arm, n_sim = 300) had 9/11 and
+  7/11 parameters inside the family-wise band at J = 3 / 10 with five nodes
+  and 11/11 at both with nine (#858).
+* The var-of-means consistency pass places its nodes by the axis marginal's
+  mass: it bisects, on the axis's integration coordinate, every gap between
+  adjacent nodes that together carry at least `1 / axis_sd_ess` of the
+  continuum's mass, re-reads the axis ESS, and repeats until the axis reaches
+  the floor or has taken `.nl_diag("axis_refine_nodes")` (8) new nodes. It used
+  to place four points once at `mu * exp(+-{0.7, 1.5} * sd / mu)`, `sd` the
+  modal parabola, which on a marginal sitting on two nodes reads the grid
+  spacing and put all four points inside the one gap between them. A copy
+  axis's point mass is excluded from the ESS the pass reads and from the gaps
+  it bisects, since no continuum node changes the share it holds.
+  `var_of_means_consistency_info` reports `ess_after` beside `ess_before` and
+  no longer carries `sd_laplace`. A marginal peaking on an outermost level is
+  left to the placement rescues: the span truncates it, and bisecting towards
+  that level only shrinks its box.
+* The two joint field-SD rescues (single-block and multi-block copy) fire on a
+  railed `sigma` axis read per axis (`.nl_axis_railed()`: the collapsed grid's
+  dominant cell on its node, or its own marginal maximal at an endpoint), the
+  trigger the registry and dispersion rescues already used. Gated on the whole
+  grid's `collapsed_edge` regime, a `sigma` carrying 0.91 of its mass on its
+  ceiling went unplaced once the consistency pass had resolved a dispersion
+  axis beside it, because the grid ESS then read 5.9 against a collapse
+  threshold of 2. The spatiotemporal rescue (`fit_st_nested()`) reads
+  the same predicate over its free axes; on the ten rescue calls the ST test
+  fixtures make, every placement decision is unchanged (7 recentred, 2
+  `grid_not_collapsed`, 1 `grid_knobs_overridden`).
+
+## A random-effect term's prior is an exported header
+
+* **`<tulpa/re_term_prior.h>`** carries the prior of one random-effect term
+  and the effect values it implies: a half-Cauchy on each SD, the
+  partial-correlation Cholesky factor with its LKJ(2) density for a correlated
+  term, and the non-centered `z`. `re_term_scales()`, `re_term_group_effect()`
+  and `re_term_log_prior_add()` are what the engine's random-effect block now
+  evaluates, and what a consumer package calls for a random effect it carries
+  among its own extra parameters (tulpaObs's random effects over visit rows),
+  so the two put one density on one parameter vector. The scalar math they are
+  written in (`<tulpa/ad_scalar_math.h>`: `safe_exp`, `safe_log`, `safe_sqrt`,
+  `safe_max`, `inv_logit`, `safe_tanh`, `log_prior_half_cauchy`, for double,
+  forward-mode and arena reverse-mode scalars) and the Cholesky map
+  (`<tulpa/lkj_chol.h>`: `build_L_from_raw()`, `lkj_cholesky_log_density_add()`)
+  moved out of `src/` with them.
+* The move is value-preserving: a correlated random-slope and a random-intercept
+  NUTS fit return bit-identical draws before and after it. No struct layout
+  changed, so the ABI version is unchanged.
+
 # tulpa 0.5.0
 
 ## A copy amplitude was reported, and drawn, below zero
