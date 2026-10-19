@@ -63,49 +63,38 @@
 }
 
 
-# Build the `prior` argument for tulpa_nested_laplace() from the formula's
-# parsed latent blocks. Every `latent(...)` term resolves to a
-# tulpa_latent_block (a tgmrf), which is itself a valid nested-Laplace prior
-# block (it carries `type = "tgmrf"`). One block or many, the list is exactly
-# the multi-block prior the driver consumes -- a length-1 list routes through
-# the same multi-block path.
-.latent_blocks_to_prior <- function(latent_blocks) {
-  if (length(latent_blocks) == 0L) {
-    stop("Internal error: .latent_blocks_to_prior() called with no blocks.",
-         call. = FALSE)
+# Starting point and metric for the front door's MALA: the posterior mode and
+# the Laplace covariance there, the inverse of the precision above.
+#
+# MALA's own default is the identity metric from the builder's zero start, and
+# on a GLMM that is a metric off by an order of magnitude in both directions --
+# a fixed slope resolved to ~0.05, a group effect spanning its whole prior SD --
+# with the fixed intercept and the group effects tied along a ridge the data
+# never resolve. The step size dual-averages down to the narrowest direction
+# and the chain crawls along the rest: bulk ESS 1 to 9 of 1000 on the intercept
+# of a 15-group poisson (1 | g), point estimates 0.31 to 0.48 across seeds
+# against imh_laplace's 0.41 (gcol33/tulpa#878). The dense Laplace covariance
+# carries both the scales and that correlation; the MH step keeps the target
+# exact whatever metric is used, so a poor Laplace fit costs efficiency, never
+# correctness. Falls back to the precision's diagonal, then to the builder's
+# own start, when the mode search or the factorization fails.
+.glmm_mala_metric <- function(m) {
+  fallback <- list(init = m$init)
+  mp <- tryCatch(.glmm_mode_precision(m), error = function(e) NULL)
+  if (is.null(mp) || !all(is.finite(mp$mode)) ||
+      !is.finite(m$log_posterior(mp$mode))) {
+    return(fallback)
   }
-  latent_blocks
-}
-
-
-# Resolve a spatial(col) / temporal(col) column to 1-based contiguous unit
-# indices for the per-observation field map. Integer/numeric columns are taken
-# as already-1-based ids (matching adjacency row / coordinate order); factor or
-# character columns are factored and the level order then defines the unit
-# order (which must align with the adjacency / coordinate spec). `n_units`, when
-# known (areal adjacency), bounds the index so an out-of-range id fails in R
-# rather than indexing out of bounds in the C++ kernel.
-.resolve_unit_index <- function(col, var, n_units = NULL) {
-  if (is.factor(col)) {
-    idx <- as.integer(col)
-  } else if (is.numeric(col) && !anyNA(col) && all(col == as.integer(col))) {
-    idx <- as.integer(col)
-  } else {
-    idx <- as.integer(as.factor(col))
+  init <- stats::setNames(mp$mode, names(m$init))
+  S <- tryCatch(chol2inv(chol(mp$precision)), error = function(e) NULL)
+  if (!is.null(S) && all(is.finite(S))) {
+    return(list(init = init, mass_matrix = S))
   }
-  if (anyNA(idx)) {
-    stop("Spatial/temporal index column '", var, "' has missing values.",
-         call. = FALSE)
+  dg <- diag(mp$precision)
+  if (all(is.finite(dg) & dg > 0)) {
+    return(list(init = init, mass_diag = 1 / dg))
   }
-  if (min(idx) < 1L) {
-    stop("Spatial/temporal index column '", var,
-         "' must resolve to 1-based positive integers.", call. = FALSE)
-  }
-  if (!is.null(n_units) && max(idx) > n_units) {
-    stop("Spatial index column '", var, "' references unit ", max(idx),
-         " but the adjacency has only ", n_units, " unit(s).", call. = FALSE)
-  }
-  idx
+  list(init = init)
 }
 
 
@@ -147,9 +136,24 @@
     )
     if (backend == "bym2") {
       prior$scale_factor <- as.numeric(spatial$scale_factor %||% 1.0)
+      # Per-component scaling beyond the reference scale (gcol33/tulpa#902).
+      prior$node_prec <- spatial$node_prec
     }
     if (backend == "car_proper" && !is.null(spatial$rho_bounds)) {
       prior$rho_bounds <- as.numeric(spatial$rho_bounds)
+    }
+    if (isTRUE(spatial$rsr)) {
+      # Restricted spatial regression: observation i receives (P z)[unit_i],
+      # with P the unit-level projector orthogonal to the restrict_to design
+      # that the Gibbs kernel applies, so the block reads the field through
+      # A = S P (S the observation-to-unit incidence) in place of the gather.
+      P <- spatial$rsr_projection
+      if (is.null(P)) {
+        stop("Internal: a restricted areal spec reached the nested path ",
+             "without its projection.", call. = FALSE)
+      }
+      prior$projector   <- P[prior$spatial_idx, , drop = FALSE]
+      prior$spatial_idx <- NULL
     }
     return(prior)
   }
@@ -186,7 +190,7 @@
            call. = FALSE)
     }
     n_spatial <- spatial$n_spatial %||% nrow(spatial$unique_coords)
-    return(list(
+    prior <- list(
       type        = "nngp",
       coords      = as.matrix(spatial$unique_coords),
       nn_idx      = as.matrix(ni$nn_idx),
@@ -196,7 +200,21 @@
       nn          = as.integer(spatial$nn %||% ncol(ni$nn_idx)),
       cov_type    = gp_cov_type(spatial),
       spatial_idx = as.integer(spatial$obs_to_loc %||% seq_len(n_spatial))
-    ))
+    )
+    if (isTRUE(spatial$rsr)) {
+      # Restricted continuous field: observation i receives (P w)[loc_i], with
+      # P the location-level projector the Gibbs kernel applies, so the block
+      # reads the field through A = S P (S the observation-to-location
+      # incidence) in place of the gather.
+      P <- spatial$rsr_projection
+      if (is.null(P)) {
+        stop("Internal: a restricted continuous spec reached the nested path ",
+             "without its projection.", call. = FALSE)
+      }
+      prior$projector   <- P[prior$spatial_idx, , drop = FALSE]
+      prior$spatial_idx <- NULL
+    }
+    return(prior)
   }
 
   if (type == "spde") {
@@ -481,6 +499,9 @@
     stop("SVC spec is unvalidated (neighbor_info NULL). tulpa() validates ",
          "it via validate_svc().", call. = FALSE)
   }
+  # The NNGP field lives on the distinct locations; rows sharing one read it
+  # through obs_to_loc (0-based across the boundary). X_svc stays per row.
+  cm <- as.matrix(spatial$unique_coords %||% cm)
   n_obs <- nrow(cm)
   nn    <- as.integer(spatial$nn %||% ncol(ni$nn_idx))
   pos_d <- ni$nn_dist[is.finite(ni$nn_dist) & ni$nn_dist > 0]
@@ -496,7 +517,9 @@
     nn_order        = as.integer(ni$nn_order) - 1L,
     nn_order_inv    = as.integer(ni$nn_order_inv %||% seq_len(n_obs)) - 1L,
     svc_indices     = idx,
-    X_svc           = as.numeric(t(Xs)),            # row-major [n_obs x n_svc]
+    X_svc           = as.numeric(t(Xs)),            # row-major [n_rows x n_svc]
+    obs_to_loc      = if (!is.null(spatial$obs_to_loc))
+      as.integer(spatial$obs_to_loc) - 1L,
     cov_type        = gp_cov_type(spatial),
     phi_prior_U     = as.numeric(U),
     phi_prior_alpha = 0.05,
@@ -571,6 +594,8 @@
     # The period in the units `time_values` now carries, which is what the
     # kernel measures its lag in.
     spec$period      <- temporal$period_scaled %||% temporal$period
+    spec$phi_prior_lower <- temporal$phi_prior_lower %||% .GP_PHI_PRIOR_BOUNDS[["lower"]]
+    spec$phi_prior_upper <- temporal$phi_prior_upper %||% .GP_PHI_PRIOR_BOUNDS[["upper"]]
   }
   spec
 }
@@ -650,6 +675,28 @@
 # Assemble the fitter argument list for a backend from the model pieces. Routes
 # on the backend's input contract (BACKEND_REGISTRY$<backend>$input). Backends
 # that are reachable but not yet wired through tulpa() error with guidance.
+# `control$n_threads` under mode = "auto" (gcol33/tulpa#911). The sampler
+# branch of .tulpa_fitter_args() refuses the knob, because a sampler reads no
+# thread count and a knob dropped in silence is what the control check exists
+# to prevent. That refusal is right for a mode the caller NAMED; under "auto"
+# the caller cannot know which backend the router will pick, and the knob is
+# one every Laplace candidate reads, so refusing it made the same call fail or
+# succeed depending on the model's terms. Under auto the knob is dropped with a
+# message naming the backend that ignored it; an explicit mode keeps the error.
+#' @keywords internal
+.auto_drop_unread_threads <- function(control, sel) {
+  if (is.null(control$n_threads) || isTRUE(sel$explicit) ||
+      !identical(BACKEND_REGISTRY[[sel$backend]]$input, "modeldata")) {
+    return(control)
+  }
+  message("tulpa(): mode = 'auto' resolved to the sampler backend '",
+          sel$backend, "', which does not read `control$n_threads`; it is ",
+          "ignored. A sampler run's OpenMP teams are sized from ",
+          "`control$n_chains` and the environment (OMP_NUM_THREADS).")
+  control$n_threads <- NULL
+  control
+}
+
 .tulpa_fitter_args <- function(backend, bundle, family, sigma_re,
                                n_trials, phi, beta_prior, control,
                                latent_blocks = list(), spatial = NULL,
@@ -679,19 +726,21 @@
   # Statistical random-effect / variance-component hyperpriors ride in a single
   # `re_prior` list (a statistical argument), never in `control` (tuning only).
   rp <- re_prior %||% list()
+  .check_re_prior_backend(rp, backend)
   input <- BACKEND_REGISTRY[[backend]]$input
 
   # Observation weights scale each row's log-likelihood. Supported where the
   # likelihood carries a per-obs multiplier today: the non-spatial Laplace
-  # kernel and the R log-posterior builder. Everything else refuses loudly
-  # rather than silently fitting unweighted.
+  # kernel (directly, or as re_cov_nested's inner solve) and the R
+  # log-posterior builder. Everything else refuses loudly rather than silently
+  # fitting unweighted.
   if (!is.null(weights) &&
-      !(input == "logpost" ||
-        (backend == "laplace" && is.null(spatial)))) {
+      !.backend_carries_weights(backend, spatial = !is.null(spatial))) {
     stop(sprintf(paste0(
       "`weights` is not supported by backend '%s'. Weighted fits run through ",
-      "mode = 'laplace' (non-spatial) or a log-posterior sampler ",
-      "('mala', 'imh_laplace', 'pathfinder')."), backend), call. = FALSE)
+      "mode = 'laplace' (non-spatial), 're_cov_nested', or a log-posterior ",
+      "sampler ('mala', 'imh_laplace', 'pathfinder')."), backend),
+      call. = FALSE)
   }
 
   # Second dispersion (Student-t df, Tweedie power). The backend list is derived
@@ -745,9 +794,18 @@
     # or any field with latent terms forms a multi-block prior the joint driver
     # integrates -- every obs touches each block, so they are Laplace-marginalised
     # jointly (the spatio-temporal cross term is assembled from each block's idx).
+    # The `spatial =` / `temporal =` fields carry a `role` tag. A block's type
+    # does not say what it is for -- an s(x) smoother is an rw1 / rw2 block and
+    # a `(1 | g)` term an iid one -- so the accessors that read one field back
+    # off the fit (temporal(), spatial_range(), temporal_corr()) find it by
+    # role (`.nl_block_roles()`), never by type or position (gcol33/tulpa#903,
+    # #906).
+    with_role <- function(blk, role) { blk$role <- role; blk }
     field_blocks <- c(
-      if (!is.null(spatial))  list(.spatial_spec_to_nl_prior(spatial))   else list(),
-      if (!is.null(temporal)) list(.temporal_spec_to_nl_prior(temporal)) else list(),
+      if (!is.null(spatial))
+        list(with_role(.spatial_spec_to_nl_prior(spatial), "spatial")) else list(),
+      if (!is.null(temporal))
+        list(with_role(.temporal_spec_to_nl_prior(temporal), "temporal")) else list(),
       smoothers
     )
     all_blocks <- c(field_blocks, latent_blocks)
@@ -965,7 +1023,7 @@
         # has no other way to request intervals that carry the hyperparameter
         # uncertainty rather than condition on theta_hat.
         return(c(common, list(
-          beta_prior   = beta_prior,
+          beta_prior   = beta_prior_default,
           prior_sigma  = rp$prior_sigma,
           eta          = rp$eta,
           hyperprior   = hyperprior,
@@ -986,7 +1044,8 @@
         n_quad <- as.integer(control$n_quad %||%
                                (if (re_cov_method == "aghq") 9L else 1L))
         return(c(common, list(
-          beta_prior  = beta_prior,
+          weights     = weights,
+          beta_prior  = beta_prior_default,
           prior_sigma = rp$prior_sigma,
           eta         = rp$eta,
           hyperprior  = hyperprior,
@@ -1003,6 +1062,18 @@
       )))
     }
     if (backend == "laplace") {
+      # tulpa_laplace() takes its numerical knobs as plain formals, and this
+      # arg list used to carry none of them: `max_iter` / `tol` / `n_threads`
+      # passed tulpa()'s union check and were dropped, as was every knob only
+      # another backend reads (`n_iter`, `adapt_delta`, `adaptive_grid`, ...).
+      # Validate against what the fitter reads, then forward it
+      # (gcol33/tulpa#870, the #770 fix for this branch). An unset knob is
+      # omitted so tulpa_laplace()'s own formal default applies.
+      tulpa_check_control(control, .CONTROL_KEYS$laplace,
+                          "tulpa[mode = 'laplace']")
+      numerics <- .drop_null(list(max_iter  = control$max_iter,
+                                  tol       = control$tol,
+                                  n_threads = control$n_threads))
       if (!is.null(spatial)) {
         # Spatial Laplace: route the field spec through tulpa_laplace(spatial=),
         # which dispatches on spatial$type (icar/car/bym2/spde/gp). At most one
@@ -1023,21 +1094,25 @@
                "`beta_prior`, or use a sampler for a custom prior under a field.",
                call. = FALSE)
         }
-        return(list(
+        return(c(list(
           y = bundle$y, n_trials = n_trials, X = bundle$X,
           re_list = .bundle_to_re_list(bundle, sigma_re),
           family = family, phi = phi, spatial = spatial,
           offset = bundle$offset
-        ))
+        ), numerics))
       }
-      return(list(
+      return(c(list(
         y = bundle$y, n_trials = n_trials, X = bundle$X,
         re_list = .bundle_to_re_list(bundle, sigma_re),
         family = family, phi = phi, phi2 = phi2,
-        offset = bundle$offset, beta_prior = beta_prior,
+        offset = bundle$offset, beta_prior = beta_prior_default,
         weights = weights, X_zi = bundle$X_zi,
-        zi_prior_sd = zi_prior_sd
-      ))
+        zi_prior_sd = zi_prior_sd,
+        # Keeps the joint latent precision (`H_latent`) on the fit, so the
+        # linear-predictor draws behind posterior_predict() and WAIC / LOO take
+        # the random effects jointly with the fixed effects (gcol33/tulpa#871).
+        return_joint_hessian = TRUE
+      ), numerics))
     }
     if (backend == "gibbs") {
       re <- bundle$re_terms %||% list()
@@ -1206,10 +1281,13 @@
     # invisible from the other -- the drift gcol33/tulpa#632 measured on
     # `k_samples` (gcol33/tulpa#676).
     if (backend == "mala") {
+      pre <- .glmm_mala_metric(m)
       return(.drop_null(list(
         log_posterior = m$log_posterior,
         grad_log_posterior = m$grad_log_posterior,
-        init = m$init,
+        init = pre$init,
+        mass_matrix = pre$mass_matrix,
+        mass_diag = pre$mass_diag,
         n_iter = control$n_iter,
         warmup = control$warmup,
         epsilon = control$epsilon,
@@ -1324,7 +1402,13 @@
         adj_row_ptr     = sp$adj_row_ptr,
         adj_col_idx     = sp$adj_col_idx,
         n_neighbors     = sp$n_neighbors,
-        scale_factor    = sp$scale_factor %||% 1.0
+        scale_factor    = sp$scale_factor %||% 1.0,
+        # A disconnected BYM2 graph is scaled per connected component: the
+        # reference scale above, and each component's remainder as a
+        # precision multiplier on phi's prior (gcol33/tulpa#902). NULL on a
+        # connected graph.
+        node_prec       = if (identical(sp$type, "bym2") && !is.null(sp$node_prec))
+          as.numeric(sp$node_prec)
       )
     }
 
@@ -1379,7 +1463,10 @@
         # The period in the kernel's own time units (validate_temporal_gp);
         # equal to the declared one when scale_coords = FALSE.
         period           = temporal$period_scaled %||% temporal$period,
-        parameterization = temporal$parameterization %||% "noncentered"
+        parameterization = temporal$parameterization %||% "noncentered",
+        # The lengthscale support in the same kernel units (validate_temporal_gp).
+        phi_prior_lower  = temporal$phi_prior_lower %||% .GP_PHI_PRIOR_BOUNDS[["lower"]],
+        phi_prior_upper  = temporal$phi_prior_upper %||% .GP_PHI_PRIOR_BOUNDS[["upper"]]
       )
     } else if (!is.null(temporal)) {
       ttype <- tolower(temporal$type %||% "")
@@ -1469,7 +1556,7 @@
         args        = sampler_args,
         re_terms    = .bundle_to_re_list(bundle, sigma_re),
         sigma_re    = sigma_re,
-        beta_prior  = beta_prior,
+        beta_prior  = beta_prior_default,
         n_chains    = as.integer(sampler_args$control$n_chains %||% 4L))
     }
 
@@ -1539,8 +1626,12 @@
 #'   on the dedicated nested-Laplace / SPDE / Polya-Gamma paths.
 #'
 #' @param formula A model formula. Fixed effects, `(1 | g)` / `(1 + x | g)`
-#'   random effects, and `offset(...)` terms are recognised.
-#' @param data A data frame.
+#'   random effects, and `offset(...)` terms are recognised. As in [stats::lm()] and
+#'   lme4, aliased fixed-effect columns of a rank-deficient design are dropped
+#'   with a warning, and unused levels of a grouping factor are dropped. A
+#'   binomial response may be logical (`TRUE` a success).
+#' @param data A data frame. Incomplete rows (an `NA` in the response, a
+#'   predictor or a grouping variable) are refused, not dropped.
 #' @param family Character family name: one of [family_names()]
 #'   (`"binomial"`, `"poisson"`, `"neg_binomial_2"`, `"gaussian"`, `"beta"`,
 #'   ...), or a categorical response family -- `"multinomial"`
@@ -1553,7 +1644,10 @@
 #'   `"eb"` estimates the random-effect covariance(s) by empirical Bayes instead
 #'   of conditioning on `sigma_re` (see [tulpa_eb()]); it is opt-in by name,
 #'   because its intervals are conditional on that estimate rather than marginal
-#'   over it.
+#'   over it. The maximized likelihood integrates the fixed effects out rather
+#'   than profiling them, so with `hyperprior = "flat"` the estimate is
+#'   restricted (REML-type) -- it matches `glmmTMB(..., REML = TRUE)`, not the
+#'   ML fit of `lme4::glmer()`.
 #' @param sigma_re Random-effect SDs to condition on: length 1 (recycled) or one
 #'   per RE term. Defaults to 1 per term with a warning. Ignored by every
 #'   backend that DETERMINES the RE scale itself -- by integrating it
@@ -1565,16 +1659,20 @@
 #'   length `nrow(data)`): each observation's log-likelihood contribution is
 #'   scaled by its weight (prior / frequency weights, e.g. survey weights or
 #'   aggregated-data counts -- a weight of 2 is equivalent to duplicating the
-#'   row). Supported on the non-spatial Laplace path (`mode = "laplace"`) and
-#'   the log-posterior samplers (`mala`, `imh_laplace`, `pathfinder`); other
-#'   backends reject weights loudly.
+#'   row). Supported on the non-spatial Laplace path (`mode = "laplace"`), the
+#'   nested-Laplace random-effect covariance integrator (`re_cov_nested`, which
+#'   `mode = "auto"` / `"structured"` pick for a weighted random-effect model,
+#'   so its scale is still integrated) and the log-posterior samplers (`mala`,
+#'   `imh_laplace`, `pathfinder`); other backends reject weights loudly.
 #' @template phi
 #' @param estimate_phi Estimate the dispersion from the data instead of
 #'   conditioning on `phi`, which then supplies the starting value. `log(phi)`
 #'   joins the empirical-Bayes maximization as one further coordinate carrying
 #'   the exact derivative of the Laplace log-marginal, so the estimate is
 #'   ML-II: the hyperprior covers the random-effect covariances only and the
-#'   dispersion enters unpenalized. `fit$phi` is the estimate and
+#'   dispersion enters unpenalized. That marginal integrates the fixed effects
+#'   out, so the estimate is the restricted (REML-type) one -- for a gaussian
+#'   response, the REML residual variance. `fit$phi` is the estimate and
 #'   `fit$phi_estimated` distinguishes it from a conditioned value.
 #'
 #'   Available under `mode = "eb"`, and for the families whose dispersion
@@ -1605,7 +1703,8 @@
 #'   (inverse-Wishart on the RE covariance, `control$re_cov = "gibbs"`),
 #'   `prior_sigma_scale` (half-Cauchy scale on the RE SD for `mode = "gibbs"`),
 #'   and `sigma_re_scale` (half-Cauchy scale on the RE / BYM2 SD for the
-#'   ModelData samplers).
+#'   ModelData samplers). An entry the resolved backend does not read is an
+#'   error naming the backends that do.
 #' @param hyperprior The outer hyperparameter prior, `"proper"` (default) or
 #'   `"flat"`, forwarded to every route that integrates or maximizes over
 #'   hyperparameters: the nested-Laplace path (see [tulpa_nested_laplace()]),
@@ -1694,6 +1793,20 @@
 #'   and `re_cov` (`"nested"` / `"gibbs"` / `"aghq"`), which selects the
 #'   RE-covariance integrator on any random-effect model.
 #'
+#'   `n_iter` does not count the same thing on every sampler, and `warmup`
+#'   (alias `n_warmup`) is validated against it before any sampler runs:
+#'   * On `hmc`, `ess`, `sghmc`, `sgld`, `gibbs`, `mala` and `imh_laplace`,
+#'     `n_iter` is the TOTAL number of iterations, warmup included, so the fit
+#'     keeps `n_iter - warmup` draws per chain and `warmup < n_iter` is
+#'     required (`n_iter = 2000, warmup = 1000` keeps 1000).
+#'   * On `re_cov_gibbs` (`control$re_cov = "gibbs"`) and `mclmc`, `n_iter` is
+#'     the number of KEPT iterations and warmup runs on top of it, so any
+#'     `warmup >= 0` is valid (`n_iter = 1000, warmup = 1000` keeps 1000).
+#'   * `smc` and `vi` read neither (`n_particles`, `vi_max_iter` instead).
+#'
+#'   The default `warmup` is `n_iter %/% 2` on the ModelData samplers and 1000
+#'   on `gibbs` / `re_cov_gibbs`.
+#'
 #'   One statistical knob lives here rather than in the signature: `marginal`
 #'   (`mode = "eb"` only) turns on the marginal-Laplace covariance correction,
 #'   which widens the reported intervals to account for the hyperparameter
@@ -1778,11 +1891,27 @@ tulpa <- function(formula, data,
          "residual VARIANCE) instead.", call. = FALSE)
   }
   tulpa_check_control(control, .CONTROL_KEYS$tulpa, "tulpa")
+  # The tempered-posterior population WBIC reads is recorded by the SMC path
+  # alone; on any other mode the knob would be dropped on the way in.
+  if (!is.null(control$wbic) && !identical(mode, "smc")) {
+    stop("`control$wbic` records the SMC population at the WBIC temperature ",
+         "1 / log(n); it is read by mode = 'smc' only, not by mode = '",
+         mode, "'.", call. = FALSE)
+  }
   if ("hyperprior" %in% names(re_prior)) {
     stop("`re_prior$hyperprior` is the `hyperprior` argument of tulpa(). Pass ",
          "`hyperprior = \"proper\"` or `\"flat\"` there.", call. = FALSE)
   }
   tulpa_check_control(re_prior, .RE_PRIOR_KEYS, "tulpa (re_prior)")
+  # The RE-covariance hyperprior anchors, named as the user set them rather
+  # than as whichever backend builds the prior (gcol33/tulpa#894).
+  if (!is.null(re_prior$eta)) {
+    .check_lkj_eta(re_prior$eta, "re_prior$eta", "tulpa()")
+  }
+  if (!is.null(re_prior$prior_sigma)) {
+    .check_pc_anchor_pair(re_prior$prior_sigma, "re_prior$prior_sigma",
+                          "tulpa()")
+  }
   hyperprior <- .hp_choice(match.arg(hyperprior))
   if (!is.logical(estimate_phi) || length(estimate_phi) != 1L ||
       is.na(estimate_phi)) {
@@ -1861,25 +1990,11 @@ tulpa <- function(formula, data,
 
   parsed <- tulpa_parse_formula(formula)
   bundle <- tulpa_build_model_data(parsed, data)
+  bundle$y <- .numeric_response(family, bundle$y)
+  .assert_complete_groups(bundle$re_terms)
 
-  # A cbind(successes, failures) response carries its own denominators. Only
-  # the binomial families have one, and a user-supplied `n_trials` alongside it
-  # would be two answers to the same question, so both are refused rather than
-  # silently resolved in favour of one.
-  if (!is.null(bundle$n_trials)) {
-    if (!.family_reads_trials(family)) {
-      stop(sprintf(paste0(
-        "A cbind(successes, failures) response is the binomial idiom; ",
-        "family = '%s' takes a single-column response."), family),
-        call. = FALSE)
-    }
-    if (!is.null(n_trials)) {
-      stop("`n_trials` was supplied alongside a cbind(successes, failures) ",
-           "response, which already carries the denominators. Drop one.",
-           call. = FALSE)
-    }
-    n_trials <- bundle$n_trials
-  }
+  # A cbind(successes, failures) response carries its own denominators.
+  n_trials <- .resolve_pair_trials(family, bundle$n_trials, n_trials)
 
   # One R-side reading of `n_trials`, so every door answers the same
   # (gcol33/tulpa#677). It used to be checked only at the C++ boundary, which
@@ -1887,24 +2002,7 @@ tulpa <- function(formula, data,
   # on one door and a recycled vector on the others, and a `n_trials` handed to
   # a non-binomial family was read by nothing at all -- no signal for a user who
   # meant a binomial and typed poisson.
-  if (!is.null(n_trials)) {
-    if (!.family_reads_trials(family)) {
-      stop(sprintf(paste0(
-        "`n_trials` is the binomial denominator and is not read by ",
-        "family = '%s'. Drop it, or use family = 'binomial'."), family),
-        call. = FALSE)
-    }
-    n_trials <- as.integer(n_trials)
-    if (length(n_trials) == 1L) n_trials <- rep(n_trials, bundle$n_obs)
-    if (length(n_trials) != bundle$n_obs) {
-      stop(sprintf(paste0(
-        "`n_trials` must have length 1 (recycled) or nrow(data) (%d); got %d."),
-        bundle$n_obs, length(n_trials)), call. = FALSE)
-    }
-    if (any(!is.na(n_trials) & n_trials < 1L)) {
-      stop("`n_trials` must be a positive integer count.", call. = FALSE)
-    }
-  }
+  n_trials <- .normalize_n_trials(family, n_trials, bundle$n_obs)
 
   # Zero inflation: a second linear predictor for the structural-zero logit.
   # The compiled Laplace kernel carries it as process 1 (eta[1]); see
@@ -1929,6 +2027,9 @@ tulpa <- function(formula, data,
   # silently into the C++ kernels as a NaN estimate.
   .assert_finite_model_inputs(bundle$X, bundle$y, n_trials = n_trials,
                               offset = bundle$offset)
+  bundle$X <- .drop_aliased_fixed(bundle$X)
+  bundle$n_fixed <- ncol(bundle$X)
+  bundle$fixed_names <- colnames(bundle$X)
   if (!is.null(weights)) {
     weights <- as.numeric(weights)
     if (length(weights) != bundle$n_obs || anyNA(weights) ||
@@ -1940,6 +2041,14 @@ tulpa <- function(formula, data,
   K <- length(bundle$re_terms %||% list())
 
   has_latent <- (parsed$n_latent_blocks %||% 0L) > 0L
+
+  # The inline field paths below return before `.tulpa_fitter_args()`, where
+  # `re_prior` is checked against the backend; their joint nested-Laplace
+  # driver reads none of its keys (gcol33/tulpa#893).
+  if ((parsed$n_spatial_field_blocks %||% 0L) > 0L ||
+      (parsed$n_temporal_field_blocks %||% 0L) > 0L) {
+    .check_re_prior_backend(re_prior %||% list(), "nested_laplace_joint")
+  }
 
   # Inline areal varying-coefficient field(s): spatial(graph = , formula =
   # ~ ... || cell). Each bar term expands to independent CAR blocks (one per
@@ -2011,7 +2120,8 @@ tulpa <- function(formula, data,
     # built by spatial_icar() / spatial_car() is not re-reported.
     if (!is.null(spatial_spec$adjacency)) {
       spatial_spec$adjacency <-
-        .validate_adjacency_arg(spatial_spec$adjacency, "spatial$adjacency")
+        .validate_adjacency_arg(spatial_spec$adjacency, "spatial$adjacency",
+                                field = .isolated_node_field(spatial_type))
     }
     sp_lc <- spatial_type
     # RSR is a MODIFIER on a field, not a field type: the spec keeps its own
@@ -2028,7 +2138,7 @@ tulpa <- function(formula, data,
         spatial_spec$type <- "icar"
         spatial_spec$rsr  <- TRUE
       }
-      spatial_type <- "rsr"
+      spatial_type <- .rsr_spatial_type(sp_lc)
     }
     if (sp_lc == "svc") {
       # Spatially-varying coefficients: coordinate-addressed (coords from the
@@ -2064,13 +2174,7 @@ tulpa <- function(formula, data,
         # The SPDE projector A maps observations -> mesh nodes; it must have one
         # row per observation in `data`. spatial_spde() builds A from the same
         # data, so a mismatch means the spec was built from a different frame.
-        n_a <- tryCatch(nrow(spatial_spec$A), error = function(e) NULL)
-        if (is.null(n_a) || n_a != bundle$n_obs) {
-          stop("SPDE projector matrix A has ", n_a %||% "?", " row(s) but `data` ",
-               "has ", bundle$n_obs, " observation(s). Build the SPDE spec from ",
-               "the same data (spatial_spde(~ lon + lat, data = <data>)).",
-               call. = FALSE)
-        }
+        .check_spde_rows(spatial_spec, bundle$n_obs, "tulpa()")
       } else if (sp_lc == "hsgp") {
         if (!inherits(spatial_spec, "tulpa_hsgp")) {
           stop("An HSGP spatial field must be a spatial_gp(~ lon + lat, approx = 'hsgp') spec ",
@@ -2091,14 +2195,15 @@ tulpa <- function(formula, data,
         # locations the field is indexed by, which validate_gp() has just
         # resolved (gcol33/tulpa#848).
         spatial_spec <- .attach_rsr_projection(
-          spatial_spec, data, family,
+          spatial_spec, data,
           obs_to_field = as.integer(spatial_spec$obs_to_loc),
           n_field = as.integer(spatial_spec$n_spatial %||%
-                                 nrow(spatial_spec$unique_coords)))
+                                 nrow(spatial_spec$unique_coords)),
+          X_default = bundle$X)
       }
     } else if (sp_lc %in% c(.NL_FRONTDOOR_AREAL, "rsr")) {
       # Areal field: spatial(col) names the per-observation unit. RSR is areal
-      # too (it carries an adjacency), and gibbs-only.
+      # too (it carries an adjacency).
       if (is.null(parsed$spatial_var)) {
         stop("`spatial=` was supplied but the formula has no spatial(col) term ",
              "naming the per-observation spatial unit. Add e.g. `+ spatial(region)`.",
@@ -2108,19 +2213,26 @@ tulpa <- function(formula, data,
         stop("spatial(", parsed$spatial_var, ") column not found in data.",
              call. = FALSE)
       }
-      n_units <- if (!is.null(spatial_spec$adjacency)) {
-        nrow(as.matrix(spatial_spec$adjacency))
-      } else NULL
-      spatial_spec$spatial_idx <-
-        .resolve_unit_index(data[[parsed$spatial_var]], parsed$spatial_var, n_units)
+      if (is.null(spatial_spec$adjacency)) {
+        stop("An areal spatial field needs its adjacency matrix ",
+             "(spatial_car(adjacency, ...)).", call. = FALSE)
+      }
+      adj_mat <- as.matrix(spatial_spec$adjacency)
+      n_units <- nrow(adj_mat)
+      # The unit column is matched to graph nodes by the one resolver every
+      # areal door shares: by rownames(adjacency) when the ids are labels,
+      # never by their sort order (gcol33/tulpa#900).
+      spatial_spec$spatial_idx <- .resolve_spatial_idx(
+        data[[parsed$spatial_var]], n_units, adj_mat, parsed$spatial_var)
       if (isTRUE(spatial_spec$rsr)) {
         # The unit-level projector orthogonal to the restrict_to design -- the
         # whole point of the modifier. dispatch_gibbs_spatial() consumes the
-        # precomputed n_units x n_units projection.
+        # precomputed n_units x n_units projection, and the nested path reads
+        # it through the block's projector (.spatial_spec_to_nl_prior()).
         spatial_spec <- .attach_rsr_projection(
-          spatial_spec, data, family,
+          spatial_spec, data,
           obs_to_field = spatial_spec$spatial_idx,
-          n_field = n_units)
+          n_field = n_units, X_default = bundle$X)
       }
     } else {
       stop("Unknown spatial type '", spatial_type, "'. `spatial$type` must be one ",
@@ -2193,19 +2305,14 @@ tulpa <- function(formula, data,
            "per-group temporal layout). Fit the panel temporal field on its own.",
            call. = FALSE)
     }
-    if (has_spatial && !tolower(spatial_type %||% "") %in% .NL_FRONTDOOR_AREAL) {
+    if (has_spatial && !tolower(spatial_type %||% "") %in% .NL_FRONTDOOR_STACKABLE) {
       # gcol33/tulpa#812: the front-door gap named below.
       stop("A temporal field can accompany an areal (icar/car/bym2/car_proper) ",
-           "spatial field through tulpa()'s joint nested-Laplace path; the '",
-           spatial_type, "' field is fit by its own integrator through this ",
-           "front door (continuous gp/nngp/hsgp and SPDE fields are each fit ",
-           "one at a time here; RSR is sampler-only) and cannot host a ",
-           "temporal block through tulpa() yet. A continuous (hsgp/nngp) ",
-           "spatial field plus a temporal field IS fitted, directly, by ",
-           "fit_st_nested(spatial_type = 'hsgp' or 'nngp', ...) -- it is not ",
-           "yet routed through this formula front door. ",
-           "Fit one field at a time here, use an areal field for space-time ",
-           "through tulpa(), or call fit_st_nested() directly.", call. = FALSE)
+           "or spatial_gp() field through tulpa()'s multi-block ",
+           "nested-Laplace path; the '", spatial_type, "' field is fit by ",
+           "its own integrator through this front door and cannot host a ",
+           "temporal block through tulpa() yet. Fit one field at a time ",
+           "here.", call. = FALSE)
     }
     # The multiscale validator is the superset: it resolves a
     # temporal_multiscale() spec and delegates every other spec to
@@ -2224,9 +2331,10 @@ tulpa <- function(formula, data,
       stop("A grouped (panel) temporal field cannot be combined with s(...) ",
            "smoothers through tulpa() yet.", call. = FALSE)
     }
-    if (has_spatial && !tolower(spatial_type %||% "") %in% .NL_FRONTDOOR_AREAL) {
+    if (has_spatial && !tolower(spatial_type %||% "") %in% .NL_FRONTDOOR_STACKABLE) {
       stop("s(...) smoothers can accompany an areal (icar/car/bym2/car_proper) ",
-           "spatial field through the joint nested-Laplace path; the '",
+           "or spatial_gp() field through the multi-block nested-Laplace ",
+           "path; the '",
            spatial_type, "' field is fit by its own integrator and cannot ",
            "host smoother blocks through tulpa() yet.", call. = FALSE)
     }
@@ -2290,45 +2398,6 @@ tulpa <- function(formula, data,
       sel$backend, mode, hint), call. = FALSE)
   }
 
-  # spatial_rsr()'s projection is applied only inside the two binomial
-  # Polya-Gamma Gibbs kernels that read $rsr_projection
-  # (cpp_pg_binomial_gibbs_rsr() on an adjacency, cpp_pg_binomial_gibbs_gp_rsr()
-  # on an NNGP field): the spec keeps its underlying $type for every other
-  # consumer, so nested_laplace / laplace / hmc / the other backends would read
-  # that type and fit the PLAIN (unprojected) field while still reporting
-  # $spatial$rsr = TRUE -- silently dropping the projection rather than fitting
-  # it (gcol33/tulpa#792). Fail loudly instead; only an explicit or
-  # auto-selected gibbs backend carries the projection.
-  is_rsr_fit <- identical(tolower(spatial_type %||% ""), "rsr")
-  if (is_rsr_fit && !identical(sel$backend, "gibbs")) {
-    stop(sprintf(paste0(
-      "spatial_rsr() is fit only by the binomial Polya-Gamma Gibbs sampler: ",
-      "every other backend reads the underlying field's $type ('%s') and ",
-      "would fit the plain, unprojected field. The selected backend '%s' ",
-      "(mode = '%s') does not carry the RSR projection. Use mode = 'gibbs' ",
-      "or 'auto'."),
-      spatial_spec$type, sel$backend, mode), call. = FALSE)
-  }
-
-  # A continuous spatial field (gp / nngp / hsgp) plus a formula RE term turns
-  # the nested fit into a multi-block prior, and the multi-block converter
-  # behind nested_laplace (.nl_block_spec_for_cpp(), R/nested_laplace.R) has no
-  # gp / nngp / hsgp arm -- only icar / bym2 / car_proper / rw1 / rw2 / ar1 /
-  # iid / spde / tgmrf. `auto` already routes around this (feat$continuous_spatial_re
-  # in auto_select_mode()); an EXPLICIT mode = "nested_laplace" bypasses that
-  # selector entirely (it is itself a backend name), so it needs its own
-  # front-door refusal here rather than the deep, post-125-cell-grid C++ error
-  # this used to reach (gcol33/tulpa#794).
-  if (identical(sel$backend, "nested_laplace") && has_re &&
-      tolower(spatial_type %||% "") %in% .NL_FRONTDOOR_CONTINUOUS) {
-    stop(sprintf(paste0(
-      "spatial_gp() (%s) with a random-intercept term is not supported by ",
-      "mode = 'nested_laplace': its multi-block converter carries no %s ",
-      "arm. Use mode = 'laplace' (conditions the RE at `sigma_re`) or ",
-      "mode = 'exact' (samples the RE jointly via the ModelData NUTS ",
-      "sampler)."), spatial_type, spatial_type), call. = FALSE)
-  }
-
   # Latent prior blocks are consumed only by the nested-Laplace path. If the
   # user forced a non-nested backend (e.g. mode = "laplace" / "mala" / "exact"),
   # the blocks would otherwise be silently dropped -- fail loudly, and before
@@ -2384,6 +2453,30 @@ tulpa <- function(formula, data,
       "without the zero-inflation component. Zero inflation is available for: ",
       "%s."), sel$backend, paste(.zi_backends(), collapse = ", ")),
       call. = FALSE)
+  }
+
+  # auto's RE arm picks a covariance integrator itself, so the redirect below --
+  # which reads `control$re_cov` only off a conditional backend -- never saw the
+  # knob there, and `control$re_cov = "nested"` under auto ran re_cov_gibbs
+  # anyway. A caller who NAMES the integrator gets it on this path too, refused
+  # rather than swapped when that integrator cannot carry the call.
+  if (has_re && identical(sel$requested, "auto") && !is.null(control$re_cov) &&
+      sel$backend %in% c("re_cov_gibbs", "re_cov_nested")) {
+    re_cov_method <- .re_cov_method(control, "nested")
+    want <- if (re_cov_method == "gibbs") "re_cov_gibbs" else "re_cov_nested"
+    if (!identical(want, sel$backend)) {
+      if (!.auto_backend_ok(want, fam_obj, call_feat)) {
+        conflicting <- names(call_feat)[vapply(call_feat, isTRUE, logical(1))]
+        stop(sprintf(paste0(
+          "control$re_cov = '%s' names %s, which does not carry this call's ",
+          "feature(s) (%s). Drop control$re_cov to let auto pick the ",
+          "integrator that does."), re_cov_method, want,
+          paste(conflicting, collapse = ", ")), call. = FALSE)
+      }
+      sel <- .sel_redirect(sel, want, sprintf(
+        "control$re_cov = '%s' requested; RE covariance(s) integrated via %s",
+        re_cov_method, want), notify = FALSE)
+    }
   }
 
   slope_scalar_backends <- c("laplace", "mala", "pathfinder", "imh_laplace")
@@ -2572,10 +2665,23 @@ tulpa <- function(formula, data,
     }
     # This branch reaches ANY explicit Tier-1 backend under an SPDE field
     # (gibbs, mala, ess, ...), not only the natural mode = 'exact' / 'hmc'
-    # route that maps to it -- so an explicit request for one of the others is
-    # an override, recorded and warned about like every other one
-    # (gcol33/tulpa#768). The natural route is not, since nothing was lost:
-    # it is the same exact-NUTS tier reaching its own field-specific engine.
+    # route that maps to it. A request NAMING one of the others asked for an
+    # algorithm this field has no implementation of, so it is refused rather
+    # than run as NUTS under a warning (gcol33/tulpa#912; the warning was
+    # gcol33/tulpa#768, and a script that suppresses warnings got a different
+    # sampler in silence). A TIER request ("exact") promised a tier, not an
+    # algorithm, and that promise holds here, so it keeps the recorded override.
+    # The natural route is not an override at all, since nothing was lost: it
+    # is the same exact-NUTS tier reaching its own field-specific engine.
+    if (isTRUE(sel$explicit) && identical(sel$requested, sel$backend) &&
+        !identical(sel$backend, "hmc")) {
+      stop(sprintf(paste0(
+        "mode = '%s' has no implementation for an SPDE field. Its exact ",
+        "(Tier-1) sampler is NUTS over the Matern field and hyperparameters: ",
+        "pass mode = 'exact' or 'hmc' for it, or mode = 'auto' / ",
+        "'nested_laplace' for the nested-Laplace SPDE path."), sel$backend),
+        call. = FALSE)
+    }
     sel <- .sel_redirect(sel, "spde",
       "SPDE field, Tier-1 mode: exact NUTS over the Matern field + hyperparameters",
       notify = !identical(sel$backend, "hmc"))
@@ -2605,6 +2711,26 @@ tulpa <- function(formula, data,
     return(.finalize_fit(fit, backend = "spde", draws_kind = "chain",
                          n_fixed = ncol(bundle$X),
                          fixed_names = colnames(bundle$X)))
+  }
+
+  # spatial_rsr()'s projection is applied by the binomial Polya-Gamma Gibbs
+  # kernels that read $rsr_projection (cpp_pg_binomial_gibbs_rsr() on an
+  # adjacency, cpp_pg_binomial_gibbs_gp_rsr() on an NNGP field) and by the
+  # nested-Laplace multi-block driver, which reads it as the block's
+  # projector. The spec keeps its underlying $type for every other
+  # consumer, so the remaining backends would fit the PLAIN (unprojected) field
+  # while still reporting $spatial$rsr = TRUE (gcol33/tulpa#792). Checked after
+  # every redirect, on the backend that will run.
+  if (isTRUE(spatial_type %in% c("rsr", "gp_rsr")) &&
+      !sel$backend %in% c("gibbs", "nested_laplace")) {
+    stop(sprintf(paste0(
+      "A restricted %s field (spatial_rsr()) is fit by nested Laplace or, ",
+      "for family 'binomial', the Polya-Gamma Gibbs sampler; the selected ",
+      "backend '%s' (mode = '%s') reads the underlying '%s' field and would ",
+      "fit it unprojected. Use mode = 'auto', 'structured' or ",
+      "'nested_laplace' (or 'gibbs' for a binomial response)."),
+      if (identical(spatial_type, "rsr")) "areal" else "continuous",
+      sel$backend, mode, spatial_spec$type), call. = FALSE)
   }
 
   # An explicit `mode` that the redirects above moved off is reported, never
@@ -2653,21 +2779,49 @@ tulpa <- function(formula, data,
   # A `warning()`, not a `message()`, so a script that promotes warnings (or a
   # chunk that traps them) actually sees that a variance component was fixed
   # rather than estimated.
+  # The resolved SDs are kept for the fit (`$sigma_re_conditioned`), so
+  # VarCorr() / print() report the value the fit conditioned on rather than
+  # re-evaluating the call in a frame that is not the caller's
+  # (gcol33/tulpa#868).
+  sigma_re_conditioned <- NULL
   if (K > 0L &&
       !sel$backend %in% c("gibbs", "re_cov_nested", "re_cov_gibbs", "eb", "agq",
                           "nested_laplace") &&
       BACKEND_REGISTRY[[sel$backend]]$input != "modeldata") {
     if (is.null(sigma_re)) {
       sigma_re <- rep(1, K)
+      # A tier mode (auto / structured) integrates an unsupplied scale wherever
+      # a backend carries the call (gcol33/tulpa#787), so landing on a
+      # conditional backend from one is a change of estimand the caller did not
+      # ask for; name what caused it rather than leave the generic line
+      # (gcol33/tulpa#874).
+      req <- sel$requested %||% ""
+      why <- ""
+      if (nzchar(req) && !req %in% ALL_BACKENDS) {
+        on_feat <- names(call_feat)[vapply(call_feat, isTRUE, logical(1))]
+        why <- sprintf(paste0(
+          " mode = '%s' integrates an unsupplied RE scale where a backend ",
+          "carries the call, but it resolved to '%s'%s, which conditions."),
+          req, sel$backend,
+          if (length(on_feat)) sprintf(
+            " (no scale-integrating backend carries this call's %s)",
+            paste(on_feat, collapse = ", ")) else "")
+      }
       warning("tulpa(): `sigma_re` not supplied; conditioning on sigma_re = 1 for ",
-              "each of the ", K, " RE term(s). Pass `sigma_re` to override.",
-              call. = FALSE)
+              "each of the ", K, " RE term(s).", why, " Pass `sigma_re` to ",
+              "override.", call. = FALSE)
     } else if (length(sigma_re) == 1L) {
       sigma_re <- rep(sigma_re, K)
     } else if (length(sigma_re) != K) {
       stop(sprintf("`sigma_re` must have length 1 or %d (one per RE term).", K),
            call. = FALSE)
     }
+    sigma_re_conditioned <- sigma_re
+  } else if (K > 0L && identical(sel$backend, "nested_laplace") &&
+             !is.null(sigma_re)) {
+    # An explicit sigma_re conditions the nested path too (a one-point grid).
+    sigma_re_conditioned <- if (length(sigma_re) == 1L) rep(sigma_re, K)
+                            else sigma_re
   }
 
   # The same sentence for the DISPERSION, which had none (gcol33/tulpa#849).
@@ -2689,6 +2843,8 @@ tulpa <- function(formula, data,
   # Resolved before backend dispatch; `beta_prior` itself stays as supplied, so
   # the branches that reject a fixed-effect prior still see NULL when none was.
   beta_prior_resolved <- beta_prior %||% .tulpa_default_beta_prior()
+
+  control <- .auto_drop_unread_threads(control, sel)
 
   args <- .tulpa_fitter_args(sel$backend, bundle, family, sigma_re,
                              n_trials, phi, beta_prior, control,
@@ -2725,7 +2881,12 @@ tulpa <- function(formula, data,
     fit$formula <- formula
     fit$family <- family
     fit$beta_prior <- .beta_prior_applied(args, beta_prior_resolved)
+    fit$sigma_re_conditioned <- sigma_re_conditioned
     fit$call <- match.call()
+    # The laplace branch asks for the joint precision to keep `H_latent`
+    # (gcol33/tulpa#871); the kernel-curvature copy that comes with it is read
+    # by nothing on a front-door fit.
+    if (identical(sel$backend, "laplace")) fit$H_joint <- NULL
 
     # Canonical parameter layout for the S3 accessors: the fixed-effect count and
     # names plus the [fixed, random] name vector both posterior shapes share, so
@@ -2777,5 +2938,8 @@ tulpa <- function(formula, data,
       fit$n_latent_blocks <- parsed$n_latent_blocks %||% 0L
     }
   }
-  fit
+  # A chain that has not mixed is flagged here, where every sampler door
+  # returns, rather than only by a diagnostic the caller has to think to run
+  # (gcol33/tulpa#875, #878).
+  .tulpa_check_fit_convergence(fit)
 }

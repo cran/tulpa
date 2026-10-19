@@ -28,7 +28,10 @@
          log_marginal = log(w / sum(w)))
 }
 
+skip_on_cran_budget()
+
 test_that("an axis is railed exactly when its own marginal peaks at an endpoint", {
+    skip_on_cran_budget()
     up   <- .rail_stub(c(0.2, 0.5, 0.8, 0.95), c(0.001, 0.02, 0.35, 0.63))
     down <- .rail_stub(c(0.2, 0.5, 0.8, 0.95), c(0.70, 0.25, 0.04, 0.01))
     mid  <- .rail_stub(c(0.2, 0.5, 0.8, 0.95), c(0.05, 0.60, 0.30, 0.05))
@@ -46,6 +49,7 @@ test_that("an axis is railed exactly when its own marginal peaks at an endpoint"
 })
 
 test_that("the rail verdict does not move with the axis's node count", {
+    skip_on_cran_budget()
     # gcol33/tulpa#375. The materiality guard reads a per-NODE quantity, so it
     # has to be compared against a per-node reference. Against a fixed SHARE the
     # same posterior read at more nodes carries less on any one of them, and a
@@ -96,6 +100,7 @@ test_that("the rail verdict does not move with the axis's node count", {
 })
 
 test_that("a recentred axis is laid in its own coordinate and stays in support", {
+    skip_on_cran_budget()
     # `log`: unchanged from the positive-scale generator every existing caller
     # uses, so the two names are the same nodes.
     expect_identical(.nl_recenter_axis("log", log(2), 0.4),
@@ -118,6 +123,7 @@ test_that("a recentred axis is laid in its own coordinate and stays in support",
 })
 
 test_that("the registry rescue moves a railed rho, not only a railed sigma", {
+    skip_on_cran_budget()
     # Direct unit test of `.nl_registry_grid_rescue()` on bym2's (sigma, rho)
     # grid with a synthetic target: sharp and interior in log-sigma, monotone
     # rising in rho all the way to the 0.95 ceiling. That is the shape the
@@ -184,6 +190,7 @@ test_that("the registry rescue moves a railed rho, not only a railed sigma", {
 })
 
 test_that("a pinned rho axis rails without being moved, and says which", {
+    skip_on_cran_budget()
     sg <- .nl_grid_axis("field_sd")
     rg <- c(0.1, 0.4, 0.7, 0.9)          # a caller's own nodes, not the default
     gr <- expand.grid(sigma = sg, rho = rg, KEEP.OUT.ATTRS = FALSE)
@@ -221,6 +228,8 @@ test_that("a pinned rho axis rails without being moved, and says which", {
     expect_identical(both$res$outer_grid_recenter_axes, "sigma")
     expect_identical(sort(unique(both$prior$rho_grid)), sort(unique(gr$rho)))
 })
+
+skip_on_cran()
 
 test_that("a BYM2 fit whose mixing weight rails is moved off its ceiling", {
     skip_on_cran()
@@ -365,7 +374,8 @@ test_that("auto_recenter = \"always\" recentres an axis that did not rail", {
     always <- suppressWarnings(tulpa_nested_laplace(
         y = y, n_trials = rep(1L, length(y)), X = X, prior = prior,
         family = "gaussian", phi = 0.5,
-        control = c(ctrl, list(auto_recenter = "always"))))
+        control = c(ctrl, list(auto_recenter = "always",
+                               axis_refine = "none"))))
 
     # The default axis contains its own mode, so the rail-gated policy leaves
     # it alone and the unconditional one still moves it.

@@ -87,35 +87,6 @@ mean_sigma <- function(seeds, family, ...) {
   mean(est)
 }
 
-
-# --- 1. Which families actually have a Fisher-vs-observed distinction --------
-
-test_that("truncated_poisson curvature carries no y, so the two forms agree", {
-  # Pins the registry's claim that observed = expected for this family, which
-  # is what licenses it as a control in the recovery tests below.
-  for (eta in c(-1.5, -0.5, 0.3, 1.2, 2.0)) {
-    for (y in c(1, 2, 5, 20)) {
-      w_newton <- cpp_family_terms(y, 1L, eta, "truncated_poisson", 1.0)[["neg_hess"]]
-      w_obs <- cpp_family_obs_terms(y, 1L, eta, "truncated_poisson", 1.0)[["neg_hess"]]
-      expect_equal(w_newton, w_obs, tolerance = 1e-12,
-                   info = sprintf("eta = %g, y = %g", eta, y))
-    }
-  }
-})
-
-test_that("neg_binomial_2 registers the observed curvature for Newton", {
-  # The untruncated sibling carries y in its Newton weight, so it is a control
-  # for the estimator rather than for the curvature choice.
-  phi <- 2.0
-  for (eta in c(-0.5, 0.4, 1.3)) {
-    w1 <- cpp_family_terms(1, 1L, eta, "neg_binomial_2", phi)[["neg_hess"]]
-    w9 <- cpp_family_terms(9, 1L, eta, "neg_binomial_2", phi)[["neg_hess"]]
-    expect_false(isTRUE(all.equal(w1, w9, tolerance = 1e-8)))
-    expect_equal(w1, cpp_family_obs_terms(1, 1L, eta, "neg_binomial_2", phi)[["neg_hess"]],
-                 tolerance = 1e-12)
-  }
-})
-
 test_that("truncated_neg_binomial_2 Newton weight is y-free and differs from observed", {
   # The gap is the quantity the recovery tests are sensitive to. It is not a
   # rounding difference: it grows linearly in y, since the observed form carries
@@ -139,6 +110,41 @@ test_that("truncated_neg_binomial_2 Newton weight is y-free and differs from obs
   # And the two disagree materially somewhere in the support that the fits
   # below actually sample.
   expect_gt(max(abs(w_obs - w_newton)) / w_newton[1L], 0.5)
+})
+
+skip_on_cran_budget()
+
+test_that("neg_binomial_2 registers the observed curvature for Newton", {
+  skip_on_cran_budget()
+  # The untruncated sibling carries y in its Newton weight, so it is a control
+  # for the estimator rather than for the curvature choice.
+  phi <- 2.0
+  for (eta in c(-0.5, 0.4, 1.3)) {
+    w1 <- cpp_family_terms(1, 1L, eta, "neg_binomial_2", phi)[["neg_hess"]]
+    w9 <- cpp_family_terms(9, 1L, eta, "neg_binomial_2", phi)[["neg_hess"]]
+    expect_false(isTRUE(all.equal(w1, w9, tolerance = 1e-8)))
+    expect_equal(w1, cpp_family_obs_terms(1, 1L, eta, "neg_binomial_2", phi)[["neg_hess"]],
+                 tolerance = 1e-12)
+  }
+})
+
+skip_on_cran()
+
+
+# --- 1. Which families actually have a Fisher-vs-observed distinction --------
+
+test_that("truncated_poisson curvature carries no y, so the two forms agree", {
+  skip_on_cran()
+  # Pins the registry's claim that observed = expected for this family, which
+  # is what licenses it as a control in the recovery tests below.
+  for (eta in c(-1.5, -0.5, 0.3, 1.2, 2.0)) {
+    for (y in c(1, 2, 5, 20)) {
+      w_newton <- cpp_family_terms(y, 1L, eta, "truncated_poisson", 1.0)[["neg_hess"]]
+      w_obs <- cpp_family_obs_terms(y, 1L, eta, "truncated_poisson", 1.0)[["neg_hess"]]
+      expect_equal(w_newton, w_obs, tolerance = 1e-12,
+                   info = sprintf("eta = %g, y = %g", eta, y))
+    }
+  }
 })
 
 

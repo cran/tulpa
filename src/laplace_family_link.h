@@ -15,6 +15,7 @@
 #include "linalg_fast.h"
 #include "omp_threads.h"          // tulpa_parallel_sum (serial route at one thread)
 #include "tulpa/portable_math.h"   // thread-safe digamma / trigamma
+#include "tulpa/family_density.h"  // mu clamp and per-family log densities
 #include <Rcpp.h>
 #include <algorithm>
 #include <cmath>
@@ -253,11 +254,7 @@ inline double linkinv(double eta, const std::string& link) {
     if (link == "identity") return eta;
     if (link == "log") return tulpa_linalg::safe_exp(eta);
     if (link == "inverse") return 1.0 / safe_pos_eta(eta);
-    if (link == "logit") {
-        if (eta > 0) return 1.0 / (1.0 + std::exp(-eta));
-        double e = std::exp(eta);
-        return e / (1.0 + e);
-    }
+    if (link == "logit") return inv_logit_link(eta);
     if (link == "probit") return tulpa::math::portable_pnorm(eta);
     // atan(x) + atan(1/x) = pi/2 for x > 0, so each tail has a form that
     // builds it directly instead of recovering it from 0.5. The two branches
@@ -354,6 +351,33 @@ inline double mu_eta3(double eta, const std::string& link) {
     return tulpa_linalg::safe_exp(eta);
 }
 
+// d4 mu / d eta4, the companion to mu_eta3() above. Needed where the generic
+// mu-space route's Newton weight is the observed curvature, whose second
+// eta-derivative is the fourth derivative of the log density.
+inline double mu_eta4(double eta, const std::string& link) {
+    if (link == "identity") return 0.0;
+    if (link == "log") return tulpa_linalg::safe_exp(eta);
+    if (link == "inverse") { double e = safe_pos_eta(eta); return 24.0 / (e * e * e * e * e); }
+    if (link == "logit") {
+        double p;
+        if (eta > 0) { double e = std::exp(-eta); p = 1.0 / (1.0 + e); }
+        else         { double e = std::exp(eta);  p = e / (1.0 + e); }
+        return (1.0 - 2.0 * p) * (1.0 - 12.0 * p + 12.0 * p * p) * p * (1.0 - p);
+    }
+    if (link == "probit") return eta * (3.0 - eta * eta) * tulpa::math::portable_dnorm(eta);
+    if (link == "cauchit") {
+        const double d = 1.0 + eta * eta;
+        return 24.0 * eta * (1.0 - eta * eta) / (M_PI * d * d * d * d);
+    }
+    if (link == "cloglog") {
+        const double ee = std::exp(eta);
+        return std::exp(eta - ee) * (1.0 - 7.0 * ee + 6.0 * ee * ee - ee * ee * ee);
+    }
+    if (link == "sqrt") return 0.0;
+    if (link == "1mu2") { double e = safe_pos_eta(eta); return 6.5625 / (e * e * e * e * std::sqrt(e)); }
+    return tulpa_linalg::safe_exp(eta);
+}
+
 // A family name that reaches the mu-space dispatch below without matching a
 // branch is a programming error, not a data condition: every fitting path is
 // gated by the R registry, so an unmatched name means a family was registered
@@ -369,20 +393,6 @@ inline double mu_eta3(double eta, const std::string& link) {
                fn, family.c_str());
 }
 
-// The one floor on mu, applied identically by the density, the score, the
-// Newton working weight and both curvature ladders.
-//
-// A unit-interval family is held inside (0, 1); every other family with
-// positive support is held above the same epsilon; gaussian and lognormal have
-// unbounded support and are not clamped at all.
-//
-// One value, because the ladders differentiate the density: grad_mu is
-// proportional to 1 / mu for the binomial and the count families, so a wider
-// floor on the score than on the density scales the score by mu / floor while
-// the objective the line search reads is still evaluated at the true mu. The
-// two are then derivatives of different functions, and the Newton loop stops
-// where the clamped score vanishes rather than where the reported objective is
-// stationary.
 // The families the mu-space ladders below implement. Every one of variance_fn,
 // grad_mu, dgrad_mu_dmu, d2grad_mu_dmu2 and log_lik_mu carries exactly these
 // branches and calls unknown_family_stop on anything else, so the list lives
@@ -393,24 +403,14 @@ inline bool mu_space_family_supported(const std::string& base) {
            base == "inverse_gaussian" || base == "beta";
 }
 
-constexpr double kMuFloor = 1e-15;
-
-inline double clamp_mu_unit(double mu) {
-    return std::max(std::min(mu, 1.0 - kMuFloor), kMuFloor);
-}
-
-inline double clamp_mu_for_family(double mu, const std::string& family) {
-    if (family == "binomial" || family == "beta") return clamp_mu_unit(mu);
-    if (family == "gaussian" || family == "lognormal") return mu;
-    return std::max(mu, kMuFloor);
-}
-
 // The WORKING variance: the V for which dmu^2 / V is the Fisher information per
 // observation on eta. This is not Var(y) wherever the two differ -- see the
 // binomial and beta arms below -- and nothing consumes it as a response
-// variance; its only callers are the dmu^2 / V compositions in
-// grad_hess_for_family, log_lik_beta_grouped's weight, and the quotient rule in
-// curvature_deta_for_family.
+// variance; its only callers are the dmu^2 / V composition in
+// grad_hess_for_family and the quotient rule in curvature_deta_for_family,
+// neither of which a family under mu_route_weight_is_observed reaches: its
+// Newton weight is the observed curvature, and the beta arm here is the
+// expected information it is weighed against.
 inline double variance_fn(double mu, double phi, const std::string& family, int n_trials) {
     if (family == "gaussian") return phi * phi;
     if (family == "lognormal") return phi * phi;
@@ -429,9 +429,10 @@ inline double variance_fn(double mu, double phi, const std::string& family, int 
     if (family == "gamma") return mu * mu / phi;
     if (family == "inverse_gaussian") return phi * mu * mu * mu;
     if (family == "beta") {
-        // Working variance: V s.t. dmu^2 / V = Fisher info per obs on eta.
-        // Fisher info = phi^2 * (trigamma(mu*phi) + trigamma((1-mu)*phi)) * dmu^2
-        // (Ferrari & Cribari-Neto 2004).
+        // V s.t. dmu^2 / V = Fisher info per obs on eta,
+        // phi^2 * (trigamma(mu*phi) + trigamma((1-mu)*phi)) * dmu^2
+        // (Ferrari & Cribari-Neto 2004). The expected form; the Newton weight
+        // is the observed one, which adds the score term -(1 - 2 mu) dmu g_mu.
         double tg = tulpa::math::portable_trigamma(mu * phi) + tulpa::math::portable_trigamma((1.0 - mu) * phi);
         return 1.0 / (phi * phi * tg);
     }
@@ -472,10 +473,11 @@ inline double grad_mu(double y, double mu, double phi, const std::string& family
 //     -l''' = -(L''' u^3 + 3 L'' u u1 + L' u2)
 //
 // so these two are all the generic mu-space route needs on top of what it
-// already carries. They differentiate grad_mu ITSELF, not the working weight
-// dmu^2 / V that grad_hess_for_family returns -- for a family whose score is
-// the exponential-dispersion form the two ladders meet in expectation, and for
-// beta they do not meet at all.
+// already carries. They differentiate grad_mu ITSELF, not the expected weight
+// dmu^2 / V -- for a family whose score is the exponential-dispersion form the
+// two ladders meet in expectation, and for beta they do not meet at all, which
+// is why beta's Newton weight is built from this ladder
+// (mu_route_weight_is_observed).
 inline double dgrad_mu_dmu(double y, double mu, double phi,
                            const std::string& family, int n_trials) {
     if (family == "gaussian" || family == "lognormal") {
@@ -534,17 +536,91 @@ inline double d2grad_mu_dmu2(double y, double mu, double phi,
     unknown_family_stop("d2grad_mu_dmu2", family);
 }
 
+// d3 grad_mu / d mu3, the next rung: with it the ladder reaches the fourth
+// eta-derivative of the log density, -l'''' = -(L'''' u^4 + 6 L''' u^2 u1
+// + L'' (3 u1^2 + 4 u u2) + L' u3), which is the second eta-derivative of an
+// observed Newton weight on the mu-space route.
+inline double d3grad_mu_dmu3(double y, double mu, double phi,
+                             const std::string& family, int n_trials) {
+    if (family == "gaussian" || family == "lognormal") return 0.0;
+    if (family == "binomial") {
+        // g = r / P with r = y - n mu, P = mu(1-mu), P' = 1-2mu, P'' = -2.
+        const double P = mu * (1.0 - mu), Pp = 1.0 - 2.0 * mu;
+        const double r = (double)(int)y - (double)n_trials * mu;
+        const double n = (double)n_trials, P2 = P * P, P3 = P2 * P;
+        return -6.0 * n / P2 - 6.0 * n * Pp * Pp / P3
+               - 12.0 * r * Pp / P3 - 6.0 * r * Pp * Pp * Pp / (P3 * P);
+    }
+    if (family == "poisson") {
+        const double m2 = mu * mu;
+        return -6.0 * (double)(int)y / (m2 * m2);
+    }
+    if (family == "neg_binomial_2") {
+        const double yi = (double)(int)y, s = mu + phi;
+        const double m2 = mu * mu, s2 = s * s;
+        return -6.0 * yi / (m2 * m2) + 6.0 * (yi + phi) / (s2 * s2);
+    }
+    if (family == "gamma") {
+        const double m2 = mu * mu;
+        return phi * (6.0 * mu - 24.0 * y) / (m2 * m2 * mu);
+    }
+    if (family == "inverse_gaussian") {
+        const double m2 = mu * mu;
+        return (24.0 * mu - 60.0 * y) / (phi * m2 * m2 * m2);
+    }
+    if (family == "beta") {
+        const double p2 = phi * phi;
+        return -p2 * p2 * (tulpa::math::portable_pentagamma(mu * phi)
+                           + tulpa::math::portable_pentagamma((1.0 - mu) * phi));
+    }
+    unknown_family_stop("d3grad_mu_dmu3", family);
+}
+
+// Whether a family on the generic mu-space route takes the OBSERVED curvature
+// -l'' as its Newton weight rather than the expected one dmu^2 / V.
+//
+// The two differ by the score term -(L' u1): for the beta density that term is
+// -(1 - 2 mu) dmu g_mu under the logit link, and it is not small relative to
+// the expected information wherever the response sits away from its mean.
+// Newton on the expected weight is then a fixed-point iteration whose
+// contraction is the ratio of the two curvatures -- measured at 0.80 per step
+// on a beta cover arm, 61 steps to a 1e-6 residual -- where Newton on the
+// observed one converges quadratically. The observed weight can be negative
+// at a single observation; every Newton loop a beta arm reaches factorizes
+// the assembled Hessian under a positive-definiteness guard (the LM ridge or
+// the eigen clamp), so the sign of one term is not a step the loop takes.
+inline bool mu_route_weight_is_observed(const std::string& base) {
+    return base == "beta";
+}
+
+// The observed score and curvature of l(eta) = L(mu(eta)) from the ladder
+// values: L' = g, L'' = gp, u = mu_eta, u1 = mu_eta2. Every reader of the
+// observed form on the mu-space route -- the Newton weight where it is the
+// observed one, the grouped beta row, the mode-Jacobian curvature -- composes
+// it here, so there is one expression of -l'' = -(L'' u^2 + L' u1).
+inline double obs_neg_hess_mu_route(double g, double gp, double u, double u1) {
+    return -(gp * u * u + g * u1);
+}
+
+// -l''' = -(L''' u^3 + 3 L'' u u1 + L' u2): the eta-derivative of the observed
+// curvature above, with gpp = L''' and u2 = mu_eta3.
+inline double obs_curvature_deta_mu_route(double g, double gp, double gpp,
+                                          double u, double u1, double u2) {
+    return -(gpp * u * u * u + 3.0 * gp * u * u1 + g * u2);
+}
+
+// -l'''' = -(L'''' u^4 + 6 L''' u^2 u1 + L'' (3 u1^2 + 4 u u2) + L' u3), the
+// next eta-derivative, with gppp = L'''' and u3 = mu_eta4.
+inline double obs_curvature_deta2_mu_route(double g, double gp, double gpp,
+                                           double gppp, double u, double u1,
+                                           double u2, double u3) {
+    return -(gppp * u * u * u * u + 6.0 * gpp * u * u * u1
+             + gp * (3.0 * u1 * u1 + 4.0 * u * u2) + g * u3);
+}
+
 inline double log_lik_mu(double y, double mu, double phi, const std::string& family, int n_trials) {
-    if (family == "gaussian") {
-        double r = y - mu;
-        return -0.5 * std::log(2.0 * M_PI * phi * phi) - r * r / (2.0 * phi * phi);
-    }
-    if (family == "lognormal") {
-        double ly = std::log(std::max(y, 1e-300));
-        double r  = ly - mu;
-        return -ly - 0.5 * std::log(2.0 * M_PI * phi * phi)
-               - r * r / (2.0 * phi * phi);
-    }
+    if (family == "gaussian") return log_lik_gaussian(y, mu, phi);
+    if (family == "lognormal") return log_lik_lognormal(y, mu, phi);
     if (family == "binomial") {
         double p = clamp_mu_unit(mu);
         // lchoose keeps this a true log-density, matching the poisson arm below
@@ -571,12 +647,7 @@ inline double log_lik_mu(double y, double mu, double phi, const std::string& fam
         return -0.5 * std::log(2.0 * M_PI * phi * y * y * y)
                - r * r / (2.0 * phi * mu * mu * y);
     }
-    if (family == "beta") {
-        double a = mu * phi;
-        double b = (1.0 - mu) * phi;
-        return tulpa::math::portable_lgamma(phi) - tulpa::math::portable_lgamma(a) - tulpa::math::portable_lgamma(b)
-               + (a - 1.0) * std::log(y) + (b - 1.0) * std::log(1.0 - y);
-    }
+    if (family == "beta") return log_lik_beta(y, mu, phi);
     unknown_family_stop("log_lik_mu", family);
 }
 
@@ -738,13 +809,16 @@ inline GradHess grad_hess_for_family_core(
     double y, int n_trials, double eta, FamilyKind kind, const FamilyLink* fl,
     double phi, double phi2
 ) {
+    // One inverse link serves the score and the weight; the arithmetic is
+    // that of grad_log_lik_* / neg_hess_log_lik_*, so the values match them
+    // bit for bit.
     if (kind == FamilyKind::BINOMIAL) {
-        return {grad_log_lik_binomial((int)y, n_trials, eta),
-                neg_hess_log_lik_binomial((int)y, n_trials, eta)};
+        const double p = binomial_mean_logit(eta);
+        return {(int)y - n_trials * p, n_trials * p * (1.0 - p)};
     }
     if (kind == FamilyKind::POISSON) {
-        return {grad_log_lik_poisson((int)y, eta),
-                neg_hess_log_lik_poisson((int)y, eta)};
+        const double mu = poisson_mean_log(eta);
+        return {(int)y - mu, mu};
     }
     if (kind == FamilyKind::NEG_BINOMIAL_2) {
         return {grad_log_lik_negbin((int)y, eta, phi),
@@ -817,6 +891,10 @@ inline GradHess grad_hess_for_family_core(
     mu = clamp_mu_for_family(mu, fl->family);
 
     double g = grad_mu(y, mu, phi, fl->family, n_trials);
+    if (mu_route_weight_is_observed(fl->family)) {
+        const double gp = dgrad_mu_dmu(y, mu, phi, fl->family, n_trials);
+        return {g * dmu, obs_neg_hess_mu_route(g, gp, dmu, mu_eta2(eta, fl->link))};
+    }
     double V = variance_fn(mu, phi, fl->family, n_trials);
     return {g * dmu, dmu * dmu / V};
 }
@@ -913,6 +991,31 @@ inline double log_lik_for_family_core(
     return log_lik_mu(y, mu, phi, fl->family, n_trials);
 }
 
+// The log-density and its eta-space score / Fisher weight at one point, for a
+// resolved family: what log_lik_for_family_core and grad_hess_for_family_core
+// return, bit for bit. Binomial and Poisson read their exp once for all three;
+// every other kind composes the two calls.
+inline double log_lik_grad_hess_for_family_core(
+    double y, int n_trials, double eta, FamilyKind kind, const FamilyLink* fl,
+    bool pos_eta_domain, double phi, double phi2, double ll_const,
+    GradHess& gh
+) {
+    if (kind == FamilyKind::BINOMIAL) {
+        const double e = binomial_exp_neg_abs(eta);
+        const double p = binomial_mean_logit_e(eta, e);
+        gh = {(int)y - n_trials * p, n_trials * p * (1.0 - p)};
+        return log_lik_binomial_kernel_e((int)y, n_trials, eta, e) + ll_const;
+    }
+    if (kind == FamilyKind::POISSON) {
+        const double mu = poisson_mean_log(eta);
+        gh = {(int)y - mu, mu};
+        return ((int)y * eta - mu) + ll_const;
+    }
+    gh = grad_hess_for_family_core(y, n_trials, eta, kind, fl, phi, phi2);
+    return log_lik_for_family_core(y, n_trials, eta, kind, fl, pos_eta_domain,
+                                   phi, phi2, ll_const);
+}
+
 // The resolved entry: no string work, and the caller supplies the constant it
 // precomputed once per fit.
 inline double log_lik_for_family(
@@ -983,16 +1086,19 @@ inline bool has_observed_curvature(const std::string& family) {
 // observed curvature, so W_obs - w is the zero FUNCTION and every quantity built
 // on the difference is exactly zero rather than merely small. True for a
 // curvature that carries no y (poisson, binomial, the truncated poisson), for
-// neg_binomial_2's explicit branch (which returns the observed form), and for
-// the canonical-link and constant-curvature members of the generic route. A
-// non-canonical link breaks it even for those families: gaussian_log has a
-// y-carrying observed curvature where gaussian_identity does not.
+// neg_binomial_2's explicit branch (which returns the observed form), for the
+// canonical-link and constant-curvature members of the generic route, and for
+// the generic-route family whose Newton weight is the observed form under
+// every link (mu_route_weight_is_observed). A non-canonical link breaks it for
+// the others: gaussian_log has a y-carrying observed curvature where
+// gaussian_identity does not.
 inline bool working_weight_is_observed(const std::string& family) {
     if (family == "poisson" || family == "binomial" ||
         family == "neg_binomial_2" || family == "truncated_poisson") {
         return true;
     }
     FamilyLink fl = parse_family_link(family);
+    if (mu_route_weight_is_observed(fl.family)) return true;
     return (fl.family == "gaussian" && fl.link == "identity") ||
            (fl.family == "lognormal" && fl.link == "identity") ||
            (fl.family == "poisson" && fl.link == "log") ||
@@ -1146,7 +1252,7 @@ inline GradHess obs_grad_hess_for_family(
         const double u1 = mu_eta2(eta, fl.link);
         const double g  = grad_mu(y, mu, phi, fl.family, n_trials);
         const double gp = dgrad_mu_dmu(y, mu, phi, fl.family, n_trials);
-        return {g * u, -(gp * u * u + g * u1)};
+        return {g * u, obs_neg_hess_mu_route(g, gp, u, u1)};
     }
     return grad_hess_for_family(y, n_trials, eta, family, phi, phi2);
 }
@@ -1156,8 +1262,10 @@ inline GradHess obs_grad_hess_for_family(
 // enters the likelihood only through (n, sum log y, sum log(1-y)) -- the beta
 // log-density is linear in log(y) and log(1-y). Collapsing them to one row
 // carrying those sufficient statistics leaves the log-likelihood, gradient and
-// (Fisher) Hessian pointwise unchanged. With n = 1, slog_y = log(y),
-// slog_1my = log(1-y) these reduce exactly to the per-observation beta branch of
+// observed Hessian pointwise unchanged: the row's score is the sum of the n
+// scores, and the mu-curvature of the beta score carries no y, so the row's
+// is n times one observation's. With n = 1, slog_y = log(y), slog_1my =
+// log(1-y) these reduce exactly to the per-observation beta branch of
 // log_lik_mu / grad_hess_for_family (same mu clamps), so the ungrouped path is
 // byte-identical.
 inline double log_lik_beta_grouped(double slog_y, double slog_1my, int n,
@@ -1177,8 +1285,8 @@ inline GradHess grad_hess_beta_grouped(double slog_y, double slog_1my, int n,
     mu = clamp_mu_unit(mu);
     double mu_star = tulpa::math::portable_digamma(mu * phi) - tulpa::math::portable_digamma((1.0 - mu) * phi);
     double g_mu = phi * ((slog_y - slog_1my) - (double)n * mu_star);
-    double V = variance_fn(mu, phi, "beta", 1);
-    return { g_mu * dmu, (double)n * dmu * dmu / V };
+    const double gp = (double)n * dgrad_mu_dmu(0.0, mu, phi, "beta", 1);
+    return { g_mu * dmu, obs_neg_hess_mu_route(g_mu, gp, dmu, mu_eta2(eta, "logit")) };
 }
 
 // Interval-censored Gaussian latent (ordered-probit with KNOWN thresholds). The

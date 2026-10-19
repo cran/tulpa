@@ -24,6 +24,20 @@ test_that("an unrecognised metric name is rejected rather than defaulted", {
     "should be one of")
 })
 
+skip_on_cran_budget()
+
+test_that("mass_matrix is a declared control key", {
+  skip_on_cran_budget()
+  expect_true("mass_matrix" %in% .CONTROL_KEYS$sample_glmm)
+  d <- .mm_binom(40L)
+  expect_error(
+    tulpa_sample_glmm(d$y, NULL, d$X, "binomial", "hmc",
+                      control = list(n_iter = 20L, mass_matirx = "auto")),
+    "mass_matirx")
+})
+
+skip_on_cran()
+
 test_that("every accepted metric name reaches the kernel", {
   skip_on_cran()
   d <- .mm_binom(120L)
@@ -66,15 +80,6 @@ test_that("a backend with no mass matrix refuses a non-default metric", {
                                        vi_max_iter = 50L,
                                        mass_matrix = "diag")))
   }
-})
-
-test_that("mass_matrix is a declared control key", {
-  expect_true("mass_matrix" %in% .CONTROL_KEYS$sample_glmm)
-  d <- .mm_binom(40L)
-  expect_error(
-    tulpa_sample_glmm(d$y, NULL, d$X, "binomial", "hmc",
-                      control = list(n_iter = 20L, mass_matirx = "auto")),
-    "mass_matirx")
 })
 
 # A model whose layout carries a correlated hyperparameter pair is what the

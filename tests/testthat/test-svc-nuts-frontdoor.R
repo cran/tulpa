@@ -26,7 +26,46 @@ test_that("svc requires an exact mode (nested/laplace refuse)", {
   )
 })
 
+# HSGP-approximated SVC (gcol33/tulpa#813): the same front door, a Hilbert-
+# space basis field instead of an NNGP one. compute_param_layout keys the field
+# size on data.svc_hsgp_data.m_total (m^2, shared across terms) rather than
+# n_obs, so the stored svc_w[] columns are basis coefficients (beta), not
+# per-observation field values -- reconstructing the surface needs the same
+# cpp_hsgp_field_predict() krige the HSGP spatial-field predict path uses
+# (R/methods_generic.R:.hsgp_field_at), treating each posterior draw as its own
+# equally-weighted grid cell.
+.hsgp_svc_field_from_draws <- function(fit, spatial, term = 1L) {
+  m    <- as.integer(spatial$m)
+  Mtot <- m * m
+  wcol <- grep("^svc_w\\[", colnames(fit$draws))
+  beta_grid <- fit$draws[, wcol[seq((term - 1L) * Mtot + 1L, term * Mtot)],
+                        drop = FALSE]
+  sigma2_grid     <- exp(fit$draws[, sprintf("log_sigma2_svc[%d]", term)])
+  lengthscale_grid <- exp(fit$draws[, sprintf("log_phi_svc[%d]", term)])
+  n_draws <- nrow(fit$draws)
+  cm <- as.matrix(spatial$coords_matrix)
+  as.numeric(cpp_hsgp_field_predict(
+    cm, cm, m, as.numeric(spatial$c_boundary),
+    beta_grid, sigma2_grid, lengthscale_grid, rep(1 / n_draws, n_draws)))
+}
+
+# Rows sharing a site: the NNGP field lives on the distinct locations and each
+# row reads its own. Refused before -- as rows, two observations at one site are
+# a distance-0 pair, perfectly correlated, and the neighbour covariance singular.
+make_svc_sites <- function(n_site = 30L, per = 3L, seed = 405L) {
+  set.seed(seed)
+  lon <- runif(n_site); lat <- runif(n_site)
+  bsurf <- 0.9 * sin(2.8 * lon) + 0.7 * cos(2.2 * lat)
+  site <- rep(seq_len(n_site), each = per)
+  d <- data.frame(lon = lon[site], lat = lat[site], x = rnorm(n_site * per))
+  d$y <- rpois(nrow(d), exp(0.2 + (0.8 + bsurf[site]) * d$x))
+  list(d = d, bsurf = bsurf, site = site)
+}
+
+skip_on_cran_budget()
+
 test_that("auto mode routes SVC / TVC to the exact ModelData backend (#222)", {
+  skip_on_cran_budget()
   sel_svc <- tulpa:::auto_select_mode(
     family = list(name = "poisson"), n_obs = 100L,
     has_spatial = TRUE, has_temporal = FALSE, has_latent = FALSE,
@@ -41,6 +80,48 @@ test_that("auto mode routes SVC / TVC to the exact ModelData backend (#222)", {
   expect_equal(sel_tvc$mode, "exact")
   expect_equal(tulpa:::BACKEND_REGISTRY[[sel_tvc$backend]]$input, "modeldata")
 })
+
+test_that("svc(approx = 'nngp') puts the field on the distinct locations", {
+  skip_on_cran_budget()
+  s <- make_svc_sites()
+  X <- model.matrix(~ x, s$d)
+  v <- validate_svc(spatial_svc(~ lon + lat, terms = ~ x - 1, nn = 5L), s$d, X)
+  expect_identical(v$n_obs, nrow(s$d))
+  expect_identical(v$n_loc, 30L)
+  expect_identical(v$obs_to_loc, s$site)
+  expect_identical(nrow(v$neighbor_info$nn_idx), 30L)
+  expect_identical(v$n_spatial, 30L)
+  spec <- tulpa:::.svc_sampler_spec(v, X)
+  expect_identical(nrow(spec$coords), 30L)
+  expect_identical(spec$obs_to_loc, s$site - 1L)
+  expect_length(spec$X_svc, nrow(s$d))            # still one row per observation
+  # Distinct coordinates keep the identity map.
+  s1 <- make_svc_pois(n = 30L)
+  v1 <- validate_svc(spatial_svc(~ lon + lat, terms = ~ x - 1, nn = 5L),
+                     s1$d, model.matrix(~ x, s1$d))
+  expect_null(v1$obs_to_loc)
+  expect_null(tulpa:::.svc_sampler_spec(v1, model.matrix(~ x, s1$d))$obs_to_loc)
+})
+
+test_that("rows sharing a site read one field value in eta", {
+  skip_on_cran_budget()
+  s <- make_svc_sites(n_site = 12L, per = 2L)
+  X <- model.matrix(~ x, s$d)
+  v <- validate_svc(spatial_svc(~ lon + lat, terms = ~ x - 1, nn = 4L,
+                                parameterization = "centered"), s$d, X)
+  spec <- tulpa:::.svc_sampler_spec(v, X)
+  set.seed(9)
+  w <- rnorm(12L)
+  draw <- matrix(c(0.2, 0.8, log(0.5), log(0.3), w), nrow = 1L)
+  eta <- tulpa:::cpp_tulpa_glmm_eta_draws(
+    draw, s$d$y, rep(1L, nrow(s$d)), X, "poisson", svc_spec = spec)
+  wc <- w - mean(w)                                 # the level is centred away
+  expect_equal(as.numeric(eta),
+               as.numeric(X %*% c(0.2, 0.8) + s$d$x * wc[s$site]),
+               tolerance = 1e-12)
+})
+
+skip_on_cran()
 
 test_that("svc fits under the default (auto) mode without erroring (#222)", {
   skip_if_not_slow()
@@ -120,29 +201,6 @@ test_that("svc exact NUTS is divergence-free and recovers the field scale (#144/
   expect_true(is.finite(sigma_svc) && sigma_svc > 0.1)
 })
 
-# HSGP-approximated SVC (gcol33/tulpa#813): the same front door, a Hilbert-
-# space basis field instead of an NNGP one. compute_param_layout keys the field
-# size on data.svc_hsgp_data.m_total (m^2, shared across terms) rather than
-# n_obs, so the stored svc_w[] columns are basis coefficients (beta), not
-# per-observation field values -- reconstructing the surface needs the same
-# cpp_hsgp_field_predict() krige the HSGP spatial-field predict path uses
-# (R/methods_generic.R:.hsgp_field_at), treating each posterior draw as its own
-# equally-weighted grid cell.
-.hsgp_svc_field_from_draws <- function(fit, spatial, term = 1L) {
-  m    <- as.integer(spatial$m)
-  Mtot <- m * m
-  wcol <- grep("^svc_w\\[", colnames(fit$draws))
-  beta_grid <- fit$draws[, wcol[seq((term - 1L) * Mtot + 1L, term * Mtot)],
-                        drop = FALSE]
-  sigma2_grid     <- exp(fit$draws[, sprintf("log_sigma2_svc[%d]", term)])
-  lengthscale_grid <- exp(fit$draws[, sprintf("log_phi_svc[%d]", term)])
-  n_draws <- nrow(fit$draws)
-  cm <- as.matrix(spatial$coords_matrix)
-  as.numeric(cpp_hsgp_field_predict(
-    cm, cm, m, as.numeric(spatial$c_boundary),
-    beta_grid, sigma2_grid, lengthscale_grid, rep(1 / n_draws, n_draws)))
-}
-
 test_that("hsgp svc requires an exact mode (nested/laplace refuse)", {
   skip_on_cran()
   s <- make_svc_pois(n = 30L)
@@ -190,4 +248,22 @@ test_that("hsgp svc exact NUTS recovers the varying-coefficient surface", {
   spatial <- validate_svc(spatial, s$d, model.matrix(~x, s$d))
   fm <- .hsgp_svc_field_from_draws(fit, spatial)
   expect_gt(cor(fm - mean(fm), s$bsurf - mean(s$bsurf)), 0.8)
+})
+
+test_that("svc exact NUTS fits a field with repeated sites", {
+  skip_on_cran()
+  s <- make_svc_sites()
+  fit <- tulpa(y ~ x, data = s$d, family = "poisson",
+               spatial = spatial_svc(~ lon + lat, terms = ~ x - 1, nn = 5L),
+               mode = "exact",
+               control = list(n_iter = 600L, n_warmup = 300L, n_chains = 2L,
+                              seed = 1L))
+  expect_equal(sum(grepl("^svc_w\\[", colnames(fit$draws))), 30L)
+  post <- svc(fit)
+  expect_identical(dim(post$draws)[2], nrow(s$d))  # reported per row
+  # Rows at one site carry the same draws.
+  expect_identical(post$draws[, 1L, 1L], post$draws[, 2L, 1L])
+  sm <- summary(post)
+  site_mean <- tapply(sm$mean, s$site, `[`, 1L)
+  expect_gt(cor(site_mean, s$bsurf - mean(s$bsurf)), 0.5)
 })

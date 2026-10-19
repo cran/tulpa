@@ -28,7 +28,10 @@ helper_make_small_spde_fem <- function(n_obs = 60, max_edge = c(0.3, 0.6),
   )
 }
 
+skip_on_cran_budget()
+
 test_that("SPDE NC transform: arena adjoint matches finite differences", {
+  skip_on_cran_budget()
   fem <- helper_make_small_spde_fem(n_obs = 80, max_edge = c(0.30, 0.60),
                                     cutoff = 0.10, seed = 42L)
   n   <- fem$n_mesh
@@ -94,6 +97,7 @@ test_that("SPDE NC transform: arena adjoint matches finite differences", {
 # here points at a regression in build_Q_rational or the adjoint's K_sum
 # accumulation, not at the upstream integer path.
 test_that("SPDE NC transform: rational adjoint matches finite differences", {
+  skip_on_cran_budget()
   fem <- helper_make_small_spde_fem(n_obs = 80, max_edge = c(0.30, 0.60),
                                     cutoff = 0.10, seed = 42L)
   n   <- fem$n_mesh
@@ -157,53 +161,8 @@ test_that("SPDE NC transform: rational adjoint matches finite differences", {
                             res$grad_log_tau_fd, rel_lt))
 })
 
-# Forward-mode tangent check. SpdeNcTransform::forward_with_tangent is the
-# kernel powering apply_spde_nc_transform_fwd (the fwd::Dual instantiation of
-# compute_log_post_generic for joint-NUTS SPDE). For each input axis a unit
-# tangent is seeded; we check dw_fwd ≈ dw_fd column-by-column.
-test_that("SPDE NC transform: forward-mode tangent matches finite differences", {
-  fem <- helper_make_small_spde_fem(n_obs = 80, max_edge = c(0.30, 0.60),
-                                    cutoff = 0.10, seed = 42L)
-  n   <- fem$n_mesh
-  expect_true(n >= 8)
-
-  range_true <- 0.4
-  sigma_true <- 1.0
-  nu         <- 1
-  kappa      <- sqrt(8 * nu) / range_true
-  tau        <- 1.0 / (sqrt(4 * pi) * kappa * sigma_true)
-
-  set.seed(13L)
-  z_init <- rnorm(n, sd = 0.5)
-
-  res <- cpp_test_spde_nc_transform_fwd(
-    C0_diag       = fem$C0_diag,
-    G1_x          = fem$G1_x,
-    G1_i          = fem$G1_i,
-    G1_p          = fem$G1_p,
-    z_init        = z_init,
-    log_kappa_val = log(kappa),
-    log_tau_val   = log(tau),
-    fd_eps        = 1e-5
-  )
-
-  expect_equal(dim(res$dw_fwd), c(n, n + 2L))
-  expect_equal(dim(res$dw_fd),  c(n, n + 2L))
-
-  # Many dw entries are near-zero (sparse spatial coupling), so use a
-  # combined abs+rel check: pass when |fwd - fd| is either tiny in absolute
-  # terms or tiny relative to max(|fwd|, |fd|).
-  err     <- abs(res$dw_fwd - res$dw_fd)
-  scale   <- pmax(abs(res$dw_fwd), abs(res$dw_fd))
-  abs_tol <- 1e-8
-  rel_tol <- 1e-4
-  ok      <- (err < abs_tol) | (err < rel_tol * scale)
-  expect_true(all(ok),
-              label = sprintf("max abs err %.3e, max rel err %.3e",
-                              max(err), max(err / pmax(1e-8, scale))))
-})
-
 test_that("SPDE NC transform: rational forward-mode tangent matches FD", {
+  skip_on_cran_budget()
   fem <- helper_make_small_spde_fem(n_obs = 80, max_edge = c(0.30, 0.60),
                                     cutoff = 0.10, seed = 42L)
   n   <- fem$n_mesh
@@ -243,5 +202,54 @@ test_that("SPDE NC transform: rational forward-mode tangent matches FD", {
   ok      <- (err < abs_tol) | (err < rel_tol * scale)
   expect_true(all(ok),
               label = sprintf("rational: max abs err %.3e, max rel err %.3e",
+                              max(err), max(err / pmax(1e-8, scale))))
+})
+
+skip_on_cran()
+
+# Forward-mode tangent check. SpdeNcTransform::forward_with_tangent is the
+# kernel powering apply_spde_nc_transform_fwd (the fwd::Dual instantiation of
+# compute_log_post_generic for joint-NUTS SPDE). For each input axis a unit
+# tangent is seeded; we check dw_fwd ≈ dw_fd column-by-column.
+test_that("SPDE NC transform: forward-mode tangent matches finite differences", {
+  skip_on_cran()
+  fem <- helper_make_small_spde_fem(n_obs = 80, max_edge = c(0.30, 0.60),
+                                    cutoff = 0.10, seed = 42L)
+  n   <- fem$n_mesh
+  expect_true(n >= 8)
+
+  range_true <- 0.4
+  sigma_true <- 1.0
+  nu         <- 1
+  kappa      <- sqrt(8 * nu) / range_true
+  tau        <- 1.0 / (sqrt(4 * pi) * kappa * sigma_true)
+
+  set.seed(13L)
+  z_init <- rnorm(n, sd = 0.5)
+
+  res <- cpp_test_spde_nc_transform_fwd(
+    C0_diag       = fem$C0_diag,
+    G1_x          = fem$G1_x,
+    G1_i          = fem$G1_i,
+    G1_p          = fem$G1_p,
+    z_init        = z_init,
+    log_kappa_val = log(kappa),
+    log_tau_val   = log(tau),
+    fd_eps        = 1e-5
+  )
+
+  expect_equal(dim(res$dw_fwd), c(n, n + 2L))
+  expect_equal(dim(res$dw_fd),  c(n, n + 2L))
+
+  # Many dw entries are near-zero (sparse spatial coupling), so use a
+  # combined abs+rel check: pass when |fwd - fd| is either tiny in absolute
+  # terms or tiny relative to max(|fwd|, |fd|).
+  err     <- abs(res$dw_fwd - res$dw_fd)
+  scale   <- pmax(abs(res$dw_fwd), abs(res$dw_fd))
+  abs_tol <- 1e-8
+  rel_tol <- 1e-4
+  ok      <- (err < abs_tol) | (err < rel_tol * scale)
+  expect_true(all(ok),
+              label = sprintf("max abs err %.3e, max rel err %.3e",
                               max(err), max(err / pmax(1e-8, scale))))
 })

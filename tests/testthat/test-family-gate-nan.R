@@ -20,51 +20,6 @@
                         "t", "lognormal", "truncated_poisson",
                         "truncated_neg_binomial_2")
 
-test_that("the observed-curvature 2nd derivative declines with NaN, not a number", {
-    declined <- character(0)
-    for (f in .families_with_2nd) {
-        ok <- tryCatch(tulpa:::cpp_family_has_obs_curvature_2nd_derivative(f),
-                       error = function(e) NA)
-        if (is.na(ok)) next
-        v <- tryCatch(
-            tulpa:::cpp_family_obs_curvature_deta2(
-                y = 2, n_trials = 10L, eta = 0.3, family = f, phi = 1.5,
-                phi2 = 4.0),
-            error = function(e) NULL)
-        if (is.null(v)) next
-        # The flag and the value say the same thing: a declining family gets
-        # NaN, an admitted one gets a finite number.
-        expect_equal(unname(v[["exact"]]), if (ok) 1 else 0, info = f)
-        if (ok) {
-            expect_true(is.finite(v[["d2w_obs_deta2"]]), info = f)
-        } else {
-            expect_true(is.nan(v[["d2w_obs_deta2"]]), info = f)
-        }
-        if (!ok) declined <- c(declined, f)
-    }
-    # The gate has to actually decline something, else the test above passes on
-    # an empty set.
-    expect_gt(length(declined), 0)
-})
-
-test_that("truncated_neg_binomial_2 is the declining case, and used to be finite", {
-    # Its working weight IS the observed curvature at first order but the
-    # second-order delta is unregistered, so this is precisely the family whose
-    # sum was the working answer wearing the observed one's name.
-    expect_false(tulpa:::cpp_family_has_obs_curvature_2nd_derivative(
-        "truncated_neg_binomial_2"))
-    v <- tulpa:::cpp_family_obs_curvature_deta2(
-        y = 3, n_trials = 1L, eta = 0.2, family = "truncated_neg_binomial_2",
-        phi = 2.0)
-    expect_true(is.nan(v[["d2w_obs_deta2"]]))
-    # The WORKING second derivative is available and finite: the decline is a
-    # statement about the observed one, not about the family being unsupported.
-    w <- tulpa:::cpp_family_curvature_deta2(
-        y = 3, n_trials = 1L, eta = 0.2, family = "truncated_neg_binomial_2",
-        phi = 2.0)
-    expect_true(is.finite(w[["d2w_deta2"]]))
-})
-
 test_that("the ZI mixture 4th-derivative entry declines in every field at once", {
     # A partial decline would let a caller read one finite field off a
     # five-field answer that has no exact form.
@@ -104,7 +59,29 @@ test_that("an unregistered family is an R error at more than one thread", {
     }
 })
 
+skip_on_cran_budget()
+
+test_that("truncated_neg_binomial_2 is the declining case, and used to be finite", {
+    skip_on_cran_budget()
+    # Its working weight IS the observed curvature at first order but the
+    # second-order delta is unregistered, so this is precisely the family whose
+    # sum was the working answer wearing the observed one's name.
+    expect_false(tulpa:::cpp_family_has_obs_curvature_2nd_derivative(
+        "truncated_neg_binomial_2"))
+    v <- tulpa:::cpp_family_obs_curvature_deta2(
+        y = 3, n_trials = 1L, eta = 0.2, family = "truncated_neg_binomial_2",
+        phi = 2.0)
+    expect_true(is.nan(v[["d2w_obs_deta2"]]))
+    # The WORKING second derivative is available and finite: the decline is a
+    # statement about the observed one, not about the family being unsupported.
+    w <- tulpa:::cpp_family_curvature_deta2(
+        y = 3, n_trials = 1L, eta = 0.2, family = "truncated_neg_binomial_2",
+        phi = 2.0)
+    expect_true(is.finite(w[["d2w_deta2"]]))
+})
+
 test_that("tweedie without its variance power is refused before any solve", {
+    skip_on_cran_budget()
     # tweedie_power() has no default and stops per observation; the stop is
     # hoisted to the calling thread, so it reaches R at any thread count.
     set.seed(4592L)
@@ -122,4 +99,37 @@ test_that("tweedie without its variance power is refused before any solve", {
             info = paste("n_threads =", nt)
         )
     }
+})
+
+skip_on_cran()
+
+test_that("the observed-curvature 2nd derivative declines with NaN, not a number", {
+    skip_on_cran()
+    declined <- character(0)
+    for (f in .families_with_2nd) {
+        ok <- tryCatch(tulpa:::cpp_family_has_obs_curvature_2nd_derivative(f),
+                       error = function(e) NA)
+        if (is.na(ok)) next
+        # A response inside the family's support, so a finite value is the
+        # admitted answer and not an artefact of evaluating outside it.
+        v <- tryCatch(
+            tulpa:::cpp_family_obs_curvature_deta2(
+                y = if (f == "beta") 0.3 else 2, n_trials = 10L, eta = 0.3,
+                family = f, phi = 1.5,
+                phi2 = 4.0),
+            error = function(e) NULL)
+        if (is.null(v)) next
+        # The flag and the value say the same thing: a declining family gets
+        # NaN, an admitted one gets a finite number.
+        expect_equal(unname(v[["exact"]]), if (ok) 1 else 0, info = f)
+        if (ok) {
+            expect_true(is.finite(v[["d2w_obs_deta2"]]), info = f)
+        } else {
+            expect_true(is.nan(v[["d2w_obs_deta2"]]), info = f)
+        }
+        if (!ok) declined <- c(declined, f)
+    }
+    # The gate has to actually decline something, else the test above passes on
+    # an empty set.
+    expect_gt(length(declined), 0)
 })

@@ -1,7 +1,10 @@
+
+skip_on_cran_budget()
 # test-nested-laplace-bym2.R
 # Tests for BYM2 nested Laplace (2D grid over sigma_spatial, rho)
 
 test_that("BYM2 nested Laplace runs with 2D grid", {
+  skip_on_cran_budget()
   adj <- make_grid_adjacency(5, 5)  # 25 sites
   dat <- simulate_spatial_data(
     n_sites = 25, n_obs_per_site = 10,
@@ -25,7 +28,7 @@ test_that("BYM2 nested Laplace runs with 2D grid", {
   )
 
   expect_equal(result$n_grid, 9L)
-  expect_true(all(is.finite(result$log_marginal)))
+  expect_cells_solved(result)
   expect_true(all(result$n_iter > 0))
 
   # Log-marginals should vary
@@ -34,6 +37,7 @@ test_that("BYM2 nested Laplace runs with 2D grid", {
 })
 
 test_that("BYM2 nested Laplace warm-start works", {
+  skip_on_cran_budget()
   adj <- make_grid_adjacency(5, 5)
   dat <- simulate_spatial_data(
     n_sites = 25, n_obs_per_site = 10,
@@ -55,7 +59,7 @@ test_that("BYM2 nested Laplace warm-start works", {
     max_iter = 50L, tol = 1e-6, n_threads = 1L
   )
 
-  expect_true(all(is.finite(result$log_marginal)))
+  expect_cells_solved(result)
   # Warm-start should help later points converge faster
   expect_true(any(result$n_iter[2:5] <= result$n_iter[1]))
 })

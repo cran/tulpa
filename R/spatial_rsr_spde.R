@@ -4,7 +4,7 @@
 #' @param data Data frame
 #'
 #' @return NULL (invisibly); errors if validation fails
-#' @keywords internal
+#' @noRd
 validate_spatial <- function(spatial, data) {
   if (is.null(spatial)) return(invisible(NULL))
 
@@ -61,7 +61,7 @@ validate_spatial <- function(spatial, data) {
 # Spatial Confounding Mitigation
 # =============================================================================
 
-#' Restricted Spatial Regression (RSR)
+#' Restricted spatial regression (RSR)
 #'
 #' @description
 #' Apply Restricted Spatial Regression to mitigate spatial confounding.
@@ -74,9 +74,9 @@ validate_spatial <- function(spatial, data) {
 #'
 #' @param spatial An areal specification -- `spatial_car()`, `spatial_icar()`,
 #'   `spatial_bym2()` or a proper-CAR spec -- or an NNGP one, `spatial_gp()`.
-#'   The projection is applied by the binomial Polya-Gamma Gibbs sampler, which
-#'   carries the field's own prior precision as an adjacency or as Vecchia
-#'   factors; an HSGP basis (`spatial_gp(approx = "hsgp")`) and an SPDE mesh
+#'   The projection is applied by the binomial Polya-Gamma Gibbs sampler and
+#'   by nested Laplace, both of which carry the field's own prior precision as
+#'   an adjacency or as Vecchia factors; an HSGP basis (`spatial_gp(approx = "hsgp")`) and an SPDE mesh
 #'   (`spatial_spde()`) are neither, and are refused at construction rather
 #'   than accepted and then unfittable.
 #' @param restrict_to Formula specifying which covariates to orthogonalize
@@ -127,8 +127,14 @@ validate_spatial <- function(spatial, data) {
 #' - Prediction is the main goal
 #' - Interval coverage matters more than the point estimate
 #'
-#' RSR fits are binomial, through `mode = "gibbs"` (which `mode = "auto"`
-#' selects for it).
+#' A restricted field is fitted by nested Laplace (`mode = "structured"` or
+#' `"nested_laplace"`, under any family that path takes, and alongside a
+#' random-effect term, a temporal field, smoothers or `latent()` blocks), where
+#' the field reaches the linear predictor through the projector `S P_perp`
+#' (`S` the observation-to-unit or observation-to-location incidence), or, for
+#' a binomial response, by the Polya-Gamma Gibbs sampler (`mode = "gibbs"`).
+#' `mode = "auto"` selects Gibbs for a binomial response and nested Laplace
+#' otherwise. Areal and NNGP fields take both routes.
 #'
 #' @examples
 #' # Create RSR spatial structure on an areal field
@@ -218,15 +224,18 @@ spatial_rsr <- function(spatial, restrict_to) {
 
   # Two kernels apply the projection: `cpp_pg_binomial_gibbs_rsr()` on an areal
   # neighbour list and `cpp_pg_binomial_gibbs_gp_rsr()` on an NNGP field
-  # (gcol33/tulpa#848). A field shape neither of them carries is refused here,
+  # (gcol33/tulpa#848); either field is also read by the nested-Laplace
+  # multi-block driver as a block projector. A field shape none of them carries
+  # is refused here,
   # where the argument that caused it is still in hand, rather than downstream
   # by a message about a backend the user never chose (gcol33/tulpa#815).
   sp_type <- tolower(spatial$type %||% "")
   if (!sp_type %in% .RSR_FIELDS) {
     stop(sprintf(paste0(
       "spatial_rsr() restricts an areal or NNGP field (%s); got '%s'.\n",
-      "The projection is applied by the binomial Polya-Gamma Gibbs sampler, ",
-      "which carries an areal neighbour list or an NNGP field and neither an ",
+      "The projection is applied by the binomial Polya-Gamma Gibbs sampler ",
+      "and by nested Laplace, which carry an areal neighbour list or an NNGP ",
+      "field and neither an ",
       "HSGP basis nor an SPDE mesh. Build the RSR field on spatial_car() / ",
       "spatial_icar() / spatial_bym2() / spatial_gp(), or drop spatial_rsr() ",
       "and fit the field directly."),
@@ -245,15 +254,9 @@ spatial_rsr <- function(spatial, restrict_to) {
 }
 
 
-#' Print method for tulpa_rsr
-#'
-#' @param x A tulpa_rsr object
-#' @param ... Passed to underlying print method
-#'
-#' @return The input `x`, returned invisibly. Called for the side effect of
-#'   printing the spatial specification and its restricted-spatial-regression
-#'   modifier to the console.
-#'
+#' @rdname spatial_rsr
+#' @param x A `tulpa_rsr` specification.
+#' @param ... Passed to the print method of the restricted field.
 #' @export
 print.tulpa_rsr <- function(x, ...) {
   # Print underlying spatial type
@@ -276,60 +279,9 @@ print.tulpa_rsr <- function(x, ...) {
 #' @param X Design matrix of covariates to orthogonalize against
 #'
 #' @return Projection matrix (n x n)
-#' @keywords internal
+#' @noRd
 compute_rsr_projection <- function(X) {
   .orthogonal_complement_projection(X, "RSR")
-}
-
-
-#' Validate RSR specification
-#'
-#' @param spatial tulpa_rsr object
-#' @param data Data frame
-#' @param formula Model formula (to extract design matrix)
-#'
-#' @return Updated spatial object with projection matrix
-#' @keywords internal
-validate_rsr <- function(spatial, data, formula) {
-  if (is.null(spatial) || !inherits(spatial, "tulpa_rsr")) {
-    return(spatial)
-  }
-
-  # Build design matrix for RSR covariates
-  rsr_formula <- spatial$rsr_formula
-
-  # Check if terms exist in data
-  rsr_vars <- all.vars(rsr_formula)
-  missing_vars <- setdiff(rsr_vars, names(data))
-  if (length(missing_vars) > 0) {
-    stop(sprintf("RSR variables not found in data: %s",
-                 paste(missing_vars, collapse = ", ")), call. = FALSE)
-  }
-
-  # Build design matrix
-  X_rsr <- model.matrix(rsr_formula, data = data)
-
-  # Compute projection matrix
-  spatial$rsr_projection <- compute_rsr_projection(X_rsr)
-  spatial$rsr_vars <- rsr_vars
-
-  spatial
-}
-
-
-#' Apply RSR projection to spatial effect
-#'
-#' @description
-#' Project spatial effect into the space orthogonal to covariates.
-#' Called during posterior computation.
-#'
-#' @param w Spatial effect vector (length n)
-#' @param P_perp Projection matrix from compute_rsr_projection
-#'
-#' @return Projected spatial effect (length n)
-#' @keywords internal
-apply_rsr_projection <- function(w, P_perp) {
-  as.vector(P_perp %*% w)
 }
 
 
@@ -337,7 +289,7 @@ apply_rsr_projection <- function(w, P_perp) {
 # SPDE spatial field (Matern via FEM on triangular mesh)
 # =====================================================================
 
-#' SPDE Spatial Field (Matern via Triangular Mesh)
+#' SPDE spatial field (Matern via triangular mesh)
 #'
 #' Specify a continuous Matern spatial field using the SPDE approach
 #' (Lindgren, Rue & Lindstrom 2011). Builds a triangular mesh from
@@ -398,6 +350,8 @@ spatial_spde <- function(coords, data = NULL, mesh = NULL,
   }
 
   if (ncol(obs_coords) != 2) stop("coords must have 2 columns", call. = FALSE)
+  .check_coords_finite(obs_coords, "spatial_spde()")
+  .check_spde_prior_args(prior_range, prior_sigma, "spatial_spde()")
   prior_stated <- c(range = !is.null(prior_range), sigma = !is.null(prior_sigma))
   prior_range <- prior_range %||% .nl_default_range_prior(obs_coords)
   prior_sigma <- prior_sigma %||% .nl_scale_anchor()
@@ -407,9 +361,13 @@ spatial_spde <- function(coords, data = NULL, mesh = NULL,
          call. = FALSE)
   }
 
-  # Build mesh if not provided
+  # Build mesh if not provided. The mesh is built on the DISTINCT sites: a
+  # repeated-measures design puts several observations at one location, and a
+  # triangulation cannot take a vertex twice (it stopped with the vendored
+  # CDT's "Duplicate vertex detected"; gcol33/tulpa#909). Every observation,
+  # repeats included, still gets its own row of the projector A below.
   if (is.null(mesh)) {
-    mesh_args <- list(coords = obs_coords, cutoff = cutoff)
+    mesh_args <- list(coords = unique(obs_coords), cutoff = cutoff)
     if (!is.null(boundary)) mesh_args$boundary <- boundary
     if (!is.null(max_edge)) mesh_args$max_edge <- max_edge
     mesh <- do.call(tulpaMesh::tulpa_mesh, mesh_args)
@@ -451,7 +409,7 @@ spatial_spde <- function(coords, data = NULL, mesh = NULL,
   )
 }
 
-#' SPDE Spatial Field from Custom Matrices
+#' SPDE spatial field from custom matrices
 #'
 #' Specify a continuous Matern spatial field using externally-provided FEM
 #' matrices. Use this with meshes from fmesher, rSPDE, or any other source.
@@ -472,12 +430,24 @@ spatial_spde <- function(coords, data = NULL, mesh = NULL,
 #'
 #' @return A `tulpa_spatial` object with type `"spde"`.
 #'
+#' @examples
+#' # FEM matrices of a 6-node 1-D chain mesh, observed at the nodes:
+#' n <- 6L
+#' C <- Matrix::Diagonal(n)
+#' G <- Matrix::bandSparse(n, k = c(-1, 0, 1),
+#'                         diagonals = list(rep(-1, n - 1), c(1, rep(2, n - 2), 1),
+#'                                          rep(-1, n - 1)))
+#' A <- Matrix::Diagonal(n)
+#' sp <- spatial_spde_custom(C, G, A, prior_range = c(1, 0.5),
+#'                           prior_sigma = c(1, 0.01))
+#' sp$type
 #' @export
 spatial_spde_custom <- function(C, G, A, nu = 1,
                                 prior_range = NULL,
                                 prior_sigma = NULL,
                                 coords = NULL) {
   .validate_spde_nu(nu)
+  .check_spde_prior_args(prior_range, prior_sigma, "spatial_spde_custom()")
   prior_stated <- c(range = !is.null(prior_range), sigma = !is.null(prior_sigma))
   if (is.null(prior_range)) {
     if (!is.null(coords)) prior_range <- .nl_default_range_prior(coords)
@@ -519,6 +489,21 @@ spatial_spde_custom <- function(C, G, A, nu = 1,
     ),
     class = c("tulpa_spatial", "list")
   )
+}
+
+# A stated SPDE anchor pair is checked where the user set it, so a range or
+# scale anchor the PC calibration cannot represent is refused naming the
+# argument, not at fit time as an unnamed anchor or a failed grid construction
+# (gcol33/tulpa#894). NULL takes the data-anchored default and is not checked.
+.check_spde_prior_args <- function(prior_range, prior_sigma, where) {
+  if (!is.null(prior_range)) {
+    .check_pc_anchor_pair(prior_range, "prior_range", where,
+                          param = "range", lower = TRUE)
+  }
+  if (!is.null(prior_sigma)) {
+    .check_pc_anchor_pair(prior_sigma, "prior_sigma", where)
+  }
+  invisible(TRUE)
 }
 
 # print.tulpa_spatial (including the SPDE branch) is defined once in

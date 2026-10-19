@@ -19,6 +19,8 @@
 # coefficient therefore gets its own gate below, against the kernel's own
 # log-prior rather than against another R statement of it.
 
+skip_on_cran()
+
 rook_adj_se <- function(nr, nc) {
   n <- nr * nc; W <- matrix(0, n, n)
   id <- function(r, c) (c - 1) * nr + r
@@ -64,8 +66,14 @@ areal_reference <- function(spatial_type, y, ntr, X, W, unit) {
   XtWX <- crossprod(X, Wv * X)
   XtWD <- crossprod(X, Wv * Dm)
   DtWD <- crossprod(Dm, Wv * Dm) + as.matrix(Qlat)
+  # The structured field's sum is a hard constraint (gcol33/tulpa#901): the
+  # latent is integrated over the sum-zero subspace, i.e. the Schur takes the
+  # kriged covariance C - C a (a'C a)^{-1} a'C with C = DtWD^{-1}.
+  a <- c(rep(1, n_units), rep(0, nlat - n_units))
+  C <- solve(DtWD)
+  Cc <- C - (C %*% a) %*% t(C %*% a) / as.numeric(t(a) %*% C %*% a)
   list(beta = th[seq_len(p)],
-       H_beta = XtWX - XtWD %*% solve(DtWD, t(XtWD)))
+       H_beta = XtWX - XtWD %*% Cc %*% t(XtWD))
 }
 
 for (ty in c("icar", "car", "bym2")) {

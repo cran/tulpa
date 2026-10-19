@@ -2,7 +2,15 @@
 # covariate, integrated by the nested-Laplace temporal kernels. Recovery anchor:
 # the fitted smooth must track a known nonlinear function at the nodes.
 
+# No block in this file reads the outer Pareto-k diagnostic. It runs after the
+# grid integration with the RNG state restored, so turning it off leaves the
+# fitted smooth unchanged and drops its importance-sample inner solves.
+.sm_ctl <- list(diagnose_k = FALSE)
+
+skip_on_cran_budget()
+
 test_that("the parser strips s() from the fixed formula and records the call", {
+  skip_on_cran_budget()
   p <- tulpa_parse_formula(y ~ x1 + s(elev) + s(prec, k = 15) + (1 | g))
   expect_equal(p$n_smooth_terms, 2L)
   fx <- attr(stats::terms(p$fixed_formula), "term.labels")
@@ -11,6 +19,7 @@ test_that("the parser strips s() from the fixed formula and records the call", {
 })
 
 test_that(".smooth_block_from_call bins and validates", {
+  skip_on_cran_budget()
   d <- data.frame(x = seq(-1, 1, length.out = 200), z = letters[1:4])
 
   b <- tulpa:::.smooth_block_from_call(quote(s(x)), d, globalenv())
@@ -42,6 +51,29 @@ test_that(".smooth_block_from_call bins and validates", {
     "rw")
 })
 
+test_that("unsupported smoother combinations error clearly", {
+  skip_on_cran_budget()
+  d <- data.frame(x = runif(60), time = rep(1:10, 6),
+                  lon = rnorm(60), lat = rnorm(60))
+  d$y <- rbinom(60, 1, 0.5)
+
+  # ModelData sampler backends do not thread smoother blocks.
+  expect_error(
+    tulpa(y ~ s(x), data = d, family = "binomial", mode = "vi"),
+    "ModelData")
+  # An SPDE field runs its own integrator.
+  expect_error(
+    tulpa(y ~ s(x), data = d, family = "binomial",
+          spatial = spatial_spde(~ lon + lat, data = d)),
+    "'spde' field")
+
+  # smooth_effects on a smooth-free fit.
+  plain <- structure(list(family = "poisson"), class = "tulpa_fit")
+  expect_error(smooth_effects(plain), "no s\\(")
+})
+
+skip_on_cran()
+
 test_that("s(x) routes through nested Laplace and recovers a sin curve", {
   skip_on_cran()
   set.seed(71)
@@ -50,7 +82,7 @@ test_that("s(x) routes through nested Laplace and recovers a sin curve", {
   f <- function(x) sin(2 * x)
   d$y <- rpois(n, exp(0.4 + f(d$x)))
 
-  fit <- tulpa(y ~ s(x, k = 25), data = d, family = "poisson")
+  fit <- tulpa(y ~ s(x, k = 25), data = d, family = "poisson", control = .sm_ctl)
   expect_s3_class(fit, "tulpa_fit")
   expect_equal(fit$backend, "nested_laplace")
   expect_match(fit$selection_reason, "smoother")
@@ -75,7 +107,8 @@ test_that("s(x) works alongside fixed effects for a gaussian response", {
   d <- data.frame(x = runif(n, 0, 1), z = rnorm(n))
   d$y <- 0.5 + 0.8 * d$z + cos(2 * pi * d$x) + rnorm(n, 0, 0.5)
 
-  fit <- tulpa(y ~ z + s(x, k = 20), data = d, family = "gaussian", phi = 0.25)
+  fit <- tulpa(y ~ z + s(x, k = 20), data = d, family = "gaussian", phi = 0.25,
+               control = .sm_ctl)
   cf <- coef(fit)
   expect_lt(abs(cf[["z"]] - 0.8), 0.1)
 
@@ -92,7 +125,8 @@ test_that("two smoothers fit through the joint multi-block path", {
   f1 <- function(x) sin(2 * x); f2 <- function(x) 0.5 * x^2 - 0.7
   d$y <- rpois(n, exp(0.3 + f1(d$x1) + f2(d$x2)))
 
-  fit <- tulpa(y ~ s(x1, k = 15) + s(x2, k = 15), data = d, family = "poisson")
+  fit <- tulpa(y ~ s(x1, k = 15) + s(x2, k = 15), data = d, family = "poisson",
+               control = .sm_ctl)
   expect_equal(fit$backend, "nested_laplace")
 
   s1 <- smooth_effects(fit, 1L)
@@ -101,22 +135,22 @@ test_that("two smoothers fit through the joint multi-block path", {
   expect_gt(stats::cor(s2$estimate, f2(s2$x)), 0.9)
 })
 
-test_that("unsupported smoother combinations error clearly", {
-  d <- data.frame(x = runif(60), time = rep(1:10, 6),
-                  lon = rnorm(60), lat = rnorm(60))
-  d$y <- rbinom(60, 1, 0.5)
+test_that("a smoother shares the nested stack with a spatial_gp() field", {
+  skip_on_cran()
+  set.seed(81)
+  n <- 300L
+  d <- data.frame(x = runif(n, -2, 2), lon = runif(n), lat = runif(n))
+  f <- function(x) sin(2 * x)
+  d$y <- rpois(n, exp(0.3 + f(d$x) + 0.5 * sin(3 * d$lon)))
 
-  # ModelData sampler backends do not thread smoother blocks.
-  expect_error(
-    tulpa(y ~ s(x), data = d, family = "binomial", mode = "vi"),
-    "ModelData")
-  # Continuous spatial fields run their own integrator.
-  expect_error(
-    tulpa(y ~ s(x), data = d, family = "binomial",
-          spatial = spatial_gp(~ lon + lat)),
-    "areal")
+  # The NNGP neighbour count sets how closely the field approximates a full GP;
+  # the shared-stack routing and the covariate smooth read off this fit hold at
+  # six neighbours as at the default.
+  fit <- suppressWarnings(
+    tulpa(y ~ s(x, k = 15), data = d, family = "poisson",
+          spatial = spatial_gp(~ lon + lat, nn = 6), control = .sm_ctl))
+  expect_equal(fit$backend, "nested_laplace")
 
-  # smooth_effects on a smooth-free fit.
-  plain <- structure(list(family = "poisson"), class = "tulpa_fit")
-  expect_error(smooth_effects(plain), "no s\\(")
+  sm <- smooth_effects(fit)
+  expect_gt(stats::cor(sm$estimate, f(sm$x)), 0.9)
 })

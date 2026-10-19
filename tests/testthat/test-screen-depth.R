@@ -19,6 +19,8 @@
 # BYM2 joint fit over a 45-cell (sigma x rho x alpha) grid, at a seed where the
 # prune safety gate does not fall back.
 
+skip_on_cran()
+
 .screen_chain_adj <- function(n_s) {
     nbr <- lapply(seq_len(n_s),
                   function(s) setdiff(c(s - 1L, s + 1L), c(0L, n_s + 1L)))
@@ -117,7 +119,7 @@ test_that("a one-step screen ranks the grid the same way the default does", {
     expect_identical(which.max(f1$log_marginal), which.max(f5$log_marginal))
 
     expect_lt(max(abs(unname(coef(f1)) - unname(coef(f5)))), 5e-3)
-    expect_lt(max(abs(summary(f1)$std.error - summary(f5)$std.error)), 1e-2)
+    expect_lt(max(abs(coef(summary(f1))$std.error - coef(summary(f5))$std.error)), 1e-2)
     expect_lt(max(abs(f1$theta_mean - f5$theta_mean)), 5e-3)
 })
 

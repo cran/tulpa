@@ -50,7 +50,10 @@
 #'   multi-process model. `NULL` (default) shares the effect; `FALSE` fits
 #'   process-specific effects and emits a warning.
 #' @param scale_coords Logical. Standardize coordinates before fitting
-#'   (default `TRUE`).
+#'   (default `TRUE`): each column is centred and all are divided by one
+#'   common factor, so distances keep their proportions and an isotropic
+#'   kernel stays isotropic. [spatial_range()] reports the range in the
+#'   original coordinate units either way.
 #' @param parameterization Latent parameterization for the exact-NUTS field.
 #'   One of `"noncentered"` (default; samples `z ~ N(0, I)` and reconstructs the
 #'   field as `w = f(z, sigma2, phi)`, avoiding the field/hyperparameter funnel),
@@ -167,14 +170,9 @@ spatial_gp <- function(coords,
 }
 
 
-#' Print method for tulpa_gp
-#'
-#' @param x A tulpa_gp object
-#' @param ... Ignored
-#'
-#' @return The input `x`, returned invisibly. Called for the side effect of
-#'   printing the Gaussian-process spatial specification to the console.
-#'
+#' @rdname spatial_gp
+#' @param x A `tulpa_gp` or `tulpa_hsgp` specification.
+#' @param ... Ignored.
 #' @export
 print.tulpa_gp <- function(x, ...) {
   cat("tulpa Gaussian Process spatial specification\n")
@@ -198,16 +196,7 @@ print.tulpa_gp <- function(x, ...) {
 }
 
 
-
-
-#' Print method for tulpa_hsgp
-#'
-#' @param x A tulpa_hsgp object
-#' @param ... Ignored
-#'
-#' @return The input `x`, returned invisibly. Called for the side effect of
-#'   printing the Hilbert-space GP spatial specification to the console.
-#'
+#' @rdname spatial_gp
 #' @export
 print.tulpa_hsgp <- function(x, ...) {
   cat("tulpa Hilbert Space GP (HSGP) spatial specification\n")
@@ -233,7 +222,7 @@ print.tulpa_hsgp <- function(x, ...) {
 #'
 #' @return A validated tulpa_hsgp object with coords_matrix filled in
 #'
-#' @keywords internal
+#' @noRd
 validate_hsgp <- function(spatial, data) {
   coords <- prepare_coords(spatial$coord_vars, data, spatial$scale_coords)
   spatial$n_obs <- nrow(coords)
@@ -242,18 +231,7 @@ validate_hsgp <- function(spatial, data) {
 }
 
 
-#' Validate HSGP-MSGP (multi-scale GP with HSGP approximation)
-#' @noRd
-validate_hsgp_multiscale <- function(spatial, data) {
-  coords <- prepare_coords(spatial$coord_vars, data, spatial$scale_coords)
-  list(
-    coords_matrix = coords,
-    n_obs = nrow(coords)
-  )
-}
-
-
-#' Multi-Scale Gaussian Process spatial structure
+#' Multi-scale Gaussian process spatial structure
 #'
 #' @description
 #' Specify a multi-scale spatial random effect that decomposes spatial
@@ -281,8 +259,9 @@ validate_hsgp_multiscale <- function(spatial, data) {
 #' @param nn_regional Number of nearest neighbors for regional scale. Default 30.
 #' @param shared Logical; if TRUE (default), spatial effects enter both
 #'   all processes.
-#' @param scale_coords Logical; if TRUE (default), coordinates are scaled to
-#'   unit variance before computing distances.
+#' @param scale_coords Logical; if TRUE (default), coordinates are centred
+#'   and divided by one common factor before computing distances (see
+#'   [spatial_gp()]).
 #' @param approx Approximation method: `"nngp"` (default) for Nearest Neighbor
 #'   GP; `"hsgp"` for Hilbert Space GP (faster for smooth fields).
 #' @param m Number of HSGP basis functions per dimension (default 6). Only
@@ -453,14 +432,9 @@ spatial_multiscale <- function(coords,
 }
 
 
-#' Print method for tulpa_multiscale
-#'
-#' @param x A tulpa_multiscale object
-#' @param ... Ignored
-#'
-#' @return The input `x`, returned invisibly. Called for the side effect of
-#'   printing the multi-scale spatial specification to the console.
-#'
+#' @rdname spatial_multiscale
+#' @param x A `tulpa_multiscale` specification.
+#' @param ... Ignored.
 #' @export
 print.tulpa_multiscale <- function(x, ...) {
   cat("tulpa Multi-Scale spatial specification\n")
@@ -506,6 +480,11 @@ print.tulpa_multiscale <- function(x, ...) {
 #' @return Updated spatial object with computed neighbor structure.
 #' @seealso [validate_temporal_multiscale()], [spatial_gp()],
 #'   [spatial_multiscale()]
+#' @examples
+#' set.seed(1)
+#' d <- data.frame(lon = runif(30), lat = runif(30))
+#' gp <- validate_gp(spatial_gp(~ lon + lat, nn = 5), d)
+#' gp$n_spatial
 #' @export
 validate_gp <- function(gp, data) {
   if (is.null(gp)) return(NULL)
@@ -527,22 +506,18 @@ validate_gp <- function(gp, data) {
   coords <- as.matrix(data[, gp$coord_vars, drop = FALSE])
   storage.mode(coords) <- "double"
 
-  # Check for missing coordinates
-  if (any(is.na(coords))) {
-    stop("Coordinate columns contain missing values", call. = FALSE)
-  }
+  .check_coords_finite(coords, "Coordinate columns", scale = gp$scale_coords)
 
-  # Scale coordinates if requested
+  # Scale coordinates if requested, by one common factor so an isotropic kernel
+  # stays isotropic in the user's geometry (gcol33/tulpa#907).
   if (gp$scale_coords) {
-    coords <- scale(coords)
+    coords <- .scale_coords_isotropic(coords)
   }
 
   # Detect unique coordinates (NNGP requires unique locations)
-  coord_key <- do.call(paste, c(
-    lapply(seq_len(ncol(coords)), function(j) coords[, j]), list(sep = ",")))
-  unique_keys <- unique(coord_key)
-  obs_to_loc <- match(coord_key, unique_keys)
-  unique_coords <- coords[match(unique_keys, coord_key), , drop = FALSE]
+  ul <- .unique_locations(coords)
+  obs_to_loc <- ul$obs_to_loc
+  unique_coords <- ul$unique_coords
   n_unique <- nrow(unique_coords)
 
   if (n_unique < N) {
@@ -576,4 +551,17 @@ validate_gp <- function(gp, data) {
   }
 
   gp
+}
+
+
+# The distinct locations of a coordinate matrix and each row's one, in order of
+# first appearance. An NNGP field lives on locations, not rows: two rows at one
+# site would be two field values at distance 0, perfectly correlated, and the
+# neighbour covariance singular. Shared by validate_gp() and validate_svc().
+.unique_locations <- function(coords) {
+  coord_key <- do.call(paste, c(
+    lapply(seq_len(ncol(coords)), function(j) coords[, j]), list(sep = ",")))
+  unique_keys <- unique(coord_key)
+  list(obs_to_loc = as.integer(match(coord_key, unique_keys)),
+       unique_coords = coords[match(unique_keys, coord_key), , drop = FALSE])
 }

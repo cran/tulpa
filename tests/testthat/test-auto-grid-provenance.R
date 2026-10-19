@@ -1,3 +1,84 @@
+
+test_that("both registry tau defaults are recognised, an unrelated tau grid is not", {
+    for (d in list(tulpa:::.nl_grid_axis("gmrf_tau"),
+                   exp(seq(log(0.3), log(30), length.out = 5)))) {
+        expect_false(tulpa:::.nl_axis_is_pinned(
+            list(type = "icar", tau_grid = d), "tau_grid"))
+    }
+    expect_true(tulpa:::.nl_axis_is_pinned(
+        list(type = "icar", tau_grid = c(0.5, 1, 2)), "tau_grid"))
+    # A field with no engine default of its own is always a pin when present.
+    expect_true(tulpa:::.nl_axis_is_pinned(
+        list(type = "bym2", rho_grid = c(0.3, 0.6)), "rho_grid"))
+})
+
+test_that("axis aliases cover the bare, block-prefixed and coerced spellings", {
+    expect_identical(tulpa:::.nl_axis_alias("sigma"), c("sigma", "theta"))
+    # One block: a bare or coerced name can only be that block's axis.
+    expect_identical(tulpa:::.nl_axis_alias("sigma", 1L, n_blocks = 1L),
+                     c("b1.sigma", "sigma", "theta"))
+    # Several blocks: every axis is prefixed, so an unprefixed match would be
+    # attributing another block's axis.
+    expect_identical(tulpa:::.nl_axis_alias("sigma", 2L, n_blocks = 3L),
+                     "b2.sigma")
+})
+
+test_that("an edge hit is found under any of the three spellings", {
+    hit <- function(edge, ..., blocks = list()) {
+        tulpa:::.nl_edge_axis_hit(
+            list(pareto_k_grid_edge_axes = edge, blocks = blocks), ...)
+    }
+    expect_true(hit("sigma", "sigma"))
+    expect_true(hit("theta", "sigma"))                    # coerced vector grid
+    expect_true(hit("b2.sigma", "sigma", 2L,
+                    blocks = list(1, 2, 3)))              # multi-block
+    expect_false(hit("b2.sigma", "sigma", 1L, blocks = list(1, 2, 3)))
+    expect_false(hit(c("rho", "alpha"), "sigma"))
+    expect_false(hit(character(0), "sigma"))
+})
+
+test_that("a decline reason is stamped only when the recenter did not run", {
+    declined <- tulpa:::.nl_decline_recenter(
+        list(outer_grid_placement = "fixed"), "axis_pinned")
+    expect_identical(declined$outer_grid_recenter_declined, "axis_pinned")
+    ran <- tulpa:::.nl_decline_recenter(
+        list(outer_grid_placement = "auto_recentered"), "axis_pinned")
+    expect_null(ran$outer_grid_recenter_declined)
+})
+
+# The joint placement pass over one family, driven with a
+# `refit(prior, prior_sigma)` callback.
+.place_field_sd <- function(res, prior, prior_sigma, refit, auto = logical(0),
+                            enabled = TRUE, max_attempts = 2L) {
+    tulpa:::.joint_place_axes(
+        res, list(prior = prior, prior_sigma = prior_sigma),
+        refit = function(st, from) refit(st$prior, st$prior_sigma),
+        families = tulpa:::.joint_placement_families(auto = auto)["sigma"],
+        enabled = enabled, max_attempts = max_attempts)
+}
+.place_copy_sd <- function(res, prior, copy, cp, prior_sigma, refit,
+                           auto = list(), enabled = TRUE, max_attempts = 2L) {
+    tulpa:::.joint_place_axes(
+        res, list(prior = prior, prior_sigma = prior_sigma, copy = copy,
+                  cp = cp),
+        refit = function(st, from) refit(st$prior, st$prior_sigma),
+        families = tulpa:::.joint_placement_families(auto = auto)["copy_sigma"],
+        enabled = enabled, max_attempts = max_attempts)
+}
+
+test_that("auto_grid() marks a prior specification as well as a grid or a knob", {
+    m <- auto_grid(list("pc.prec", c(U = 3, alpha = 0.01)))
+    expect_true(is_auto_grid(m))
+    expect_true(is.list(m))
+    expect_identical(m[[1L]], "pc.prec")
+    # A scalar control knob (fit_st_nested's grid knobs, gcol33/tulpa#294).
+    k <- auto_grid(4L)
+    expect_true(is_auto_grid(k))
+    expect_identical(as.numeric(k), 4)
+    expect_error(auto_grid(list()), "non-empty")
+})
+
+skip_on_cran_budget()
 # Outer-axis provenance for the auto-recenter passes (gcol33/tulpa#293).
 #
 # The rescues in R/nested_laplace_auto_grid.R must recentre a DEFAULT axis and
@@ -10,6 +91,7 @@
 # hold at every test tier.
 
 test_that("auto_grid marks a grid and is_auto_grid reads the mark back", {
+    skip_on_cran_budget()
     g <- auto_grid(c(0.5, 1, 2))
     expect_true(is_auto_grid(g))
     expect_identical(as.numeric(g), c(0.5, 1, 2))
@@ -26,6 +108,7 @@ test_that("auto_grid marks a grid and is_auto_grid reads the mark back", {
 # coordinates, so a coercion that flattens destroys the axis it is marking and
 # leaves those families with no way to declare a default at all.
 test_that("a matrix-valued axis keeps its shape through the mark", {
+    skip_on_cran_budget()
     m <- matrix(as.numeric(1:6), nrow = 3, ncol = 2,
                 dimnames = list(NULL, c("d1", "off")))
     g <- auto_grid(m)
@@ -42,6 +125,7 @@ test_that("a matrix-valued axis keeps its shape through the mark", {
 })
 
 test_that("a marked matrix axis survives every consumer of the mark", {
+    skip_on_cran_budget()
     p <- 2L
     lc <- tulpa:::.mcar_default_logchol_grid(p)
     expect_true(is.matrix(lc))
@@ -78,6 +162,7 @@ test_that("a marked matrix axis survives every consumer of the mark", {
 })
 
 test_that("a pinned axis is pinned and every flavour of default is not", {
+    skip_on_cran_budget()
     base <- list(type = "icar")
     # No axis at all.
     expect_false(tulpa:::.nl_axis_is_pinned(base, "sigma_grid"))
@@ -107,20 +192,8 @@ test_that("a pinned axis is pinned and every flavour of default is not", {
     expect_true(tulpa:::.nl_axis_is_pinned(moved, "sigma_grid"))
 })
 
-test_that("both registry tau defaults are recognised, an unrelated tau grid is not", {
-    for (d in list(tulpa:::.nl_grid_axis("gmrf_tau"),
-                   exp(seq(log(0.3), log(30), length.out = 5)))) {
-        expect_false(tulpa:::.nl_axis_is_pinned(
-            list(type = "icar", tau_grid = d), "tau_grid"))
-    }
-    expect_true(tulpa:::.nl_axis_is_pinned(
-        list(type = "icar", tau_grid = c(0.5, 1, 2)), "tau_grid"))
-    # A field with no engine default of its own is always a pin when present.
-    expect_true(tulpa:::.nl_axis_is_pinned(
-        list(type = "bym2", rho_grid = c(0.3, 0.6)), "rho_grid"))
-})
-
 test_that("provenance strips markers and records them per block", {
+    skip_on_cran_budget()
     single <- list(type = "icar", sigma_grid = auto_grid(c(1, 2, 3)),
                    rho_grid = c(0.2, 0.9))
     pv <- tulpa:::.nl_grid_provenance(single)
@@ -151,6 +224,7 @@ test_that("provenance strips markers and records them per block", {
 # measured answer to the second had only the user's pin to express it with --
 # which is then what the fit reports back to a user who pinned nothing.
 test_that("a declared default can ask to be integrated as written", {
+    skip_on_cran_budget()
     held  <- auto_grid(c(0.5, 1, 2), place = FALSE)
     place <- auto_grid(c(0.5, 1, 2))
     expect_true(is_auto_grid(held))
@@ -182,32 +256,8 @@ test_that("a declared default can ask to be integrated as written", {
     expect_identical(hold(blk), "default_axis_pinned")
 })
 
-test_that("axis aliases cover the bare, block-prefixed and coerced spellings", {
-    expect_identical(tulpa:::.nl_axis_alias("sigma"), c("sigma", "theta"))
-    # One block: a bare or coerced name can only be that block's axis.
-    expect_identical(tulpa:::.nl_axis_alias("sigma", 1L, n_blocks = 1L),
-                     c("b1.sigma", "sigma", "theta"))
-    # Several blocks: every axis is prefixed, so an unprefixed match would be
-    # attributing another block's axis.
-    expect_identical(tulpa:::.nl_axis_alias("sigma", 2L, n_blocks = 3L),
-                     "b2.sigma")
-})
-
-test_that("an edge hit is found under any of the three spellings", {
-    hit <- function(edge, ..., blocks = list()) {
-        tulpa:::.nl_edge_axis_hit(
-            list(pareto_k_grid_edge_axes = edge, blocks = blocks), ...)
-    }
-    expect_true(hit("sigma", "sigma"))
-    expect_true(hit("theta", "sigma"))                    # coerced vector grid
-    expect_true(hit("b2.sigma", "sigma", 2L,
-                    blocks = list(1, 2, 3)))              # multi-block
-    expect_false(hit("b2.sigma", "sigma", 1L, blocks = list(1, 2, 3)))
-    expect_false(hit(c("rho", "alpha"), "sigma"))
-    expect_false(hit(character(0), "sigma"))
-})
-
 test_that("axis index resolves by name, then by being the only log axis", {
+    skip_on_cran_budget()
     expect_identical(tulpa:::.nl_axis_index(c("sigma", "rho"), c("sigma", "theta")), 1L)
     expect_identical(tulpa:::.nl_axis_index(c("rho", "sigma"), c("sigma", "theta")), 2L)
     # icar's theta_names says "tau" while the coerced grid says "theta": the
@@ -222,6 +272,7 @@ test_that("axis index resolves by name, then by being the only log axis", {
 })
 
 test_that("recentering from a fit resolves a prefixed axis and its curvature", {
+    skip_on_cran_budget()
     mode_u <- c(log(3), 0.4)
     cov_u  <- diag(c(0.25, 0.09))
     ax <- tulpa:::.nl_axis_recenter_from_fit(
@@ -243,25 +294,17 @@ test_that("recentering from a fit resolves a prefixed axis and its curvature", {
                                                    "sigma"))
 })
 
-test_that("a decline reason is stamped only when the recenter did not run", {
-    declined <- tulpa:::.nl_decline_recenter(
-        list(outer_grid_placement = "fixed"), "axis_pinned")
-    expect_identical(declined$outer_grid_recenter_declined, "axis_pinned")
-    ran <- tulpa:::.nl_decline_recenter(
-        list(outer_grid_placement = "auto_recentered"), "axis_pinned")
-    expect_null(ran$outer_grid_recenter_declined)
-})
-
 test_that("the single-block rescue guard honours a pin and passes a default", {
+    skip_on_cran_budget()
     # No fit: a stub `res` carrying only the diagnostic fields the rescue reads,
     # and a refit that records whether it was called.
     stub_res <- list(pareto_k_regime = "collapsed_edge",
                      pareto_k_grid_edge_axes = "sigma",
                      pareto_k_grid_edge_sides = "upper",
-                     pareto_k_mode_u = log(3),
-                     pareto_k_cov_u = matrix(0.25, 1, 1),
-                     pareto_k_axis_tags = "log",
-                     pareto_k_axis_names = "sigma",
+                     outer_mode_u = log(3),
+                     outer_mode_cov_u = matrix(0.25, 1, 1),
+                     outer_mode_axis_tags = "log",
+                     outer_mode_axis_names = "sigma",
                      outer_grid_placement = "fixed")
     calls <- new.env(parent = emptyenv())
     calls$n <- 0L
@@ -275,7 +318,7 @@ test_that("the single-block rescue guard honours a pin and passes a default", {
     icar <- list(type = "icar")
 
     # 1. Axis absent -> recenters.
-    out <- tulpa:::.joint_sigma_grid_rescue(stub_res, icar, NULL, refit)
+    out <- .place_field_sd(stub_res, icar, NULL, refit)
     expect_identical(out$res$outer_grid_placement, "auto_recentered")
     expect_identical(calls$n, 1L)
     expect_gt(max(calls$grid), 3)
@@ -285,7 +328,7 @@ test_that("the single-block rescue guard honours a pin and passes a default", {
 
     # 2. Engine default handed in unmarked -> still recenters (#293).
     calls$n <- 0L
-    out <- tulpa:::.joint_sigma_grid_rescue(
+    out <- .place_field_sd(
         stub_res, c(icar, list(sigma_grid = tulpa:::.nl_grid_axis("field_sd"))),
         NULL, refit)
     expect_identical(out$res$outer_grid_placement, "auto_recentered")
@@ -293,7 +336,7 @@ test_that("the single-block rescue guard honours a pin and passes a default", {
 
     # 3. A marked caller default -> recenters.
     calls$n <- 0L
-    out <- tulpa:::.joint_sigma_grid_rescue(
+    out <- .place_field_sd(
         stub_res, c(icar, list(sigma_grid = auto_grid(c(0.2, 0.6, 1.8)))),
         NULL, refit, auto = "sigma_grid")
     expect_identical(out$res$outer_grid_placement, "auto_recentered")
@@ -301,7 +344,7 @@ test_that("the single-block rescue guard honours a pin and passes a default", {
 
     # 4. A genuine pin -> untouched, with the reason recorded.
     calls$n <- 0L
-    out <- tulpa:::.joint_sigma_grid_rescue(
+    out <- .place_field_sd(
         stub_res, c(icar, list(sigma_grid = c(0.1, 0.5, 1, 2, 3))), NULL, refit)
     expect_identical(out$res$outer_grid_placement, "fixed")
     expect_identical(out$res$outer_grid_recenter_declined, "axis_pinned")
@@ -313,7 +356,7 @@ test_that("the single-block rescue guard honours a pin and passes a default", {
     spread <- utils::modifyList(stub_res,
                                 list(pareto_k_regime = "spread",
                                      pareto_k_grid_edge_axes = character(0)))
-    out <- tulpa:::.joint_sigma_grid_rescue(spread, icar, NULL, refit)
+    out <- .place_field_sd(spread, icar, NULL, refit)
     expect_identical(out$res$outer_grid_recenter_declined, "grid_not_collapsed")
     expect_identical(out$res$outer_grid_axis_declined,
                      c(sigma = "grid_not_collapsed"))
@@ -321,22 +364,22 @@ test_that("the single-block rescue guard honours a pin and passes a default", {
 
     # 6. Collapsed, but no curvature to recentre on -> untouched, own reason.
     calls$n <- 0L
-    blind <- utils::modifyList(stub_res, list(pareto_k_mode_u = NULL,
-                                              pareto_k_cov_u = NULL))
-    out <- tulpa:::.joint_sigma_grid_rescue(blind, icar, NULL, refit)
+    blind <- utils::modifyList(stub_res, list(outer_mode_u = NULL,
+                                              outer_mode_cov_u = NULL))
+    out <- .place_field_sd(blind, icar, NULL, refit)
     expect_identical(out$res$outer_grid_recenter_declined, "no_usable_curvature")
     expect_identical(out$res$outer_grid_axis_declined,
                      c(sigma = "no_usable_curvature"))
     expect_identical(calls$n, 0L)
 
-    out <- tulpa:::.joint_sigma_grid_rescue(stub_res, icar, NULL, refit,
+    out <- .place_field_sd(stub_res, icar, NULL, refit,
                                             enabled = FALSE)
     expect_identical(out$res$outer_grid_axis_declined,
                      c(sigma = "auto_recenter_disabled"))
 
     # 7. A prior shape this rescue does not cover stamps nothing at all -- the
     #    multi-block rescue chained after it owns that fit.
-    out <- tulpa:::.joint_sigma_grid_rescue(stub_res, list(icar), NULL, refit)
+    out <- .place_field_sd(stub_res, list(icar), NULL, refit)
     expect_null(out$res$outer_grid_recenter_declined)
     expect_null(out$res$outer_grid_axis_declined)
 })
@@ -346,6 +389,7 @@ test_that("the single-block rescue guard honours a pin and passes a default", {
 # prior_sigma of its own silently turned the escalation into a second geometry
 # recenter while still reporting `attempts = 2`.
 test_that(".nl_prior_sigma_is_pinned reads provenance, not presence", {
+    skip_on_cran_budget()
     pinned <- tulpa:::.nl_prior_sigma_is_pinned
     expect_false(pinned(NULL))
     # The engine's own default handed back in carries no information a pin adds.
@@ -358,13 +402,14 @@ test_that(".nl_prior_sigma_is_pinned reads provenance, not presence", {
 })
 
 test_that("the second recenter attempt engages the PC prior unless it was PINNED", {
+    skip_on_cran_budget()
     stub_res <- list(pareto_k_regime = "collapsed_edge",
                      pareto_k_grid_edge_axes = "sigma",
                      pareto_k_grid_edge_sides = "upper",
-                     pareto_k_mode_u = log(3),
-                     pareto_k_cov_u = matrix(0.25, 1, 1),
-                     pareto_k_axis_tags = "log",
-                     pareto_k_axis_names = "sigma",
+                     outer_mode_u = log(3),
+                     outer_mode_cov_u = matrix(0.25, 1, 1),
+                     outer_mode_axis_tags = "log",
+                     outer_mode_axis_names = "sigma",
                      outer_grid_placement = "fixed")
     calls <- new.env(parent = emptyenv())
     # Never leaves collapsed_edge, so the loop runs its full two attempts.
@@ -376,7 +421,7 @@ test_that("the second recenter attempt engages the PC prior unless it was PINNED
     pc <- tulpa:::.nl_recenter("sigma_pc_prior")
 
     # No prior at all -> attempt 2 adds the engine's PC prior.
-    out <- tulpa:::.joint_sigma_grid_rescue(stub_res, icar, NULL, refit)
+    out <- .place_field_sd(stub_res, icar, NULL, refit)
     expect_identical(out$res$outer_grid_recenter_attempts, 2L)
     expect_true(out$res$outer_grid_prior_added)
     expect_equal(calls$last_prior_sigma, pc)
@@ -385,7 +430,7 @@ test_that("the second recenter attempt engages the PC prior unless it was PINNED
     # A wrapper's own default, declared -> the escalation still engages, and the
     # engine's prior replaces the declared default.
     wrapper_default <- auto_grid(list("pc.prec", c(U = 1, alpha = 0.01)))
-    out <- tulpa:::.joint_sigma_grid_rescue(stub_res, icar, wrapper_default, refit)
+    out <- .place_field_sd(stub_res, icar, wrapper_default, refit)
     expect_true(out$res$outer_grid_prior_added)
     expect_equal(calls$last_prior_sigma, pc)
     expect_null(out$res$outer_grid_prior_declined)
@@ -393,32 +438,21 @@ test_that("the second recenter attempt engages the PC prior unless it was PINNED
     # A deliberate, undeclared choice -> held, and the suppression is legible
     # rather than an `attempts = 2` that quietly did the same thing twice.
     chosen <- list("pc.prec", c(U = 1, alpha = 0.01))
-    out <- tulpa:::.joint_sigma_grid_rescue(stub_res, icar, chosen, refit)
+    out <- .place_field_sd(stub_res, icar, chosen, refit)
     expect_identical(out$res$outer_grid_recenter_attempts, 2L)
     expect_false(out$res$outer_grid_prior_added)
     expect_identical(out$res$outer_grid_prior_declined, "prior_pinned")
     expect_equal(calls$last_prior_sigma, chosen)
 })
 
-test_that("auto_grid() marks a prior specification as well as a grid or a knob", {
-    m <- auto_grid(list("pc.prec", c(U = 3, alpha = 0.01)))
-    expect_true(is_auto_grid(m))
-    expect_true(is.list(m))
-    expect_identical(m[[1L]], "pc.prec")
-    # A scalar control knob (fit_st_nested's grid knobs, gcol33/tulpa#294).
-    k <- auto_grid(4L)
-    expect_true(is_auto_grid(k))
-    expect_identical(as.numeric(k), 4)
-    expect_error(auto_grid(list()), "non-empty")
-})
-
 test_that("the multi-block rescue reports a pinned copy-block axis", {
+    skip_on_cran_budget()
     stub_res <- list(pareto_k_regime = "collapsed_edge",
                      pareto_k_grid_edge_axes = "b1.sigma",
-                     pareto_k_mode_u = c(log(3), 0.4),
-                     pareto_k_cov_u = diag(c(0.25, 0.09)),
-                     pareto_k_axis_tags = c("log", "identity"),
-                     pareto_k_axis_names = c("b1.sigma", "b1.alpha"),
+                     outer_mode_u = c(log(3), 0.4),
+                     outer_mode_cov_u = diag(c(0.25, 0.09)),
+                     outer_mode_axis_tags = c("log", "identity"),
+                     outer_mode_axis_names = c("b1.sigma", "b1.alpha"),
                      outer_grid_placement = "fixed",
                      blocks = list(list(type = "icar")))
     cp <- list(has_copy = TRUE, copy_blocks_zero = 0L)
@@ -429,7 +463,7 @@ test_that("the multi-block rescue reports a pinned copy-block axis", {
     }
 
     # Default (absent) donor axis -> recenters.
-    out <- tulpa:::.joint_multi_sigma_grid_rescue(
+    out <- .place_copy_sd(
         stub_res, list(list(type = "icar")), NULL, cp, NULL, refit)
     expect_identical(out$res$outer_grid_placement, "auto_recentered")
     expect_gt(max(out$res$.grid), 3)
@@ -438,7 +472,7 @@ test_that("the multi-block rescue reports a pinned copy-block axis", {
 
     # Pinned donor axis -> untouched, reason recorded (was previously
     # indistinguishable from "did not need it").
-    out <- tulpa:::.joint_multi_sigma_grid_rescue(
+    out <- .place_copy_sd(
         stub_res, list(list(type = "icar", sigma_grid = c(0.1, 0.5, 1, 2, 3))),
         NULL, cp, NULL, refit)
     expect_identical(out$res$outer_grid_placement, "fixed")
@@ -446,34 +480,36 @@ test_that("the multi-block rescue reports a pinned copy-block axis", {
     expect_identical(out$res$outer_grid_axis_declined,
                      c(b1.sigma = "axis_pinned"))
 
-    out <- tulpa:::.joint_multi_sigma_grid_rescue(
+    out <- .place_copy_sd(
         stub_res, list(list(type = "icar")), NULL, cp, NULL, refit,
         enabled = FALSE)
     expect_identical(out$res$outer_grid_axis_declined,
                      c(b1.sigma = "auto_recenter_disabled"))
 
-    # Two collapsed copy blocks and one attempt: the block the pass moved is
-    # listed as moved, the one it ran out of attempts on says so.
+    # Two collapsed copy blocks and one attempt: both are laid from the one
+    # mode in the same refit, and both say they ran out of attempts -- the
+    # refit here leaves them railed.
     two <- utils::modifyList(stub_res, list(
         pareto_k_grid_edge_axes = c("b1.sigma", "b2.sigma"),
-        pareto_k_mode_u = c(log(3), log(3)),
-        pareto_k_cov_u = diag(c(0.25, 0.25)),
-        pareto_k_axis_tags = c("log", "log"),
-        pareto_k_axis_names = c("b1.sigma", "b2.sigma"),
+        outer_mode_u = c(log(3), log(3)),
+        outer_mode_cov_u = diag(c(0.25, 0.25)),
+        outer_mode_axis_tags = c("log", "log"),
+        outer_mode_axis_names = c("b1.sigma", "b2.sigma"),
         blocks = list(list(type = "icar"), list(type = "icar"))))
     still <- function(prior_i, prior_sigma_i) two
-    out <- tulpa:::.joint_multi_sigma_grid_rescue(
+    out <- .place_copy_sd(
         two, list(list(type = "icar"), list(type = "icar")), NULL,
         list(has_copy = TRUE, copy_blocks_zero = c(0L, 1L)), NULL, still,
         max_attempts = 1L)
     expect_identical(out$res$outer_grid_placement, "auto_recentered")
-    expect_identical(out$res$outer_grid_recenter_axes, "b1.sigma")
+    expect_identical(out$res$outer_grid_recenter_axes, c("b1.sigma", "b2.sigma"))
     expect_identical(out$res$outer_grid_axis_declined,
-                     c(b2.sigma = "attempts_exhausted"))
+                     c(b1.sigma = "attempts_exhausted",
+                       b2.sigma = "attempts_exhausted"))
 
     # Engine default on the donor block (the shape a wrapper package writes)
     # -> recenters.
-    out <- tulpa:::.joint_multi_sigma_grid_rescue(
+    out <- .place_copy_sd(
         stub_res,
         list(list(type = "icar", sigma_grid = tulpa:::.nl_grid_axis("field_sd"))),
         NULL, cp, NULL, refit)

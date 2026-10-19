@@ -46,159 +46,6 @@
 }
 
 # --------------------------------------------------------------------------- #
-# (1) The table                                                                #
-# --------------------------------------------------------------------------- #
-
-test_that("every path binding resolves to real fields of real families", {
-    skip_on_cran()
-    known <- tulpa:::.nl_known_axis_fields()
-    for (path in names(tulpa:::.NL_PATH_AXES)) {
-        expect_true(path %in% names(tulpa:::.NL_AXIS_PATH_LABEL), info = path)
-        entries <- tulpa:::.NL_PATH_AXES[[path]]
-        for (fam in names(entries)) {
-            expect_true(fam %in% names(tulpa:::.NL_REGISTRY),
-                        info = paste(path, fam))
-            for (tok in entries[[fam]]) {
-                if (startsWith(tok, ".")) {
-                    expect_true(identical(tok, ".registry") ||
-                                    tok %in% names(tulpa:::.NL_FAMILY_AXES),
-                                info = paste(path, fam, tok))
-                } else {
-                    expect_true(tok %in% known, info = paste(path, fam, tok))
-                }
-            }
-            # The expansion is non-empty and made of known field names.
-            got <- tulpa:::.nl_path_axis_fields(fam, path)
-            expect_gt(length(got), 0L)
-            expect_true(all(got %in% known), info = paste(path, fam))
-        }
-    }
-})
-
-test_that("a family with no path entry reads exactly its registry binding", {
-    # nngp's drivers agree, so it needs no entry and must not acquire one by
-    # accident.
-    for (path in names(tulpa:::.NL_PATH_AXES)) {
-        expect_identical(tulpa:::.nl_path_axis_fields("nngp", path),
-                         names(tulpa:::.NL_FAMILY_AXES$nngp), info = path)
-    }
-    # And the deviating families deviate in the documented direction.
-    expect_identical(tulpa:::.nl_path_axis_fields("icar", "registry"), "tau_grid")
-    expect_identical(tulpa:::.nl_path_axis_fields("icar", "joint_single"),
-                     "sigma_grid")
-    expect_setequal(tulpa:::.nl_path_axis_fields("icar", "copy"),
-                    c("sigma_grid", "alpha_grid"))
-})
-
-test_that("every declared conversion is mutual and lands in the other axis", {
-    for (fam in names(tulpa:::.NL_AXIS_EQUIV)) {
-        eq <- tulpa:::.NL_AXIS_EQUIV[[fam]]
-        for (from in names(eq)) {
-            for (to in names(eq[[from]])) {
-                # The pair is named the other way round too, so a caller
-                # arriving from either path gets the sentence.
-                expect_true(from %in% names(eq[[to]]),
-                            info = paste(fam, from, to))
-                # And the target IS a field some path of that family reads.
-                reads <- unlist(lapply(names(tulpa:::.NL_AXIS_PATH_LABEL),
-                                       function(p)
-                                           tulpa:::.nl_path_axis_fields(fam, p)))
-                expect_true(to %in% reads, info = paste(fam, to))
-            }
-        }
-    }
-})
-
-# --------------------------------------------------------------------------- #
-# (2) The conversion, measured                                                 #
-# --------------------------------------------------------------------------- #
-
-test_that("icar tau = 1 / sigma^2 is the engine's own conversion", {
-    skip_on_cran()
-    # The single-block joint areal backend hands its kernel `tau = 1 / sigma^2`
-    # from the `sigma` axis it reads; the multi-block driver hands the SAME
-    # kernel the registry's `tau` axis directly. So a one-block multi fit at
-    # `tau_grid = 1 / s^2` must reproduce the single-block fit at
-    # `sigma_grid = s` cell by cell. This is what makes rewriting a fixture's
-    # `sigma_grid` into `tau_grid` preserve the grid it meant to pin.
-    #
-    # `hyperprior = "flat"` isolates that kernel-level claim: nothing is folded,
-    # so the two fits agree cell by cell on the number the kernel produced.
-    sim <- .axc_sim(seed = 21L)
-    s <- c(0.4, 0.7, 1.3)
-    arm <- .axc_arm(sim)
-
-    axc_fit <- function(hp) list(
-        sd = tulpa_nested_laplace_joint(
-            responses = list(occ = arm),
-            prior = .axc_icar_block(sim, sigma_grid = s),
-            hyperprior = hp, control = list(diagnose_k = FALSE)),
-        prec = tulpa_nested_laplace_joint(
-            responses = list(occ = arm),
-            prior = list(.axc_icar_block(sim, tau_grid = 1 / s^2,
-                                         spatial_idx = list(sim$sidx))),
-            hyperprior = hp, control = list(diagnose_k = FALSE)))
-
-    f <- axc_fit("flat")
-    expect_length(f$prec$log_marginal, length(s))
-    expect_lt(max(abs(as.numeric(f$sd$log_marginal) -
-                          as.numeric(f$prec$log_marginal))), 1e-8)
-    expect_lt(max(abs(as.numeric(f$sd$weights) -
-                          as.numeric(f$prec$weights))), 1e-10)
-})
-
-test_that("the default hyperprior is one belief recorded on two coordinates", {
-    skip_on_cran()
-    # `log_marginal` is a density on the axis's own INTEGRATION coordinate
-    # (`R/hyperprior_default.R`'s convention header), so declaring the same
-    # icar field as `sigma_grid = s` or as `tau_grid = 1 / s^2` must move it by
-    # the log-Jacobian |d log sigma / d log tau| = 1/2 and by nothing else --
-    # while every coordinate-free quantity stays put, because the cell's
-    # absolute measure carries the same factor the other way.
-    #
-    # gcol33/tulpa#835 read the log(2) as `.hp_axis_default()` folding a
-    # DIFFERENT prior belief for a `tau`-named axis than for a `sigma`-named
-    # one. It is not: the sd / variance / precision densities are the one sigma
-    # PC prior carried to three coordinates, which is what the last block here
-    # pins directly.
-    sim <- .axc_sim(seed = 21L)
-    s <- c(0.4, 0.7, 1.3)
-    arm <- .axc_arm(sim)
-
-    fit_sd <- tulpa_nested_laplace_joint(
-        responses = list(occ = arm),
-        prior = .axc_icar_block(sim, sigma_grid = s),
-        hyperprior = "proper", control = list(diagnose_k = FALSE))
-    fit_prec <- tulpa_nested_laplace_joint(
-        responses = list(occ = arm),
-        prior = list(.axc_icar_block(sim, tau_grid = 1 / s^2,
-                                     spatial_idx = list(sim$sidx))),
-        hyperprior = "proper", control = list(diagnose_k = FALSE))
-
-    # The record moves by the Jacobian, at every cell.
-    expect_lt(max(abs(as.numeric(fit_sd$log_marginal) -
-                          as.numeric(fit_prec$log_marginal) - log(2))), 1e-8)
-    expect_lt(max(abs(as.numeric(fit_sd$log_hyperprior) -
-                          as.numeric(fit_prec$log_hyperprior) - log(2))), 1e-8)
-    # The model does not: the evidence integrates the density against the cell
-    # measure on the same coordinate, so the factor cancels.
-    expect_lt(abs(as.numeric(fit_sd$log_evidence) -
-                      as.numeric(fit_prec$log_evidence)), 1e-8)
-    expect_lt(max(abs(as.numeric(fit_sd$weights) -
-                          as.numeric(fit_prec$weights))), 1e-10)
-
-    # And the same identity at the density itself, for all three scale
-    # coordinates the default table binds: sd, variance, precision.
-    sig <- c(0.3, 0.8, 2.1)
-    a <- tulpa:::.nl_scale_anchor()
-    d_sd  <- tulpa:::.hp_log_scale_density(sig,       "sd",        a)
-    d_var <- tulpa:::.hp_log_scale_density(sig^2,     "variance",  a)
-    d_prc <- tulpa:::.hp_log_scale_density(1 / sig^2, "precision", a)
-    expect_equal(d_sd - d_var, rep(log(2), length(sig)), tolerance = 1e-10)
-    expect_equal(d_sd - d_prc, rep(log(2), length(sig)), tolerance = 1e-10)
-})
-
-# --------------------------------------------------------------------------- #
 # (3) The refusal                                                              #
 # --------------------------------------------------------------------------- #
 
@@ -223,17 +70,6 @@ test_that("a pinned axis the multi-block path cannot read is refused", {
     expect_match(msg, "tau_grid = 1 / sigma_grid^2", fixed = TRUE)
 })
 
-test_that("the registry front door refuses the same axis", {
-    sim <- .axc_sim(seed = 23L)
-    expect_error(
-        tulpa_nested_laplace(
-            y = sim$y, n_trials = rep(1L, sim$N), X = sim$X,
-            prior = .axc_icar_block(sim, spatial_idx = sim$sidx,
-                                    sigma_grid = c(0.4, 0.9)),
-            family = "binomial"),
-        "`sigma_grid` is not an axis", fixed = TRUE)
-})
-
 test_that("the refusal is symmetric: a precision axis on the joint areal path", {
     sim <- .axc_sim(seed = 24L)
     expect_error(
@@ -243,70 +79,11 @@ test_that("the refusal is symmetric: a precision axis on the joint areal path", 
         "tau_grid.*single-block joint areal backend.*sigma_grid = 1 / sqrt")
 })
 
-test_that("an axis the path DOES read passes untouched", {
-    sim <- .axc_sim(seed = 25L)
-    expect_null(tulpa:::.nl_check_axis_fields(
-        .axc_icar_block(sim, tau_grid = c(1, 4)), "registry"))
-    expect_null(tulpa:::.nl_check_axis_fields(
-        .axc_icar_block(sim, sigma_grid = c(0.4, 0.9)), "joint"))
-    # A copy block leads with (sigma, alpha), so sigma is read there.
-    expect_length(tulpa:::.nl_check_block_axis_fields(
-        .axc_icar_block(sim, sigma_grid = c(0.4, 0.9)), "copy", 1L), 0L)
-})
-
 test_that("a field no binding names is not this check's business", {
     sim <- .axc_sim(seed = 26L)
     blk <- .axc_icar_block(sim, tau_grid = c(1, 4))
     blk$some_other_grid <- c(1, 2, 3)
     expect_null(tulpa:::.nl_check_axis_fields(blk, "registry"))
-})
-
-# --------------------------------------------------------------------------- #
-# (4) The record                                                               #
-# --------------------------------------------------------------------------- #
-
-test_that("an unread ENGINE DEFAULT is dropped with a reason, not refused", {
-    skip_on_cran()
-    sim <- .axc_sim(seed = 27L)
-    fsd <- tulpa:::.nl_grid_axis("field_sd")
-    fit <- tulpa_nested_laplace(
-        y = sim$y, n_trials = rep(1L, sim$N), X = sim$X,
-        prior = .axc_icar_block(sim, spatial_idx = sim$sidx, sigma_grid = fsd),
-        family = "binomial", control = list(diagnose_k = FALSE))
-    rec <- fit$axis_fields_dropped
-    expect_s3_class(rec, "data.frame")
-    expect_identical(nrow(rec), 1L)
-    expect_identical(rec$field, "sigma_grid")
-    expect_identical(rec$path, "registry")
-    expect_identical(rec$integrates, "tau_grid")
-    expect_true(nzchar(rec$reason))
-    # The fit integrated the axis the path reads, at its own default size.
-    expect_length(as.numeric(fit$theta_grid),
-                  length(tulpa:::.nl_grid_axis("gmrf_tau")))
-})
-
-test_that("an auto_grid()-marked axis is dropped with a reason, not refused", {
-    skip_on_cran()
-    sim <- .axc_sim(seed = 28L)
-    fit <- tulpa_nested_laplace(
-        y = sim$y, n_trials = rep(1L, sim$N), X = sim$X,
-        prior = .axc_icar_block(sim, spatial_idx = sim$sidx,
-                                sigma_grid = auto_grid(c(0.4, 0.9))),
-        family = "binomial", control = list(diagnose_k = FALSE))
-    expect_identical(fit$axis_fields_dropped$field, "sigma_grid")
-})
-
-test_that("a fit with nothing dropped carries no record", {
-    skip_on_cran()
-    sim <- .axc_sim(seed = 29L)
-    fit <- tulpa_nested_laplace(
-        y = sim$y, n_trials = rep(1L, sim$N), X = sim$X,
-        prior = .axc_icar_block(sim, spatial_idx = sim$sidx,
-                                tau_grid = c(1, 4, 9)),
-        family = "binomial", control = list(diagnose_k = FALSE))
-    expect_null(fit$axis_fields_dropped)
-    # And the record does not leak past the fit that produced it.
-    expect_null(getOption("tulpa.nl_axis_dropped"))
 })
 
 # --------------------------------------------------------------------------- #
@@ -384,6 +161,241 @@ test_that("the fields the resolver DOES read pass untouched", {
     expect_length(tulpa:::.nl_check_copy_specs(
         list(arm = "pos", block = 1L, alpha_grid = c(0.5, 1), label = "trend"),
         list(.axc_copy_block(sim))), 0L)
+})
+
+skip_on_cran_budget()
+
+test_that("a family with no path entry reads exactly its registry binding", {
+    skip_on_cran_budget()
+    # nngp's drivers agree, so it needs no entry and must not acquire one by
+    # accident.
+    for (path in names(tulpa:::.NL_PATH_AXES)) {
+        expect_identical(tulpa:::.nl_path_axis_fields("nngp", path),
+                         names(tulpa:::.NL_FAMILY_AXES$nngp), info = path)
+    }
+    # And the deviating families deviate in the documented direction.
+    expect_identical(tulpa:::.nl_path_axis_fields("icar", "registry"), "tau_grid")
+    expect_identical(tulpa:::.nl_path_axis_fields("icar", "joint_single"),
+                     "sigma_grid")
+    expect_setequal(tulpa:::.nl_path_axis_fields("icar", "copy"),
+                    c("sigma_grid", "alpha_grid"))
+})
+
+test_that("every declared conversion is mutual and lands in the other axis", {
+    skip_on_cran_budget()
+    for (fam in names(tulpa:::.NL_AXIS_EQUIV)) {
+        eq <- tulpa:::.NL_AXIS_EQUIV[[fam]]
+        for (from in names(eq)) {
+            for (to in names(eq[[from]])) {
+                # The pair is named the other way round too, so a caller
+                # arriving from either path gets the sentence.
+                expect_true(from %in% names(eq[[to]]),
+                            info = paste(fam, from, to))
+                # And the target IS a field some path of that family reads.
+                reads <- unlist(lapply(names(tulpa:::.NL_AXIS_PATH_LABEL),
+                                       function(p)
+                                           tulpa:::.nl_path_axis_fields(fam, p)))
+                expect_true(to %in% reads, info = paste(fam, to))
+            }
+        }
+    }
+})
+
+test_that("the registry front door refuses the same axis", {
+    skip_on_cran_budget()
+    sim <- .axc_sim(seed = 23L)
+    expect_error(
+        tulpa_nested_laplace(
+            y = sim$y, n_trials = rep(1L, sim$N), X = sim$X,
+            prior = .axc_icar_block(sim, spatial_idx = sim$sidx,
+                                    sigma_grid = c(0.4, 0.9)),
+            family = "binomial"),
+        "`sigma_grid` is not an axis", fixed = TRUE)
+})
+
+test_that("an axis the path DOES read passes untouched", {
+    skip_on_cran_budget()
+    sim <- .axc_sim(seed = 25L)
+    expect_null(tulpa:::.nl_check_axis_fields(
+        .axc_icar_block(sim, tau_grid = c(1, 4)), "registry"))
+    expect_null(tulpa:::.nl_check_axis_fields(
+        .axc_icar_block(sim, sigma_grid = c(0.4, 0.9)), "joint"))
+    # A copy block leads with (sigma, alpha), so sigma is read there.
+    expect_length(tulpa:::.nl_check_block_axis_fields(
+        .axc_icar_block(sim, sigma_grid = c(0.4, 0.9)), "copy", 1L), 0L)
+})
+
+skip_on_cran()
+
+# --------------------------------------------------------------------------- #
+# (1) The table                                                                #
+# --------------------------------------------------------------------------- #
+
+test_that("every path binding resolves to real fields of real families", {
+    skip_on_cran()
+    known <- tulpa:::.nl_known_axis_fields()
+    for (path in names(tulpa:::.NL_PATH_AXES)) {
+        expect_true(path %in% names(tulpa:::.NL_AXIS_PATH_LABEL), info = path)
+        entries <- tulpa:::.NL_PATH_AXES[[path]]
+        for (fam in names(entries)) {
+            expect_true(fam %in% names(tulpa:::.NL_REGISTRY),
+                        info = paste(path, fam))
+            for (tok in entries[[fam]]) {
+                if (startsWith(tok, ".")) {
+                    expect_true(identical(tok, ".registry") ||
+                                    tok %in% names(tulpa:::.NL_FAMILY_AXES),
+                                info = paste(path, fam, tok))
+                } else {
+                    expect_true(tok %in% known, info = paste(path, fam, tok))
+                }
+            }
+            # The expansion is non-empty and made of known field names.
+            got <- tulpa:::.nl_path_axis_fields(fam, path)
+            expect_gt(length(got), 0L)
+            expect_true(all(got %in% known), info = paste(path, fam))
+        }
+    }
+})
+
+# --------------------------------------------------------------------------- #
+# (2) The conversion, measured                                                 #
+# --------------------------------------------------------------------------- #
+
+test_that("icar tau = 1 / sigma^2 is the engine's own conversion", {
+    skip_on_cran()
+    # The single-block joint areal backend hands its kernel `tau = 1 / sigma^2`
+    # from the `sigma` axis it reads; the multi-block driver hands the SAME
+    # kernel the registry's `tau` axis directly. So a one-block multi fit at
+    # `tau_grid = 1 / s^2` must reproduce the single-block fit at
+    # `sigma_grid = s` cell by cell. This is what makes rewriting a fixture's
+    # `sigma_grid` into `tau_grid` preserve the grid it meant to pin.
+    #
+    # `hyperprior = "flat"` isolates that kernel-level claim: nothing is folded,
+    # so the two fits agree cell by cell on the number the kernel produced.
+    sim <- .axc_sim(seed = 21L)
+    s <- c(0.4, 0.7, 1.3)
+    arm <- .axc_arm(sim)
+
+    axc_fit <- function(hp) list(
+        sd = tulpa_nested_laplace_joint(
+            responses = list(occ = arm),
+            prior = .axc_icar_block(sim, sigma_grid = s),
+            hyperprior = hp, control = list(diagnose_k = FALSE)),
+        prec = tulpa_nested_laplace_joint(
+            responses = list(occ = arm),
+            prior = list(.axc_icar_block(sim, tau_grid = 1 / s^2,
+                                         spatial_idx = list(sim$sidx))),
+            hyperprior = hp, control = list(diagnose_k = FALSE)))
+
+    f <- axc_fit("flat")
+    # Both doors run the same refinement passes, so a field SD the base grid
+    # leaves collapsed gains the same nodes on either, and the cells still agree
+    # one by one.
+    expect_length(f$prec$log_marginal, length(f$sd$log_marginal))
+    expect_gte(length(f$prec$log_marginal), length(s))
+    expect_lt(max(abs(as.numeric(f$sd$log_marginal) -
+                          as.numeric(f$prec$log_marginal))), 1e-8)
+    expect_lt(max(abs(as.numeric(f$sd$weights) -
+                          as.numeric(f$prec$weights))), 1e-10)
+})
+
+test_that("the default hyperprior is one belief recorded on two coordinates", {
+    skip_on_cran()
+    # `log_marginal` is a density on the axis's own INTEGRATION coordinate
+    # (`R/hyperprior_default.R`'s convention header), so declaring the same
+    # icar field as `sigma_grid = s` or as `tau_grid = 1 / s^2` must move it by
+    # the log-Jacobian |d log sigma / d log tau| = 1/2 and by nothing else --
+    # while every coordinate-free quantity stays put, because the cell's
+    # absolute measure carries the same factor the other way.
+    #
+    # gcol33/tulpa#835 read the log(2) as `.hp_axis_default()` folding a
+    # DIFFERENT prior belief for a `tau`-named axis than for a `sigma`-named
+    # one. It is not: the sd / variance / precision densities are the one sigma
+    # PC prior carried to three coordinates, which is what the last block here
+    # pins directly.
+    sim <- .axc_sim(seed = 21L)
+    s <- c(0.4, 0.7, 1.3)
+    arm <- .axc_arm(sim)
+
+    fit_sd <- tulpa_nested_laplace_joint(
+        responses = list(occ = arm),
+        prior = .axc_icar_block(sim, sigma_grid = s),
+        hyperprior = "proper", control = list(diagnose_k = FALSE))
+    fit_prec <- tulpa_nested_laplace_joint(
+        responses = list(occ = arm),
+        prior = list(.axc_icar_block(sim, tau_grid = 1 / s^2,
+                                     spatial_idx = list(sim$sidx))),
+        hyperprior = "proper", control = list(diagnose_k = FALSE))
+
+    # The record moves by the Jacobian, at every cell.
+    expect_lt(max(abs(as.numeric(fit_sd$log_marginal) -
+                          as.numeric(fit_prec$log_marginal) - log(2))), 1e-8)
+    expect_lt(max(abs(as.numeric(fit_sd$log_hyperprior) -
+                          as.numeric(fit_prec$log_hyperprior) - log(2))), 1e-8)
+    # The model does not: the evidence integrates the density against the cell
+    # measure on the same coordinate, so the factor cancels.
+    expect_lt(abs(as.numeric(fit_sd$log_evidence) -
+                      as.numeric(fit_prec$log_evidence)), 1e-8)
+    expect_lt(max(abs(as.numeric(fit_sd$weights) -
+                          as.numeric(fit_prec$weights))), 1e-10)
+
+    # And the same identity at the density itself, for all three scale
+    # coordinates the default table binds: sd, variance, precision.
+    sig <- c(0.3, 0.8, 2.1)
+    a <- tulpa:::.nl_scale_anchor()
+    d_sd  <- tulpa:::.hp_log_scale_density(sig,       "sd",        a)
+    d_var <- tulpa:::.hp_log_scale_density(sig^2,     "variance",  a)
+    d_prc <- tulpa:::.hp_log_scale_density(1 / sig^2, "precision", a)
+    expect_equal(d_sd - d_var, rep(log(2), length(sig)), tolerance = 1e-10)
+    expect_equal(d_sd - d_prc, rep(log(2), length(sig)), tolerance = 1e-10)
+})
+
+# --------------------------------------------------------------------------- #
+# (4) The record                                                               #
+# --------------------------------------------------------------------------- #
+
+test_that("an unread ENGINE DEFAULT is dropped with a reason, not refused", {
+    skip_on_cran()
+    sim <- .axc_sim(seed = 27L)
+    fsd <- tulpa:::.nl_grid_axis("field_sd")
+    fit <- tulpa_nested_laplace(
+        y = sim$y, n_trials = rep(1L, sim$N), X = sim$X,
+        prior = .axc_icar_block(sim, spatial_idx = sim$sidx, sigma_grid = fsd),
+        family = "binomial", control = list(diagnose_k = FALSE))
+    rec <- fit$axis_fields_dropped
+    expect_s3_class(rec, "data.frame")
+    expect_identical(nrow(rec), 1L)
+    expect_identical(rec$field, "sigma_grid")
+    expect_identical(rec$path, "registry")
+    expect_identical(rec$integrates, "tau_grid")
+    expect_true(nzchar(rec$reason))
+    # The fit integrated the axis the path reads, at its own default size.
+    expect_length(as.numeric(fit$theta_grid),
+                  length(tulpa:::.nl_grid_axis("gmrf_tau")))
+})
+
+test_that("an auto_grid()-marked axis is dropped with a reason, not refused", {
+    skip_on_cran()
+    sim <- .axc_sim(seed = 28L)
+    fit <- tulpa_nested_laplace(
+        y = sim$y, n_trials = rep(1L, sim$N), X = sim$X,
+        prior = .axc_icar_block(sim, spatial_idx = sim$sidx,
+                                sigma_grid = auto_grid(c(0.4, 0.9))),
+        family = "binomial", control = list(diagnose_k = FALSE))
+    expect_identical(fit$axis_fields_dropped$field, "sigma_grid")
+})
+
+test_that("a fit with nothing dropped carries no record", {
+    skip_on_cran()
+    sim <- .axc_sim(seed = 29L)
+    fit <- tulpa_nested_laplace(
+        y = sim$y, n_trials = rep(1L, sim$N), X = sim$X,
+        prior = .axc_icar_block(sim, spatial_idx = sim$sidx,
+                                tau_grid = c(1, 4, 9)),
+        family = "binomial", control = list(diagnose_k = FALSE))
+    expect_null(fit$axis_fields_dropped)
+    # And the record does not leak past the fit that produced it.
+    expect_null(getOption("tulpa.nl_axis_dropped"))
 })
 
 test_that("an auto_grid()-marked unread copy field is recorded, not refused", {

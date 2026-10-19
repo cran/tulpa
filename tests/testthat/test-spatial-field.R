@@ -18,11 +18,20 @@
   adj
 }
 
+test_that("the bare spatial(col) areal-naming path still parses", {
+  p <- tulpa_parse_formula(y ~ x + spatial(region))
+  expect_identical(p$spatial_var, "region")
+  expect_identical(p$n_spatial_field_blocks, 0L)
+})
+
+skip_on_cran_budget()
+
 # --------------------------------------------------------------------------- #
 # (1) Construction + expansion                                                #
 # --------------------------------------------------------------------------- #
 
 test_that("spatial() builds a field spec and expands one CAR block per column", {
+  skip_on_cran_budget()
   adj <- .chain_adj_field(10L)
   f <- spatial(graph = adj, formula = ~ 1 + time || cell)
   expect_s3_class(f, "tulpa_spatial_field")
@@ -53,6 +62,7 @@ test_that("spatial() builds a field spec and expands one CAR block per column", 
 })
 
 test_that("spatial() intercept-only and slope-only expand correctly", {
+  skip_on_cran_budget()
   adj <- .chain_adj_field(6L)
   d <- data.frame(cell = rep(1:6, each = 3), time = rnorm(18))
 
@@ -73,6 +83,7 @@ test_that("spatial() intercept-only and slope-only expand correctly", {
 # --------------------------------------------------------------------------- #
 
 test_that("spatial() enforces the bar grammar", {
+  skip_on_cran_budget()
   adj <- .chain_adj_field(8L)
   # Single bar | now builds correlated fields (separable MCAR); see
   # test-spatial-mcar.R. It constructs without error.
@@ -106,6 +117,7 @@ test_that("spatial() enforces the bar grammar", {
 # --------------------------------------------------------------------------- #
 
 test_that("inline spatial() does not leak its bar into random effects", {
+  skip_on_cran_budget()
   adj <- .chain_adj_field(10L)
   p <- tulpa_parse_formula(
     y ~ time + spatial(graph = adj, formula = ~ 1 + time || cell) + (1 | site))
@@ -121,11 +133,27 @@ test_that("inline spatial() does not leak its bar into random effects", {
   expect_null(p$spatial_var)
 })
 
-test_that("the bare spatial(col) areal-naming path still parses", {
-  p <- tulpa_parse_formula(y ~ x + spatial(region))
-  expect_identical(p$spatial_var, "region")
-  expect_identical(p$n_spatial_field_blocks, 0L)
+test_that("an inline field refuses a mode naming every mode it accepts (#912)", {
+  skip_on_cran_budget()
+  # The message used to list only 'auto' and 'laplace', leaving out the
+  # `nested_laplace` spelling the check itself accepts.
+  expect_error(tulpa:::.bar_field_check_mode("hmc", "spatial"),
+               "'auto', 'laplace', 'nested_laplace' \\(got 'hmc'\\)")
+  expect_error(tulpa:::.bar_field_check_mode("vi", "temporal"),
+               "Inline temporal\\(\\).*'nested_laplace'")
+  for (m in c("auto", "laplace", "nested_laplace", "NESTED_LAPLACE"))
+    expect_true(tulpa:::.bar_field_check_mode(m, "spatial"))
+
+  adj <- .chain_adj_field(6L)
+  set.seed(1)
+  d <- data.frame(y = rnorm(24), time = rnorm(24), cell = rep(1:6, 4))
+  expect_error(
+    tulpa(y ~ time + spatial(graph = adj, formula = ~ 1 || cell), data = d,
+          mode = "hmc"),
+    "'nested_laplace'")
 })
+
+skip_on_cran()
 
 # --------------------------------------------------------------------------- #
 # (4) Parameter recovery end to end                                           #
@@ -169,7 +197,8 @@ test_that("spatial() recovers the intercept and slope CAR fields", {
 
   # Generic methods work on the wrapped fit.
   sm <- summary(fit)
-  expect_true(is.data.frame(sm) || is.matrix(sm))
+  expect_s3_class(sm, "summary.tulpa_fit")
+  expect_s3_class(coef(sm), "data.frame")
 })
 
 test_that("inline spatial() fit's $y is the response vector, not the joint driver's per-arm list, so diagnostics run (gcol33/tulpa#796)", {

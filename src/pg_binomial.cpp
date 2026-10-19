@@ -140,7 +140,7 @@ List pg_binomial_gibbs_impl(
         prior_beta_sd, prior_sigma_scale, C.n_threads_team);
 
     if (iter >= n_warmup && (iter - n_warmup) % thin == 0) {
-      C.save(save_idx);
+      C.save(save_idx, nullptr);
       C.log_prob_draws[save_idx] = C.log_joint_common(
           y, n, nullptr, prior_beta_sd, prior_sigma_scale);
       save_idx++;
@@ -229,7 +229,7 @@ Rcpp::List cpp_pg_binomial_gibbs_spatial(
   tulpa::pg_check_index(spatial_group, N, n_spatial_units, "spatial_group");
   const tulpa::PgAdjacency adj =
       tulpa::pg_build_adjacency(adj_list, n_neighbors, n_spatial_units);
-  tulpa::pg_check_components_observed(adj, spatial_group);
+  const tulpa::PgIcarPrior icar(adj);
 
   // Per-variant storage
   Rcpp::NumericMatrix spatial_draws(n_save, n_spatial_units);
@@ -258,28 +258,27 @@ Rcpp::List cpp_pg_binomial_gibbs_spatial(
     });
     double icar_mean = 0.0;
     tulpa::update_spatial_icar(C.kappa, C.omega, C.offset, spatial_group,
-                               adj, tau, C.beta[0], prior_beta_sd, phi,
+                               icar, tau, C.beta[0], prior_beta_sd, phi,
                                icar_mean);
     C.absorb_level(icar_mean);
 
     // 7. Update tau (spatial precision)
-    tau = tulpa::update_tau_icar(phi, adj, prior_tau_shape, prior_tau_rate);
+    tau = tulpa::update_tau_icar(phi, icar, prior_tau_shape, prior_tau_rate);
 
     // Save draws
     if (iter >= n_warmup && (iter - n_warmup) % thin == 0) {
-      C.save(save_idx);
+      for (int i = 0; i < N; i++) {
+        spatial_contrib[i] = phi[spatial_group[i] - 1];
+      }
+      C.save(save_idx, spatial_contrib.begin());
       for (int s = 0; s < n_spatial_units; s++) {
         spatial_draws(save_idx, s) = phi[s];
       }
       tau_draws[save_idx] = tau;
-      for (int i = 0; i < N; i++) {
-        spatial_contrib[i] = phi[spatial_group[i] - 1];
-      }
       C.log_prob_draws[save_idx] =
           C.log_joint_common(y, n, spatial_contrib.begin(), prior_beta_sd,
                              prior_sigma_re_scale) +
-          tulpa::pg_log_icar(phi.begin(), adj, tau,
-                             tulpa::PG_ICAR_ISOLATED_PREC) +
+          tulpa::pg_log_icar(phi.begin(), icar, tau) +
           tulpa::pg_log_gamma(tau, prior_tau_shape, prior_tau_rate);
       save_idx++;
     }

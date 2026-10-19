@@ -1,3 +1,216 @@
+
+test_that("the CENTRE band is a cutoff the predicate takes, and ships off", {
+  # gcol33/tulpa#362 added it; gcol33/tulpa#376 measured every finite cutoff to
+  # decline the coefficients the correction helps most and set the shipped one
+  # to `Inf`. The mechanism is retained and the cutoff is a setting, so what is
+  # tested here is that the predicate still bands on it -- driven at a finite
+  # cutoff -- and that the shipped value admits every centre.
+  expect_identical(.nl_diag("centre_unreliable"), Inf)
+  z <- stats::qnorm(c(0.025, 0.975))
+  shipped <- tulpa:::cpp_cornish_fisher_quantile(
+    mu = rep(0, 3), sigma = rep(1, 3), gamma3 = rep(0.4, 3),
+    gamma1 = c(0, 5, 500), z = z, max_abs_gamma3 = 1,
+    max_abs_centre = .nl_diag("centre_unreliable"))
+  expect_identical(as.logical(shipped$applied), rep(TRUE, 3))
+})
+
+test_that("a fit with no skew_correction record reports Gaussian quantiles", {
+  sc <- .nl_skew_correction(list(), 2L)
+  expect_false(sc$enabled)
+  expect_identical(sc$eligible, c(FALSE, FALSE))
+})
+
+# --------------------------------------------------------------------------- #
+# (2) Recovery: the corrected endpoints move TOWARD the exact quantiles        #
+# --------------------------------------------------------------------------- #
+
+# Exact posterior quantiles of an intercept-only binomial-logit model by direct
+# quadrature -- the quantile-side extension of `.exact_intercept_skew()` in
+# test-inner-skew.R, with the same weakly-informative N(0, sigma_beta^2) prior
+# the C++ kernel applies.
+.exact_intercept_quantiles <- function(N, S, probs, sigma_beta = 100) {
+  lp <- function(e) S * e - N * log1p(exp(e)) - 0.5 * (e / sigma_beta)^2
+  mode <- stats::optimize(lp, c(-40, 40), maximum = TRUE)$maximum
+  grid <- seq(mode - 20, mode + 20, length.out = 200001L)
+  w <- exp(lp(grid) - max(lp(grid)))
+  w <- w / sum(w)
+  cdf <- cumsum(w)
+  keep <- !duplicated(cdf)
+  stats::approx(cdf[keep], grid[keep], xout = probs)$y
+}
+
+# The engine's inner-Laplace marginal for that model: mode, marginal sd and
+# gamma_3 at the probed intercept.
+.skew_intercept_fit <- function(N, S) {
+  y <- c(rep(1, S), rep(0, N - S))
+  f <- ref_laplace_fit_single(
+    y = as.numeric(y), n = rep(1L, N), X = matrix(1, N, 1),
+    re_idx = numeric(0), n_re_groups = 0L, sigma_re = 1.0,
+    family = "binomial", compute_skew = TRUE, skew_idx = 1L)
+  list(mu = f$mode[1L], sd = f$inner_is_sigma[1L], g3 = f$inner_skew[1L],
+       g1 = f$inner_skew_gamma1[1L])
+}
+
+# The CI-coverage gate for the correction lives with the other coverage gates,
+# in test-nested-laplace-recovery.R, and reuses that file's recovery harness.
+
+# --------------------------------------------------------------------------- #
+# (3) End to end through the front door, and bit-for-bit inert when off        #
+# --------------------------------------------------------------------------- #
+
+.skew_corr_fixture <- function(seed = 1L, nr = 12L, spr = 4L,
+                               beta = c(-2.5, 0.8), sigma_u = 0.7) {
+  set.seed(seed)
+  N <- nr * spr
+  region <- rep(seq_len(nr), each = spr)
+  x <- rnorm(N)
+  X <- cbind(1, x)
+  u <- rnorm(nr, 0, sigma_u)
+  eta <- as.numeric(X %*% beta) + u[region]
+  list(y = stats::rbinom(N, 1, stats::plogis(eta)), X = X,
+       region = as.integer(region), nr = nr, N = N)
+}
+
+.skew_corr_fit <- function(d, skew_correct) {
+  prior <- list(list(type = "iid", obs_idx = d$region, n_units = d$nr,
+                     sigma_grid = exp(seq(log(0.2), log(1.5), length.out = 7))))
+  suppressWarnings(tulpa_nested_laplace(
+    y = d$y, n_trials = rep(1L, d$N), X = d$X, prior = prior,
+    family = "binomial", phi = 1,
+    control = list(max_iter = 100L, tol = 1e-8, n_threads = 1L,
+                   keep_grid_hessians = TRUE, diagnose_k = FALSE,
+                   progress = FALSE, skew_correct = skew_correct)))
+}
+
+# A Poisson small-group random-effect fit whose intercept reaches gcol33/tulpa#362's
+# retired 1.20 cutoff from its own data (gcol33/tulpa#364). The block above forces
+# the centre by overwriting `inner_skew_gamma1`, which tests the plumbing and
+# cannot say the regime is reachable; this one is the regime, and it is where
+# gcol33/tulpa#376 measured the band's cost.
+#
+# WHY THIS DESIGN. The applied centre is `m_i = cross / (2 sigma_i)` -- the
+# gamma_3 cancels exactly between `gamma_1` and `gamma_3 / 2` -- so with
+# `rho_ij` the Gaussian correlation between `eta_j` and the probed coordinate and
+# `c_j = l_j''' s_j^{3/2}`,
+#
+#   m_i = (1/2) sum_j c_j rho_ij,      gamma_3(i) = sum_j c_j rho_ij^3,
+#
+# the same weighted sum at different powers. Reaching |m| >= 1.20 while
+# |gamma_3| stays inside the shape band needs MANY WEAKLY correlated coherent
+# terms. Poisson's `l''' = -mu` is uniformly negative so every term adds, and
+# many small groups drive `sigma_i` (and so every `rho_ij`) down like `G^-1/2`,
+# which sends `|m| ~ sqrt(G)` up and `|gamma_3| ~ G^-1/2` down at once.
+.skew_centre_fixture <- function(seed = 770001L, NR = 150L, SPR = 2L,
+                                 SB = 0.7,
+                                 grid = exp(seq(log(0.5), log(2), length.out = 7))) {
+    set.seed(seed)
+    sigma <- grid[sample.int(length(grid), 1L)]
+    beta <- stats::rnorm(2, 0, SB)
+    xg <- stats::rnorm(NR)
+    region <- rep(seq_len(NR), each = SPR)
+    X <- cbind(1, xg[region])
+    u <- stats::rnorm(NR, 0, sigma)
+    y <- as.numeric(stats::rpois(NR * SPR,
+                                 exp(as.numeric(X %*% beta) + u[region])))
+    list(y = y, X = X, region = as.integer(region), N = NR * SPR, NR = NR,
+         SB = SB, grid = grid)
+}
+
+.skew_centre_fit <- function(d) {
+    suppressWarnings(tulpa_nested_laplace_joint(
+        responses = list(list(y = d$y, n_trials = rep(1L, d$N), X = d$X,
+                              family = "poisson", phi = 1,
+                              beta_prior_prec = rep(1 / d$SB^2, 2))),
+        prior = list(list(type = "iid", obs_idx = d$region, n_units = d$NR,
+                          sigma_grid = d$grid)),
+        control = list(max_iter = 300L, tol = 1e-10, n_threads = 1L,
+                       keep_grid_hessians = TRUE, diagnose_k = FALSE,
+                       diagnose_skew = TRUE, auto_recenter = FALSE,
+                       progress = FALSE, skew_correct = TRUE)))
+}
+
+CENTRE_CUT_362 <- 1.2
+
+# --------------------------------------------------------------------------- #
+# (4) The whole-marginal gate (gcol33/tulpa#346)                              #
+# --------------------------------------------------------------------------- #
+#
+# Section 2 scores total absolute error of the 2.5% / 97.5% quantiles, and that
+# is structurally blind to most of what the correction does. At a SYMMETRIC
+# level pair the Cornish-Fisher term sigma (gamma_3 / 6) (z_p^2 - 1) takes the
+# same value at both ends, because z_p^2 = z_{1-p}^2, so the correction is a
+# pure LOCATION SHIFT of the interval with its width exactly unchanged and a
+# two-point symmetric metric can measure nothing else. Away from a symmetric
+# pair the term is not a shift at all: it is negative at z = 0 and positive at
+# |z| > 1 for gamma_3 > 0, so the median moves one way while the tails move the
+# other.
+#
+# This gate reads the whole CDF instead, through the gcol33/tulpa#335 harness:
+# SBC uniformity against the exact simultaneous band, and paired CRPS against
+# the exact posterior in a prior-predictive experiment, where the CRPS is a
+# proper posterior score. Two control arms separate the effects the whole-CDF
+# score confounds: `shift only`, a Gaussian relocated by exactly the 95%-level
+# Cornish-Fisher offset with no reshaping, and `no centre`, the correction with
+# its centre forced back to the Laplace mode (gamma_1 = -gamma_3 / 2, the
+# mean-zero reading), which is what this file scored before gcol33/tulpa#354.
+#
+# WHAT #354 CHANGED HERE. The correction is now applied about the centre eq. (22)
+# implies, gamma_1 + gamma_3 / 2. On THIS fixture every eta reads the single
+# latent coordinate, so var(eta_j | x_i) = 0 and gamma_1 is identically 0 (the
+# gate asserts it, to 1e-12): the whole missing centre was the mean the cubic
+# term induces, which the mean-zero Cornish-Fisher variate discarded. That was
+# the #346 net loss, and the `no centre` arm reproduces it to the digit.
+#
+# The fixture is the rare-event binomial-logit intercept of section 2 driven
+# prior-predictively, so the exact posterior is a one-dimensional quadrature and
+# no reference sampler is needed.
+
+.WM_N   <- 40L        # trials
+.WM_OFF <- -4         # offset, so successes are rare and the posterior skews
+.WM_SB  <- 2.0        # the prior the truth is drawn from IS the prior fitted
+.WM_P   <- (seq_len(2001L) - 0.5) / 2001L
+.WM_Z   <- stats::qnorm(0.975)
+
+.wm_sim <- function(seed) {
+  set.seed(seed)
+  beta <- stats::rnorm(1, 0, .WM_SB)
+  list(seed = seed, y = as.numeric(stats::rbinom(.WM_N, 1L,
+                                                 stats::plogis(.WM_OFF + beta))),
+       theta = c(beta = beta))
+}
+
+.wm_lp <- function(d, b) {
+  eta <- .WM_OFF + b
+  sum(d$y) * eta - .WM_N * log1p(exp(eta)) - 0.5 * (b / .WM_SB)^2
+}
+
+# The exact posterior as an inverse-CDF grid centred on the engine's own mode.
+.wm_exact <- function(d, mu, sd, p = .WM_P) {
+  g <- seq(mu - 14 * max(sd, 0.5), mu + 14 * max(sd, 0.5), length.out = 20001L)
+  lp <- .wm_lp(d, g)
+  w <- exp(lp - max(lp)); w <- w / sum(w)
+  cdf <- cumsum(w) - 0.5 * w
+  keep <- !duplicated(cdf) & is.finite(cdf)
+  stats::approx(cdf[keep], g[keep], xout = p, rule = 2)$y
+}
+
+# The shipped Cornish-Fisher marginal as a DISTRIBUTION: the push-forward of
+# N(0, 1) through the map, restricted to its monotone branch |z| < 3 / |gamma_3|
+# and renormalized over it. On that branch it is the shipped quantile at every
+# level, which the gate asserts rather than assumes; the discarded tail mass is
+# at most 2 Phi(-3) = 0.0027 at the band edge and less inside it.
+.wm_cf <- function(mu, sigma, g3, g1 = 0, p = .WM_P,
+                   max_abs_g3 = .nl_diag("gamma3_unreliable")) {
+  if (!is.finite(g3) || !is.finite(g1) || abs(g3) >= max_abs_g3 ||
+      !is.finite(sigma) || sigma <= 0)
+    return(mu + sigma * stats::qnorm(p))
+  zb <- 3 / abs(g3)
+  lo <- stats::pnorm(-zb); hi <- stats::pnorm(zb)
+  z <- stats::qnorm(lo + p * (hi - lo))
+  mu + sigma * (g1 + g3 / 2 + z + (g3 / 6) * (z^2 - 1))
+}
+
+skip_on_cran_budget()
 # Inner-Laplace skew CORRECTION (gcol33/tulpa#302): the consumer of gamma_3.
 #
 # test-inner-skew.R validates the cubic term itself -- that it is the quantity
@@ -26,6 +239,7 @@
 # --------------------------------------------------------------------------- #
 
 test_that("the Cornish-Fisher quantile is the series it claims to be", {
+  skip_on_cran_budget()
   z <- stats::qnorm(c(0.025, 0.25, 0.5, 0.75, 0.975))
   g <- 0.4
   g1 <- -0.1
@@ -71,6 +285,7 @@ test_that("the Cornish-Fisher quantile is the series it claims to be", {
 })
 
 test_that("a coefficient with no location term declines rather than assuming zero", {
+  skip_on_cran_budget()
   z <- stats::qnorm(c(0.025, 0.975))
   # gamma_1 is REQUIRED. Reading an absent one as 0 would assert
   # gamma_1 = -gamma_3 / 2 (the mean-zero reading), which is a claim about the
@@ -84,6 +299,7 @@ test_that("a coefficient with no location term declines rather than assuming zer
 })
 
 test_that("the correction declines rather than extrapolating, and says so per index", {
+  skip_on_cran_budget()
   z <- stats::qnorm(c(0.025, 0.975))
   # An `unreliable` band (|gamma_3| at or past the cutoff), a non-computable
   # gamma_3, and a degenerate scale each fall back to the Gaussian quantiles --
@@ -114,22 +330,8 @@ test_that("the correction declines rather than extrapolating, and says so per in
   expect_lt(far$q[1, 1], far$q[1, 2])
 })
 
-test_that("the CENTRE band is a cutoff the predicate takes, and ships off", {
-  # gcol33/tulpa#362 added it; gcol33/tulpa#376 measured every finite cutoff to
-  # decline the coefficients the correction helps most and set the shipped one
-  # to `Inf`. The mechanism is retained and the cutoff is a setting, so what is
-  # tested here is that the predicate still bands on it -- driven at a finite
-  # cutoff -- and that the shipped value admits every centre.
-  expect_identical(.nl_diag("centre_unreliable"), Inf)
-  z <- stats::qnorm(c(0.025, 0.975))
-  shipped <- tulpa:::cpp_cornish_fisher_quantile(
-    mu = rep(0, 3), sigma = rep(1, 3), gamma3 = rep(0.4, 3),
-    gamma1 = c(0, 5, 500), z = z, max_abs_gamma3 = 1,
-    max_abs_centre = .nl_diag("centre_unreliable"))
-  expect_identical(as.logical(shipped$applied), rep(TRUE, 3))
-})
-
 test_that("the CENTRE is banded, not only the shape", {
+  skip_on_cran_budget()
   # gcol33/tulpa#362. The reported quantile is
   # mu_i + sigma_i {gamma_1 + gamma_3 / 2 + w(z_p; gamma_3)}, so the correction
   # relocates the marginal by the centre and a band on |gamma_3| alone bounds
@@ -157,6 +359,7 @@ test_that("the CENTRE is banded, not only the shape", {
 })
 
 test_that("cpp_cornish_fisher_bands is the predicate the quantile path uses", {
+  skip_on_cran_budget()
   # The eligibility RECORD and the quantile path must be one decision, not two
   # implementations of it. `.nl_skew_correction_attach()` reads the bands from
   # here; the quantile path calls the same predicate inside the loop.
@@ -173,6 +376,7 @@ test_that("cpp_cornish_fisher_bands is the predicate the quantile path uses", {
 })
 
 test_that(".nl_skew_marginal is inert when the correction is switched off", {
+  skip_on_cran_budget()
   probs <- c(0.025, 0.975)
   mu <- c(0.4, -1.2); sd <- c(0.5, 0.9); g <- c(0.6, -0.7); g1 <- c(0.05, -0.03)
   off <- .nl_skew_marginal(mu, sd, g, g1, probs, enabled = FALSE)
@@ -192,6 +396,7 @@ test_that(".nl_skew_marginal is inert when the correction is switched off", {
 })
 
 test_that(".nl_skew_by_fixed maps probed indices onto coefficients, never onto zero", {
+  skip_on_cran_budget()
   # The default probe is 1:p, so gamma3[j] is coefficient j.
   f <- list(inner_skew = c(0.3, -0.2), inner_skew_idx = 1:2)
   expect_identical(.nl_skew_by_fixed(f, 2L), c(0.3, -0.2))
@@ -205,42 +410,7 @@ test_that(".nl_skew_by_fixed maps probed indices onto coefficients, never onto z
   expect_identical(.nl_skew_by_fixed(list(), 2L), c(NA_real_, NA_real_))
 })
 
-test_that("a fit with no skew_correction record reports Gaussian quantiles", {
-  sc <- .nl_skew_correction(list(), 2L)
-  expect_false(sc$enabled)
-  expect_identical(sc$eligible, c(FALSE, FALSE))
-})
-
-# --------------------------------------------------------------------------- #
-# (2) Recovery: the corrected endpoints move TOWARD the exact quantiles        #
-# --------------------------------------------------------------------------- #
-
-# Exact posterior quantiles of an intercept-only binomial-logit model by direct
-# quadrature -- the quantile-side extension of `.exact_intercept_skew()` in
-# test-inner-skew.R, with the same weakly-informative N(0, sigma_beta^2) prior
-# the C++ kernel applies.
-.exact_intercept_quantiles <- function(N, S, probs, sigma_beta = 100) {
-  lp <- function(e) S * e - N * log1p(exp(e)) - 0.5 * (e / sigma_beta)^2
-  mode <- stats::optimize(lp, c(-40, 40), maximum = TRUE)$maximum
-  grid <- seq(mode - 20, mode + 20, length.out = 200001L)
-  w <- exp(lp(grid) - max(lp(grid)))
-  w <- w / sum(w)
-  cdf <- cumsum(w)
-  keep <- !duplicated(cdf)
-  stats::approx(cdf[keep], grid[keep], xout = probs)$y
-}
-
-# The engine's inner-Laplace marginal for that model: mode, marginal sd and
-# gamma_3 at the probed intercept.
-.skew_intercept_fit <- function(N, S) {
-  y <- c(rep(1, S), rep(0, N - S))
-  f <- ref_laplace_fit_single(
-    y = as.numeric(y), n = rep(1L, N), X = matrix(1, N, 1),
-    re_idx = numeric(0), n_re_groups = 0L, sigma_re = 1.0,
-    family = "binomial", compute_skew = TRUE, skew_idx = 1L)
-  list(mu = f$mode[1L], sd = f$inner_is_sigma[1L], g3 = f$inner_skew[1L],
-       g1 = f$inner_skew_gamma1[1L])
-}
+skip_on_cran()
 
 test_that("the skew-corrected marginal beats the Gaussian one against exact quantiles", {
   skip_on_cran()
@@ -304,37 +474,6 @@ test_that("the correction is inert where the inner Laplace is already exact", {
   expect_identical(on$applied, c(TRUE, TRUE))
 })
 
-# The CI-coverage gate for the correction lives with the other coverage gates,
-# in test-nested-laplace-recovery.R, and reuses that file's recovery harness.
-
-# --------------------------------------------------------------------------- #
-# (3) End to end through the front door, and bit-for-bit inert when off        #
-# --------------------------------------------------------------------------- #
-
-.skew_corr_fixture <- function(seed = 1L, nr = 12L, spr = 4L,
-                               beta = c(-2.5, 0.8), sigma_u = 0.7) {
-  set.seed(seed)
-  N <- nr * spr
-  region <- rep(seq_len(nr), each = spr)
-  x <- rnorm(N)
-  X <- cbind(1, x)
-  u <- rnorm(nr, 0, sigma_u)
-  eta <- as.numeric(X %*% beta) + u[region]
-  list(y = stats::rbinom(N, 1, stats::plogis(eta)), X = X,
-       region = as.integer(region), nr = nr, N = N)
-}
-
-.skew_corr_fit <- function(d, skew_correct) {
-  prior <- list(list(type = "iid", obs_idx = d$region, n_units = d$nr,
-                     sigma_grid = exp(seq(log(0.2), log(1.5), length.out = 7))))
-  suppressWarnings(tulpa_nested_laplace(
-    y = d$y, n_trials = rep(1L, d$N), X = d$X, prior = prior,
-    family = "binomial", phi = 1,
-    control = list(max_iter = 100L, tol = 1e-8, n_threads = 1L,
-                   keep_grid_hessians = TRUE, diagnose_k = FALSE,
-                   progress = FALSE, skew_correct = skew_correct)))
-}
-
 test_that("tulpa_nested_laplace() records the correction and confint() applies it", {
   skip_on_cran()
   d <- .skew_corr_fixture()
@@ -366,7 +505,7 @@ test_that("tulpa_nested_laplace() records the correction and confint() applies i
   expect_identical(unname(applied), c(FALSE, TRUE))
   expect_identical(names(applied), rownames(ci))
   # summary() reads the same table and carries the same record.
-  expect_identical(unname(attr(summary(f), "skew_applied")), c(FALSE, TRUE))
+  expect_identical(unname(attr(coef(summary(f)), "skew_applied")), c(FALSE, TRUE))
 
   # The bounds are the Cornish-Fisher ones at this fit's own gamma_3 and its
   # own reported centre and standard error -- not merely "different" -- on the
@@ -514,55 +653,6 @@ test_that("a centre past its band declines at the front door, and says so", {
   expect_identical(wide$skew_correction$reason[2], "eligible")
 })
 
-# A Poisson small-group random-effect fit whose intercept reaches gcol33/tulpa#362's
-# retired 1.20 cutoff from its own data (gcol33/tulpa#364). The block above forces
-# the centre by overwriting `inner_skew_gamma1`, which tests the plumbing and
-# cannot say the regime is reachable; this one is the regime, and it is where
-# gcol33/tulpa#376 measured the band's cost.
-#
-# WHY THIS DESIGN. The applied centre is `m_i = cross / (2 sigma_i)` -- the
-# gamma_3 cancels exactly between `gamma_1` and `gamma_3 / 2` -- so with
-# `rho_ij` the Gaussian correlation between `eta_j` and the probed coordinate and
-# `c_j = l_j''' s_j^{3/2}`,
-#
-#   m_i = (1/2) sum_j c_j rho_ij,      gamma_3(i) = sum_j c_j rho_ij^3,
-#
-# the same weighted sum at different powers. Reaching |m| >= 1.20 while
-# |gamma_3| stays inside the shape band needs MANY WEAKLY correlated coherent
-# terms. Poisson's `l''' = -mu` is uniformly negative so every term adds, and
-# many small groups drive `sigma_i` (and so every `rho_ij`) down like `G^-1/2`,
-# which sends `|m| ~ sqrt(G)` up and `|gamma_3| ~ G^-1/2` down at once.
-.skew_centre_fixture <- function(seed = 770001L, NR = 150L, SPR = 2L,
-                                 SB = 0.7,
-                                 grid = exp(seq(log(0.5), log(2), length.out = 7))) {
-    set.seed(seed)
-    sigma <- grid[sample.int(length(grid), 1L)]
-    beta <- stats::rnorm(2, 0, SB)
-    xg <- stats::rnorm(NR)
-    region <- rep(seq_len(NR), each = SPR)
-    X <- cbind(1, xg[region])
-    u <- stats::rnorm(NR, 0, sigma)
-    y <- as.numeric(stats::rpois(NR * SPR,
-                                 exp(as.numeric(X %*% beta) + u[region])))
-    list(y = y, X = X, region = as.integer(region), N = NR * SPR, NR = NR,
-         SB = SB, grid = grid)
-}
-
-.skew_centre_fit <- function(d) {
-    suppressWarnings(tulpa_nested_laplace_joint(
-        responses = list(list(y = d$y, n_trials = rep(1L, d$N), X = d$X,
-                              family = "poisson", phi = 1,
-                              beta_prior_prec = rep(1 / d$SB^2, 2))),
-        prior = list(list(type = "iid", obs_idx = d$region, n_units = d$NR,
-                          sigma_grid = d$grid)),
-        control = list(max_iter = 300L, tol = 1e-10, n_threads = 1L,
-                       keep_grid_hessians = TRUE, diagnose_k = FALSE,
-                       diagnose_skew = TRUE, auto_recenter = FALSE,
-                       progress = FALSE, skew_correct = TRUE)))
-}
-
-CENTRE_CUT_362 <- 1.2
-
 test_that("a fit reaching the retired cutoff on its own data is corrected there", {
     skip_on_cran()
     f <- .skew_centre_fit(.skew_centre_fixture())
@@ -610,85 +700,6 @@ test_that("a fit reaching the retired cutoff on its own data is corrected there"
     expect_false(isTRUE(all.equal(as.numeric(ci_old[1, ]),
                                   as.numeric(ci[1, ]))))
 })
-
-# --------------------------------------------------------------------------- #
-# (4) The whole-marginal gate (gcol33/tulpa#346)                              #
-# --------------------------------------------------------------------------- #
-#
-# Section 2 scores total absolute error of the 2.5% / 97.5% quantiles, and that
-# is structurally blind to most of what the correction does. At a SYMMETRIC
-# level pair the Cornish-Fisher term sigma (gamma_3 / 6) (z_p^2 - 1) takes the
-# same value at both ends, because z_p^2 = z_{1-p}^2, so the correction is a
-# pure LOCATION SHIFT of the interval with its width exactly unchanged and a
-# two-point symmetric metric can measure nothing else. Away from a symmetric
-# pair the term is not a shift at all: it is negative at z = 0 and positive at
-# |z| > 1 for gamma_3 > 0, so the median moves one way while the tails move the
-# other.
-#
-# This gate reads the whole CDF instead, through the gcol33/tulpa#335 harness:
-# SBC uniformity against the exact simultaneous band, and paired CRPS against
-# the exact posterior in a prior-predictive experiment, where the CRPS is a
-# proper posterior score. Two control arms separate the effects the whole-CDF
-# score confounds: `shift only`, a Gaussian relocated by exactly the 95%-level
-# Cornish-Fisher offset with no reshaping, and `no centre`, the correction with
-# its centre forced back to the Laplace mode (gamma_1 = -gamma_3 / 2, the
-# mean-zero reading), which is what this file scored before gcol33/tulpa#354.
-#
-# WHAT #354 CHANGED HERE. The correction is now applied about the centre eq. (22)
-# implies, gamma_1 + gamma_3 / 2. On THIS fixture every eta reads the single
-# latent coordinate, so var(eta_j | x_i) = 0 and gamma_1 is identically 0 (the
-# gate asserts it, to 1e-12): the whole missing centre was the mean the cubic
-# term induces, which the mean-zero Cornish-Fisher variate discarded. That was
-# the #346 net loss, and the `no centre` arm reproduces it to the digit.
-#
-# The fixture is the rare-event binomial-logit intercept of section 2 driven
-# prior-predictively, so the exact posterior is a one-dimensional quadrature and
-# no reference sampler is needed.
-
-.WM_N   <- 40L        # trials
-.WM_OFF <- -4         # offset, so successes are rare and the posterior skews
-.WM_SB  <- 2.0        # the prior the truth is drawn from IS the prior fitted
-.WM_P   <- (seq_len(2001L) - 0.5) / 2001L
-.WM_Z   <- stats::qnorm(0.975)
-
-.wm_sim <- function(seed) {
-  set.seed(seed)
-  beta <- stats::rnorm(1, 0, .WM_SB)
-  list(seed = seed, y = as.numeric(stats::rbinom(.WM_N, 1L,
-                                                 stats::plogis(.WM_OFF + beta))),
-       theta = c(beta = beta))
-}
-
-.wm_lp <- function(d, b) {
-  eta <- .WM_OFF + b
-  sum(d$y) * eta - .WM_N * log1p(exp(eta)) - 0.5 * (b / .WM_SB)^2
-}
-
-# The exact posterior as an inverse-CDF grid centred on the engine's own mode.
-.wm_exact <- function(d, mu, sd, p = .WM_P) {
-  g <- seq(mu - 14 * max(sd, 0.5), mu + 14 * max(sd, 0.5), length.out = 20001L)
-  lp <- .wm_lp(d, g)
-  w <- exp(lp - max(lp)); w <- w / sum(w)
-  cdf <- cumsum(w) - 0.5 * w
-  keep <- !duplicated(cdf) & is.finite(cdf)
-  stats::approx(cdf[keep], g[keep], xout = p, rule = 2)$y
-}
-
-# The shipped Cornish-Fisher marginal as a DISTRIBUTION: the push-forward of
-# N(0, 1) through the map, restricted to its monotone branch |z| < 3 / |gamma_3|
-# and renormalized over it. On that branch it is the shipped quantile at every
-# level, which the gate asserts rather than assumes; the discarded tail mass is
-# at most 2 Phi(-3) = 0.0027 at the band edge and less inside it.
-.wm_cf <- function(mu, sigma, g3, g1 = 0, p = .WM_P,
-                   max_abs_g3 = .nl_diag("gamma3_unreliable")) {
-  if (!is.finite(g3) || !is.finite(g1) || abs(g3) >= max_abs_g3 ||
-      !is.finite(sigma) || sigma <= 0)
-    return(mu + sigma * stats::qnorm(p))
-  zb <- 3 / abs(g3)
-  lo <- stats::pnorm(-zb); hi <- stats::pnorm(zb)
-  z <- stats::qnorm(lo + p * (hi - lo))
-  mu + sigma * (g1 + g3 / 2 + z + (g3 / 6) * (z^2 - 1))
-}
 
 test_that("the whole-marginal score sees what the endpoint score cannot", {
   skip_if_not_slow()

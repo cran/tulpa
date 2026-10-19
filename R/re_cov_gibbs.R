@@ -94,8 +94,9 @@
                all(dim(as.matrix(prior_scale)) == nc)) as.matrix(prior_scale)
            else diag(nc)
     if (nu0 <= nc - 1L) {
-      stop(sprintf("`prior_df` = %g must exceed n_coefs - 1 = %d for a proper ",
-                   "inverse-Wishart prior.", nu0, nc - 1L), call. = FALSE)
+      stop(sprintf(paste0("`prior_df` = %g must exceed n_coefs - 1 = %d for ",
+                          "a proper inverse-Wishart prior."), nu0, nc - 1L),
+           call. = FALSE)
     }
     list(full = TRUE, nu0 = nu0, Lambda0 = Lam)
   } else {
@@ -104,12 +105,30 @@
                all(dim(as.matrix(prior_scale)) == nc))
              diag(as.matrix(prior_scale)) else rep(1, nc)
     if (nu0 <= 0) {
-      stop(sprintf("`prior_df` = %g must be > 0 for a proper scalar ",
-                   "inverse-gamma prior on a diagonal block.", nu0),
+      stop(sprintf(paste0("`prior_df` = %g must be > 0 for a proper scalar ",
+                          "inverse-gamma prior on a diagonal block."), nu0),
            call. = FALSE)
     }
     list(full = FALSE, nu0 = nu0, lambda0 = lam)
   }
+}
+
+# For each coefficient of a block, the fixed-effect column of `X` its design
+# column repeats row for row (0-based, for the compiled sweep), or -1. Such a
+# pair is a direction eta cannot see -- beta_j + d, b_{g,c} - d for every
+# group -- which the sweep crosses with an exact Gaussian draw
+# (translate_aliased_block, src/re_cov_gibbs_sweep.h; gcol33/tulpa#875). The
+# match is exact up to rounding, because only an exact repeat leaves eta
+# unchanged; a column merely correlated with one is not a translation.
+.re_gibbs_fixed_alias <- function(Z, X) {
+  Z <- as.matrix(Z)
+  vapply(seq_len(ncol(Z)), function(c) {
+    z <- Z[, c]
+    tol <- 1e-10 * max(1, max(abs(z)))
+    hit <- which(vapply(seq_len(ncol(X)), function(j)
+      max(abs(X[, j] - z)) <= tol, logical(1)))
+    if (length(hit)) hit[[1L]] - 1L else -1L
+  }, integer(1))
 }
 
 #' Gibbs estimation of random-effect covariances (exact-target debias)
@@ -241,6 +260,7 @@ tulpa_re_cov_gibbs <- function(y, n_trials = NULL, X, re_terms,
   family    <- .canonical_family(family)
   n_iter    <- as.integer(control$n_iter %||% 2000L)
   warmup    <- as.integer(control$warmup %||% 1000L)
+  .check_run_length(n_iter, warmup, "tulpa_re_cov_gibbs", counts = "post")
   thin      <- as.integer(control$thin %||% 1L)
   seed      <- control$seed
   max_iter  <- as.integer(control$max_iter %||% 100L)
@@ -251,6 +271,7 @@ tulpa_re_cov_gibbs <- function(y, n_trials = NULL, X, re_terms,
 
   re_terms <- .as_re_terms_list(re_terms)
   if (!is.matrix(X)) X <- as.matrix(X)
+  .require_fixed_effects(X, "tulpa_re_cov_gibbs")
   vd <- .validate_glm_design(y, X, n_trials, "tulpa_re_cov_gibbs")
   n_obs    <- vd$N
   n_trials <- vd$n_trials
@@ -307,6 +328,9 @@ tulpa_re_cov_gibbs <- function(y, n_trials = NULL, X, re_terms,
   beta <- pilot$mode[seq_len(p)]
   re_vals <- pilot$mode[-seq_len(p)]
 
+  # An indefinite pilot Hessian still inverts here: `.re_chol_spd()` floors the
+  # negative eigenvalues of the inverse, so only those directions shrink to the
+  # floor and the rest of the block keeps the pilot's curvature.
   L_beta <- if (!is.null(pilot$H_beta)) {
     .re_chol_spd(tryCatch(solve(pilot$H_beta), error = function(e) {
       warning("tulpa_re_cov_gibbs(): pilot fixed-effect Hessian not ",
@@ -357,7 +381,8 @@ tulpa_re_cov_gibbs <- function(y, n_trials = NULL, X, re_terms,
     bl <- layout[[m]]; pr <- priors[[m]]
     spec <- list(Z = bl$Z, idx = bl$idx, nc = bl$nc, full = isTRUE(bl$full),
                  n_groups = bl$n_groups, nu0 = pr$nu0,
-                 b0 = B_list[[m]], Lg0 = L_g_list[[m]], Sigma0 = Sigma_list[[m]])
+                 b0 = B_list[[m]], Lg0 = L_g_list[[m]], Sigma0 = Sigma_list[[m]],
+                 alias = .re_gibbs_fixed_alias(bl$Z, X))
     if (pr$full) spec$Lambda0 <- pr$Lambda0 else spec$lambda0 <- pr$lambda0
     spec
   })

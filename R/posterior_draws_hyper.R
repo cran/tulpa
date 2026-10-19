@@ -61,34 +61,28 @@
 # degenerate interval a `clamp` support's extreme cell takes above, reached
 # from the other direction.
 #
-# On an axis a refinement pass re-tiled (`rows`, `.nl_axis_cell_rows()`) a
-# cell's box depends on its row as well as its value, so the box-uniform
-# geometry is PER CELL: `values` is the axis coordinate of every cell and
-# `lo` / `hi` the box that cell owns (`.nl_cell_boxes()`), flagged `per_cell`.
+# `declared` is `.nl_level_edges()`'s: the levels the axis was declared on,
+# which fix the partition's outer edges where a refinement pass added others.
 .nl_hyper_axis_geometry <- function(v, w, domain, within, outside,
-                                    atom = NA_real_, rows = NULL) {
+                                    atom = NA_real_, declared = NULL,
+                                    row_id = NULL, log_density = NULL) {
   none <- function(declined) {
     list(kind = "none", values = numeric(0), lo = numeric(0),
          hi = numeric(0), declined = declined)
   }
   if (is.na(outside)) return(none("support_moment_rule"))
 
-  if (!is.null(rows) && !identical(within, "chord")) {
-    ia <- length(atom) == 1L && is.finite(atom) && any(v == atom) &&
-          !any(v < atom, na.rm = TRUE)
-    cont <- if (ia) is.na(v) | v != atom else rep(TRUE, length(v))
-    rc <- list(row = rows$row[cont], base = rows$base[cont])
-    bx <- .nl_cell_boxes(v[cont], domain, rc)
-    if (is.null(bx)) {
-      g <- .nl_hyper_axis_geometry(v, w, domain, "chord", outside, atom)
-      g$declined <- "boxes_do_not_tile"
-      return(g)
-    }
-    lo <- hi <- v
-    lo[cont] <- bx$lo
-    hi[cont] <- bx$hi
-    return(list(kind = "box_uniform", per_cell = TRUE, values = v,
-                lo = lo, hi = hi, declined = NA_character_))
+  # The log-quadratic read declines to the box read exactly as the interval
+  # does (`.nl_summary_quantile_read()`), and carries its own reason unless the
+  # box read declined as well.
+  if (identical(within, "log_quadratic")) {
+    g <- .nl_lq_axis_geometry(v, w, domain, atom, declared, row_id,
+                              log_density)
+    if (is.na(g$declined)) return(g)
+    b <- .nl_hyper_axis_geometry(v, w, domain, "box_uniform", outside, atom,
+                                 declared)
+    if (is.na(b$declined)) b$declined <- g$declined
+    return(b)
   }
 
   # A declared point mass is not a cell: its box is its own coordinate, so a
@@ -102,7 +96,8 @@
         !any(v < atom, na.rm = TRUE)
   if (ia) {
     keep <- v != atom
-    g <- .nl_hyper_axis_geometry(v[keep], w[keep], domain, within, outside)
+    g <- .nl_hyper_axis_geometry(v[keep], w[keep], domain, within, outside,
+                                 declared = declared)
     if (identical(g$kind, "none")) return(g)
     g$values <- c(atom, g$values)
     g$lo     <- c(atom, g$lo)
@@ -135,10 +130,10 @@
   if (!any(fin)) return(none("no_usable_node"))
   uv <- sort(unique(as.numeric(v[fin])))
   if (length(uv) < 2L) return(none("single_node"))
-  e <- .nl_box_edges_from(.nl_cell_partition(uv, domain), uv)
-  if (is.null(e)) return(chord("boxes_do_not_tile"))
+  le <- .nl_level_edges(uv, domain, declared)
+  if (is.null(le)) return(chord("boxes_do_not_tile"))
   list(kind = "box_uniform", values = uv,
-       lo = e[-length(e)], hi = e[-1L], declined = NA_character_)
+       lo = le$e[-length(le$e)], hi = le$e[-1L], declined = NA_character_)
 }
 
 # The geometry coordinate each cell value is matched to: the cell itself on a
@@ -161,7 +156,9 @@
                                 u = stats::runif(length(v_cell))) {
   if (identical(geom$kind, "none")) return(v_cell)
   k <- .nl_hyper_axis_index(geom, v_cell, cells)
-  out <- if (identical(geom$kind, "box_uniform")) {
+  out <- if (identical(geom$kind, "log_quadratic")) {
+    .nl_lq_axis_draw(geom, k, u)
+  } else if (identical(geom$kind, "box_uniform")) {
     geom$lo[k] + u * (geom$hi[k] - geom$lo[k])
   } else {
     # Half the cell's mass on either side, each uniform on its own segment:
@@ -328,7 +325,7 @@
   P <- -H / outer(sc, sc)      # precision on t
   eP <- eigen(P, symmetric = TRUE, only.values = TRUE)$values
   if (min(eP) <= 0) return(R)
-  Sig <- solve(P)
+  Sig <- .spd_inverse(P)
   rho_star <- stats::cov2cor(Sig)
 
   mt <- M[use, , drop = FALSE]
@@ -357,13 +354,13 @@
   # to hold: with three axes a pair's marginal within-cell coupling can
   # legitimately oppose the target's (-0.6, -0.6, -0.2 couples the last pair at
   # +0.94), and it is its partial correlation that agrees.
-  Qu <- solve(Ru)
+  Qu <- .spd_inverse(Ru)
   flip <- Qu * P < 0
   diag(flip) <- FALSE
   if (any(flip)) {
     Qu[flip] <- 0
     Qu <- .nl_nearest_correlation(Qu, cor = FALSE)
-    Ru <- .nl_nearest_correlation(stats::cov2cor(solve(Qu)))
+    Ru <- .nl_nearest_correlation(stats::cov2cor(.spd_inverse(Qu)))
   }
   R[act, act] <- Ru
   R
@@ -417,7 +414,10 @@
 #'   `NULL` (default) allocates `n` fresh draws across the cells by weight.
 #' @param n Number of draws when `cells` is `NULL` (default 1000); ignored
 #'   otherwise.
-#' @param within Within-cell construction, `"box_uniform"` or `"chord"`.
+#' @param within Within-cell construction, `"box_uniform"`, `"log_quadratic"`
+#'   or `"chord"`. Under `"log_quadratic"` a draw in a cell is the point its
+#'   row's reconstructed CDF reaches inside the share of that CDF the cell's
+#'   mass owns, so the draws in one cell stay around it.
 #'   `NULL` (default) takes the one the fit was read with
 #'   (`fit$within_cell_requested`).
 #'
@@ -432,6 +432,24 @@
 #'   are uncorrelated). Each axis's marginal is the same whatever the copula.
 #'
 #' @seealso [tulpa_posterior_draws()], [tulpa_nested_laplace()]
+#' @examples
+#' \donttest{
+#' set.seed(1)
+#' S <- 30L                                   # spatial units in a chain
+#' nb <- lapply(seq_len(S), function(s) setdiff(c(s - 1L, s + 1L), c(0L, S + 1L)))
+#' nn <- lengths(nb)
+#' field <- as.numeric(scale(cumsum(rnorm(S, 0, 0.4))))
+#' idx <- rep(seq_len(S), each = 6L); n <- length(idx); x <- rnorm(n)
+#' y <- rbinom(n, 1L, plogis(-0.2 + 0.6 * x + field[idx]))
+#' prior <- list(type = "icar", n_spatial_units = S, spatial_idx = idx,
+#'               adj_row_ptr = c(0L, cumsum(nn)), adj_col_idx = unlist(nb) - 1L,
+#'               n_neighbors = nn, tau_grid = c(0.5, 1, 2, 4, 8))
+#' fit <- tulpa_nested_laplace(y, rep(1L, n), cbind(1, x), prior = prior,
+#'                             family = "binomial",
+#'                             control = list(progress = FALSE))
+#' th <- tulpa_hyper_draws(fit, n = 200)
+#' quantile(th[, "tau"], c(0.025, 0.5, 0.975))
+#' }
 #' @export
 tulpa_hyper_draws <- function(fit, cells = NULL, n = 1000, within = NULL) {
   tg <- .nl_theta_matrix(fit)
@@ -472,6 +490,11 @@ tulpa_hyper_draws <- function(fit, cells = NULL, n = 1000, within = NULL) {
   doms <- geo$domain
   atoms <- geo$atom
 
+  # The node density the log-quadratic read is built from; a fit carrying no
+  # `log_marginal` leaves that read to decline.
+  lmd <- fit$log_marginal
+  if (length(lmd) != nrow(tg)) lmd <- NULL
+
   nms <- .nl_axis_names(tg)
   out <- matrix(0.0, length(cells), ncol(tg), dimnames = list(NULL, nms))
   used <- stats::setNames(rep(NA_character_, ncol(tg)), nms)
@@ -480,7 +503,8 @@ tulpa_hyper_draws <- function(fit, cells = NULL, n = 1000, within = NULL) {
     dm <- if (length(doms) < j) NA_character_ else doms[[j]]
     at <- if (length(atoms) < j) NA_real_ else atoms[[j]]
     .nl_hyper_axis_geometry(as.numeric(tg[, j]), w, dm, req, outside, at,
-                            .nl_axis_cell_rows(tg, j, fit$refining_axis))
+                            .nl_axis_declared_levels(tg, j, fit$refining_axis),
+                            .nl_axis_row_id(tg, j), lmd)
   })
   # One uniform per draw and axis, tied across axes by the copula that keeps
   # the grid's own correlation (`.nl_hyper_copula()`).

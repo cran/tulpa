@@ -1,35 +1,3 @@
-test_that("every registry entry accepts a complete block and names each missing field", {
-  skip_on_cran()
-  reg <- tulpa:::.NL_REGISTRY
-  checked <- 0L
-  for (nm in names(reg)) {
-    req_spec <- reg[[nm]]$required
-    if (is.null(req_spec)) next
-    for (path in names(req_spec)) {
-      req <- unique(unlist(req_spec[c("axis", path)], use.names = FALSE))
-      full <- c(list(type = nm), stats::setNames(as.list(rep(1L, length(req))), req))
-      expect_silent(tulpa:::.nl_check_block_fields(full, c("axis", path)))
-      for (f in req) {
-        dropped <- full[setdiff(names(full), f)]
-        expect_error(
-          tulpa:::.nl_check_block_fields(dropped, c("axis", path)),
-          f, fixed = TRUE,
-          info = paste0(nm, " / ", path, " / ", f)
-        )
-        # A field present but empty is what the kernel indexes out of bounds,
-        # so it counts as missing too.
-        empty <- full; empty[[f]] <- integer(0)
-        expect_error(
-          tulpa:::.nl_check_block_fields(empty, c("axis", path)),
-          f, fixed = TRUE,
-          info = paste0(nm, " / ", path, " / ", f, " (empty)")
-        )
-        checked <- checked + 1L
-      }
-    }
-  }
-  expect_gt(checked, 0L)
-})
 
 test_that("a block missing every required field errors instead of crashing (gcol33/tulpa#299)", {
   set.seed(4)
@@ -76,6 +44,30 @@ test_that("the joint converter names the missing field too", {
 # (`is.null(p$f)`, `p$f %||% default`, `isTRUE(p$f)`); what remains is indexed
 # unconditionally and must be declared, or a future field lands back in the
 # segfault path the declaration exists to close.
+# Under covr every statement and condition arrives as
+# `if (TRUE) { covr:::count(key); expr }`; unwrap that back to `expr` so the
+# branch walk reads the converter as written.
+.nlreq_is_covr_count <- function(e) {
+  is.call(e) && is.call(e[[1L]]) &&
+    identical(e[[1L]][[1L]], as.name(":::")) &&
+    identical(e[[1L]][[2L]], as.name("covr")) &&
+    identical(e[[1L]][[3L]], as.name("count"))
+}
+
+.nlreq_uninstrument <- function(e) {
+  if (!is.call(e)) return(e)
+  if (identical(e[[1L]], as.name("if")) && length(e) == 3L &&
+      isTRUE(e[[2L]]) && is.call(e[[3L]]) &&
+      identical(e[[3L]][[1L]], as.name("{")) && length(e[[3L]]) == 3L &&
+      .nlreq_is_covr_count(e[[3L]][[2L]])) {
+    return(.nlreq_uninstrument(e[[3L]][[3L]]))
+  }
+  for (i in seq_along(e)) {
+    if (is.call(e[[i]])) e[[i]] <- .nlreq_uninstrument(e[[i]])
+  }
+  e
+}
+
 .nlreq_branch_sources <- function(fn, types) {
   out <- list()
   walk <- function(e) {
@@ -101,7 +93,7 @@ test_that("the joint converter names the missing field too", {
     }
     invisible(NULL)
   }
-  walk(body(fn))
+  walk(.nlreq_uninstrument(body(fn)))
   out
 }
 
@@ -117,6 +109,40 @@ test_that("the joint converter names the missing field too", {
                sprintf("isTRUE(p$%s)", f)),
              function(pat) grepl(pat, src, fixed = TRUE), logical(1)))
 }
+
+skip_on_cran()
+test_that("every registry entry accepts a complete block and names each missing field", {
+  skip_on_cran()
+  reg <- tulpa:::.NL_REGISTRY
+  checked <- 0L
+  for (nm in names(reg)) {
+    req_spec <- reg[[nm]]$required
+    if (is.null(req_spec)) next
+    for (path in names(req_spec)) {
+      req <- unique(unlist(req_spec[c("axis", path)], use.names = FALSE))
+      full <- c(list(type = nm), stats::setNames(as.list(rep(1L, length(req))), req))
+      expect_silent(tulpa:::.nl_check_block_fields(full, c("axis", path)))
+      for (f in req) {
+        dropped <- full[setdiff(names(full), f)]
+        expect_error(
+          tulpa:::.nl_check_block_fields(dropped, c("axis", path)),
+          f, fixed = TRUE,
+          info = paste0(nm, " / ", path, " / ", f)
+        )
+        # A field present but empty is what the kernel indexes out of bounds,
+        # so it counts as missing too.
+        empty <- full; empty[[f]] <- integer(0)
+        expect_error(
+          tulpa:::.nl_check_block_fields(empty, c("axis", path)),
+          f, fixed = TRUE,
+          info = paste0(nm, " / ", path, " / ", f, " (empty)")
+        )
+        checked <- checked + 1L
+      }
+    }
+  }
+  expect_gt(checked, 0L)
+})
 
 test_that("each converter branch reads only declared or defensively-read fields", {
   skip_on_cran()

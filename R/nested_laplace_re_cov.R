@@ -137,8 +137,9 @@
       return(c(base, list(idx = NULL, Z = NULL)))
     }
     if (nc > 1L && is.null(rt$Z)) {
-      stop(sprintf("RE block %d (n_coefs = %d) requires `Z` (the n_obs x ",
-                   "n_coefs RE design).", m, nc), call. = FALSE)
+      stop(sprintf(paste0("RE block %d (n_coefs = %d) requires `Z` (the ",
+                          "n_obs x n_coefs RE design)."), m, nc),
+           call. = FALSE)
     }
     # Design: a supplied Z (slopes, incl. a single `(0 + x | g)`) or the
     # intercept indicator when absent (a `(1 | g)` block).
@@ -198,11 +199,9 @@
 .re_cov_block_logprior <- function(nc, full, prior_sigma = NULL, eta = NULL) {
   prior_sigma <- prior_sigma %||% .nl_scale_anchor()
   eta <- eta %||% .nl_hyperprior("lkj_eta")
+  .check_pc_anchor_pair(prior_sigma, "prior_sigma", "RE covariance prior")
+  .check_lkj_eta(eta, "eta", "RE covariance prior")
   U <- prior_sigma[1L]; alpha <- prior_sigma[2L]
-  if (U <= 0 || alpha <= 0 || alpha >= 1) {
-    stop("`prior_sigma = c(U, alpha)` needs U > 0 and 0 < alpha < 1.",
-         call. = FALSE)
-  }
   lambda     <- -log(alpha) / U
   log_lambda <- log(lambda)
 
@@ -282,6 +281,13 @@
 #'   block's integration coordinates, suitable for one block of the
 #'   `log_prior_theta` argument of [tulpa_re_cov_nested()].
 #' @seealso [tulpa_re_cov_nested()]
+#' @examples
+#' # Log prior of a correlated 2 x 2 block at the origin of its log-Cholesky
+#' # coordinates (log sd_1, log sd_2, L_21):
+#' lp <- re_cov_pc_lkj_prior(2)
+#' lp(c(0, 0, 0))
+#' # A diagonal block takes one log-SD coordinate per coefficient:
+#' re_cov_pc_lkj_prior(2, correlated = FALSE)(c(0, 0))
 #' @export
 re_cov_pc_lkj_prior <- function(n_coefs, prior_sigma = NULL, eta = NULL,
                                 correlated = TRUE) {
@@ -526,6 +532,14 @@ re_cov_pc_lkj_prior <- function(n_coefs, prior_sigma = NULL, eta = NULL,
       out[d, ] <- beta_nodes[k, ] + as.numeric(Lb[[k]] %*% stats::rnorm(p))
     }
     colnames(out) <- beta_names %||% paste0("beta", seq_len(p))
+    # The plain path samples exactly this node mixture, so its moments travel
+    # with the draws (`.grid_mixture_moments()`); the debiased path below is a
+    # different posterior and is not stamped.
+    vars <- matrix(0, nrow(beta_nodes), p)
+    for (k in which(ok)) vars[k, ] <- diag(beta_cov_nodes[[k]])
+    modes <- beta_nodes
+    modes[!ok, ] <- 0
+    attr(out, "grid_mixture") <- list(weights = w2, modes = modes, vars = vars)
     return(list(draws = out, picks = picks))
   }
 
@@ -670,9 +684,11 @@ re_cov_pc_lkj_prior <- function(n_coefs, prior_sigma = NULL, eta = NULL,
                               estimate_phi = FALSE,
                               outer_reltol = NULL,
                               sigma_init = NULL,
-                              X_zi = NULL, zi_prior_sd = 2.5) {
+                              X_zi = NULL, zi_prior_sd = 2.5,
+                              weights = NULL) {
   re_terms <- .as_re_terms_list(re_terms)
   if (!is.matrix(X)) X <- as.matrix(X)
+  .require_fixed_effects(X, caller)
   vd <- .validate_glm_design(y, X, n_trials, caller)
   n_trials <- vd$n_trials
   # Zero inflation adds a SECOND linear predictor, so the inner solve's mode is
@@ -784,6 +800,15 @@ re_cov_pc_lkj_prior <- function(n_coefs, prior_sigma = NULL, eta = NULL,
          "no offset term. Use `n_quad = 1` (the joint-field Laplace inner ",
          "solve), which does.", call. = FALSE)
   }
+  # Observation weights scale each row's log-likelihood inside the joint-field
+  # inner solve (tulpa_laplace() validates them). The per-group oracle has no
+  # weight channel, so the same refusal as the offset.
+  if (use_core && !is.null(weights) && any(weights != 1)) {
+    stop(caller, "(): `n_quad > 1` (the adaptive Gauss-Hermite inner marginal) ",
+         "does not support observation weights -- the compiled per-group ",
+         "oracle carries no weight term. Use `n_quad = 1` (the joint-field ",
+         "Laplace inner solve), which does.", call. = FALSE)
+  }
 
   # Inner solve: Laplace log-marginal at the supplied per-block covariances.
   # Failures at extreme grid edges (non-finite / non-convergent) return -Inf so
@@ -797,7 +822,7 @@ re_cov_pc_lkj_prior <- function(n_coefs, prior_sigma = NULL, eta = NULL,
         y = y, n_trials = n_trials, X = X,
         re_list = .re_cov_build_re_list(L_list, layout),
         family = family, phi = phi_, phi2 = phi2, return_hessian = FALSE,
-        beta_prior = beta_prior, offset = offset,
+        beta_prior = beta_prior, offset = offset, weights = weights,
         X_zi = X_zi, zi_prior_sd = zi_prior_sd,
         max_iter = max_iter, tol = tol, n_threads = n_threads
       )$log_marginal,
@@ -820,7 +845,7 @@ re_cov_pc_lkj_prior <- function(n_coefs, prior_sigma = NULL, eta = NULL,
         re_list = .re_cov_build_re_list(L_list, layout),
         family = family, phi = phi_, phi2 = phi2, return_hessian = FALSE,
         return_joint_hessian = TRUE,
-        beta_prior = beta_prior, offset = offset,
+        beta_prior = beta_prior, offset = offset, weights = weights,
         X_zi = X_zi, zi_prior_sd = zi_prior_sd,
         max_iter = max_iter, tol = tol, n_threads = n_threads
       ),
@@ -855,7 +880,7 @@ re_cov_pc_lkj_prior <- function(n_coefs, prior_sigma = NULL, eta = NULL,
         family = family, phi = phi_, phi2 = phi2, return_hessian = TRUE,
         return_re_cov = isTRUE(re_cov),
         return_joint_hessian = isTRUE(joint_hessian),
-        beta_prior = beta_prior, offset = offset,
+        beta_prior = beta_prior, offset = offset, weights = weights,
         X_zi = X_zi, zi_prior_sd = zi_prior_sd,
         max_iter = max_iter, tol = tol, n_threads = n_threads,
         compute_skew = isTRUE(compute_skew), skew_idx = skew_idx,
@@ -863,6 +888,32 @@ re_cov_pc_lkj_prior <- function(n_coefs, prior_sigma = NULL, eta = NULL,
       ),
       error = function(e) NULL
     )
+  }
+
+  # inner_logmarg at many covariances: `L_lists` is a list of per-block factor
+  # lists, the value one log-marginal per element, -Inf where inner_logmarg
+  # would give -Inf. One compiled call marshals the model once and solves every
+  # point against it, starting each Newton iteration from `x_init` (the latent
+  # mode at the proposal centre, or NULL for a cold start), across
+  # `n_threads_outer` threads. This is the target an importance batch over the
+  # covariances evaluates; inner_logmarg stays the one-point objective the
+  # optimizer calls. The model arguments are the ones the inner solves above
+  # validate on their first call through tulpa_laplace(), so the batch reads
+  # them as validated.
+  inner_logmarg_batch <- function(L_lists, x_init = NULL, n_threads_outer = 1L) {
+    if (!length(L_lists)) return(numeric(0))
+    model_args <- .laplace_multi_re_model_args(
+      y = .numeric_response(family, y), n_trials = n_trials, X = X,
+      re_list = .re_cov_build_re_list(L_lists[[1L]], layout), family = family,
+      phi = phi, phi2 = phi2, weights = weights, offset = offset,
+      bp = .normalize_beta_prior(beta_prior, ncol(X)), X_zi = X_zi,
+      zi_prior_sd = zi_prior_sd)
+    batch <- lapply(L_lists, function(L_list)
+      .laplace_multi_re_sigma_list(.re_cov_build_re_list(L_list, layout)))
+    do.call(cpp_laplace_log_marginal_multi_re_batch, c(model_args, list(
+      re_sigma_batch = batch, max_iter = as.integer(max_iter), tol = tol,
+      n_threads_outer = as.integer(n_threads_outer),
+      x_init = if (is.null(x_init)) NULL else as.numeric(x_init))))
   }
 
   # --- pilot init: method-of-moments per block from a Sigma = I fit ----------
@@ -874,7 +925,7 @@ re_cov_pc_lkj_prior <- function(n_coefs, prior_sigma = NULL, eta = NULL,
       y = y, n_trials = n_trials, X = X,
       re_list = .re_cov_build_re_list(L0_list, layout),
       family = family, phi = phi, phi2 = phi2, return_hessian = FALSE,
-      beta_prior = beta_prior, offset = offset,
+      beta_prior = beta_prior, offset = offset, weights = weights,
       X_zi = X_zi, zi_prior_sd = zi_prior_sd,
       max_iter = max_iter, tol = tol, n_threads = n_threads
     ),
@@ -1009,6 +1060,14 @@ re_cov_pc_lkj_prior <- function(n_coefs, prior_sigma = NULL, eta = NULL,
     # rebuilding the oracle per solve would copy X, Z and y for nothing.
     inner_logmarg <- function(L_list, phi_ = phi) {
       r <- core_solve(L_list); if (is.null(r)) -Inf else r$log_marginal
+    }
+    # Each point is a beta profile optimized in R against the compiled oracle,
+    # so the batch is that profile per point. There is no latent mode to warm
+    # start from (`x_init` is the joint-field solve's) and the profile's optim
+    # runs on the R thread, so `n_threads_outer` has nothing to spread.
+    inner_logmarg_batch <- function(L_lists, x_init = NULL,
+                                    n_threads_outer = 1L) {
+      vapply(L_lists, inner_logmarg, numeric(1))
     }
     # `re_cov` is accepted and ignored: this inner solve integrates each group's
     # random effects out by quadrature rather than conditioning at their mode, so
@@ -1145,9 +1204,14 @@ re_cov_pc_lkj_prior <- function(n_coefs, prior_sigma = NULL, eta = NULL,
     L_list <- .re_cov_theta_to_L_list(sp$re, layout)
     fit <- inner_fit_grad(L_list, sp$phi)
     val <- if (is.null(fit) || !is.finite(fit$log_marginal %||% NA_real_)) NULL else {
-      r <- .laplace_exact_re_grad(
+      # The settled-mode gate refuses the GRADIENT, not the value: an inner mode
+      # short of stationarity moves the log marginal only at second order. A
+      # line search evaluates the value alone at its trial points, so the refusal
+      # is kept with the evaluation and signalled where a gradient is read.
+      refused <- NULL
+      r <- withCallingHandlers(.laplace_exact_re_grad(
         fit = fit, y = y, X = X, n_trials = n_trials, offset = offset,
-        weights = NULL,
+        weights = weights,
         re_list = .re_cov_build_re_list(L_list, layout),
         layout = layout, L_list = L_list, family = family,
         # The same phi2 the inner solves ran at: the gradient has to describe
@@ -1159,8 +1223,15 @@ re_cov_pc_lkj_prior <- function(n_coefs, prior_sigma = NULL, eta = NULL,
         # Appends the log-phi coordinate, so the returned gradient is stacked in
         # the same order as theta.
         want_phi = !is.na(phi_idx)
-      )
-      if (is.null(r)) NULL else {
+      ), tulpa_unsettled_mode = function(w) {
+        refused <<- w
+        invokeRestart("muffleWarning")
+      })
+      if (is.null(r)) {
+        if (is.null(refused)) NULL
+        else list(f = fit$log_marginal + log_prior_theta(sp$re), g = NULL,
+                  refused = refused)
+      } else {
         # The prior shifts the objective but not the mode, so it enters the
         # gradient and leaves J alone. H below is the Laplace marginal's exact
         # curvature over the covariance coordinates; the prior's own curvature is
@@ -1183,6 +1254,10 @@ re_cov_pc_lkj_prior <- function(n_coefs, prior_sigma = NULL, eta = NULL,
   negg_gr <- function(theta) {
     r <- eval_grad_at(theta)
     if (is.null(r)) return(rep(0, length(theta)))
+    if (is.null(r$g)) {
+      warning(r$refused)
+      return(rep(0, length(theta)))
+    }
     -r$g
   }
 
@@ -1346,7 +1421,7 @@ re_cov_pc_lkj_prior <- function(n_coefs, prior_sigma = NULL, eta = NULL,
       Hs <- (Hn + t(Hn)) / 2
       ev <- eigen(Hs, symmetric = TRUE, only.values = TRUE)$values
       if (min(ev) <= 1e-8) stop("non-PD Hessian")
-      solve(Hs)
+      .spd_inverse(Hs)
     }, error = function(e) {
       warning(caller, "(): outer theta-Hessian not usable (",
               conditionMessage(e), "); falling back to a diagonal proposal ",
@@ -1371,6 +1446,10 @@ re_cov_pc_lkj_prior <- function(n_coefs, prior_sigma = NULL, eta = NULL,
       r <- eval_grad_at(theta, want_jacobian = want_jacobian,
                         want_hessian = want_hessian)
       if (is.null(r)) return(NULL)
+      if (is.null(r$g)) {
+        warning(r$refused)
+        return(NULL)
+      }
       if (isTRUE(want_hessian)) {
         # The negative outer Hessian the marginal correction consumes:
         # -(d2 log_marginal + d2 log_prior). The marginal half is closed-form
@@ -1408,6 +1487,7 @@ re_cov_pc_lkj_prior <- function(n_coefs, prior_sigma = NULL, eta = NULL,
        X_zi = X_zi, p_zi = p_zi, p_fixed = p_fixed,
        log_prior_theta = log_prior_theta,
        inner_logmarg = inner_logmarg, inner_fit = inner_fit,
+       inner_logmarg_batch = inner_logmarg_batch,
        # Does `inner_fit` condition on the random effects (returning their mode
        # in the latent tail of `$mode`, and their covariance blocks on request)?
        # TRUE for the joint-field Laplace inner solve, FALSE for the AGHQ one,
@@ -1484,7 +1564,12 @@ re_cov_pc_lkj_prior <- function(n_coefs, prior_sigma = NULL, eta = NULL,
 #' via `prior_sigma`, LKJ prior on each correlated block's correlation matrix via
 #' `eta`), expressed in the same parameterization with the exact
 #' change-of-variables Jacobian. `hyperprior = "flat"` makes it the zero
-#' function, flat in log(theta). Supply a custom `log_prior_theta`
+#' function, flat in log(theta). The likelihood it multiplies is the inner
+#' Laplace marginal, which integrates the fixed effects out together with the
+#' random effects rather than profiling them, so under `"flat"` the node centre
+#' `theta_hat` is a restricted (REML-type) estimate -- REML for a gaussian
+#' response, agreeing with `glmmTMB(..., REML = TRUE)` rather than with the ML
+#' fit of `lme4::glmer()` otherwise (see [tulpa_eb()]). Supply a custom `log_prior_theta`
 #' function to override either default (then `prior_sigma` / `eta` /
 #' `hyperprior` are ignored); it must act on the full stacked parameter vector.
 #' [tulpa_eb()] shares this same objective and the same default, so
@@ -1528,6 +1613,11 @@ re_cov_pc_lkj_prior <- function(n_coefs, prior_sigma = NULL, eta = NULL,
 #' @param offset Optional observation-level offset on the linear predictor
 #'   (length `length(y)`), e.g. `log(exposure)` for a rate model. Not supported
 #'   with `n_quad > 1`, which errors rather than dropping it.
+#' @param weights Optional non-negative observation weights (length
+#'   `length(y)`), each scaling its row's log-likelihood in every inner
+#'   [tulpa_laplace()] solve, so the covariance is integrated under the
+#'   weighted likelihood. Not supported with `n_quad > 1`, which errors rather
+#'   than dropping them.
 #' @param n_quad Quadrature order for the inner marginal. `1` (default) uses the
 #'   joint-field Laplace inner solve ([tulpa_laplace()]). `> 1` refines the inner
 #'   marginal with `n_quad`-point adaptive Gauss-Hermite quadrature (the
@@ -1579,6 +1669,14 @@ re_cov_pc_lkj_prior <- function(n_coefs, prior_sigma = NULL, eta = NULL,
 #'       the fraction that default budget implies, so raising it supplies more
 #'       tail ratios for the SAME estimand rather than moving the fit to a
 #'       deeper quantile of the weight distribution (gcol33/tulpa#631).
+#'       Each draw is one inner Laplace solve, so this sets the diagnostic's
+#'       cost; the draws are solved in one compiled batch, each started from
+#'       the mode at the proposal centre.
+#'     \item `k_threads`: thread width for those draws (`NULL`, the default,
+#'       follows `n_threads`; `"auto"` takes the physical performance cores; an
+#'       integer sets it, `1L` forcing serial). Each draw is solved
+#'       single-threaded and from the same start, so the k-hat does not depend
+#'       on the width.
 #'     \item `k_tail_points`: expert override for that tail size, in upper-tail
 #'       order statistics. Silently capped at 20% of the draws, beyond which
 #'       body ratios enter the tail and bias the shape.
@@ -1673,7 +1771,8 @@ tulpa_re_cov_nested <- function(y, n_trials = NULL, X, re_terms,
                                 prior_sigma = NULL, eta = NULL,
                                 hyperprior = c("proper", "flat"),
                                 log_prior_theta = NULL,
-                                beta_prior = NULL, offset = NULL, n_quad = 1L,
+                                beta_prior = NULL, offset = NULL,
+                                weights = NULL, n_quad = 1L,
                                 X_zi = NULL, zi_prior_sd = 2.5,
                                 control = list()) {
   # Perf/numerical knobs live in `control = list()` (matching tulpa() /
@@ -1695,11 +1794,18 @@ tulpa_re_cov_nested <- function(y, n_trials = NULL, X, re_terms,
   max_iter    <- as.integer(control$max_iter %||% 100L)
   tol         <- control$tol %||% 1e-8
   n_threads   <- as.integer(control$n_threads %||% 1L)
+  k_width     <- .tulpa_pareto_k_threads(1L, n_threads, k_samples,
+                                         control$k_threads)
   checkpoint  <- control$checkpoint
   sd_cfg      <- .subspace_debias_config(control$subspace_debias)
-  n_quad <- as.integer(n_quad)
-  if (n_quad < 1L) stop("`n_quad` must be >= 1.", call. = FALSE)
+  n_quad <- .check_n_quad(n_quad)
   .seed_scoped(seed)
+  # The stream the outer Pareto-k diagnostic draws its proposal sample from:
+  # the one the fit starts on, so the diagnostic's draws do not depend on how
+  # many random numbers the fit consumed first. The subspace debias consumes
+  # them and the plain fit does not, and both score one proposal against one
+  # target, so they read one k-hat from one sample (gcol33/tulpa#934).
+  k_stream    <- .snapshot_seed()
 
   core <- .re_cov_theta_fit(
     y = y, n_trials = n_trials, X = X, re_terms = re_terms,
@@ -1709,7 +1815,8 @@ tulpa_re_cov_nested <- function(y, n_trials = NULL, X, re_terms,
     max_iter = max_iter, tol = tol, n_threads = n_threads,
     caller = "tulpa_re_cov_nested", need_scale = TRUE,
     outer_maxit = as.integer(control$outer_maxit %||% 500L),
-    offset = offset, X_zi = X_zi, zi_prior_sd = zi_prior_sd)
+    offset = offset, X_zi = X_zi, zi_prior_sd = zi_prior_sd,
+    weights = weights)
 
   layout          <- core$layout
   k               <- core$k
@@ -1720,7 +1827,6 @@ tulpa_re_cov_nested <- function(y, n_trials = NULL, X, re_terms,
   # per-node covariance and the draw synthesis follow from this one number.
   p_fix           <- core$p_fixed
   log_prior_theta <- core$log_prior_theta
-  inner_logmarg   <- core$inner_logmarg
   inner_fit       <- core$inner_fit
   theta_hat       <- core$theta_hat
   L_scale         <- core$L_scale
@@ -1791,7 +1897,7 @@ tulpa_re_cov_nested <- function(y, n_trials = NULL, X, re_terms,
   re_cond <- isTRUE(core$re_conditional)
   ckpt <- .re_cov_node_checkpoint(checkpoint, fingerprint = list(
     y = as.numeric(y), n_trials = as.integer(n_trials), X = X,
-    family = family, phi = phi,
+    family = family, phi = phi, weights = weights,
     layout = lapply(layout, function(b) b[c("k", "nc", "full")]),
     theta_grid = theta_grid, max_iter = max_iter, tol = tol,
     beta_prior = beta_prior, n_quad = n_quad, re_cov = re_cond,
@@ -1818,6 +1924,11 @@ tulpa_re_cov_nested <- function(y, n_trials = NULL, X, re_terms,
   debias_accept  <- rep(NA_real_, ng)
   re_nodes     <- if (re_cond) matrix(NA_real_, ng, n_re) else NULL
   re_var_nodes <- if (re_cond) matrix(NA_real_, ng, n_re) else NULL
+  # The latent mode at the node nearest the proposal centre (the centre itself
+  # on a CCD or an odd tensor), where the outer Pareto-k's importance draws
+  # start their inner Newton iterations.
+  i_centre <- which.min(rowSums(z^2))
+  x_centre <- NULL
   for (i in seq_len(ng)) {
     th     <- theta_grid[i, ]
     L_list <- .re_cov_theta_to_L_list(th, layout)
@@ -1834,12 +1945,13 @@ tulpa_re_cov_nested <- function(y, n_trials = NULL, X, re_terms,
     }
     if (is.null(fit_i) || is.null(fit_i$mode) ||
         length(fit_i$log_marginal) != 1L || !is.finite(fit_i$log_marginal)) next
+    if (i == i_centre && re_cond) x_centre <- fit_i$mode
     lp_theta_nodes[i]  <- log_prior_theta(th)
     logm[i]            <- fit_i$log_marginal + lp_theta_nodes[i]
     beta_nodes[i, ]    <- fit_i$mode[seq_len(p_fix)]
     beta_cov_nodes[[i]] <-
       if (is.null(fit_i$H_beta)) NULL
-      else tryCatch(solve(fit_i$H_beta), error = function(e) NULL)
+      else tryCatch(.spd_inverse(fit_i$H_beta), error = function(e) NULL)
     if (!is.null(debias_arg)) {
       debias_nodes[[i]]  <- fit_i$debias_draws
       debias_accept[i]   <- fit_i$debias_accept %||% NA_real_
@@ -1930,7 +2042,7 @@ tulpa_re_cov_nested <- function(y, n_trials = NULL, X, re_terms,
     ok <- is.finite(rowSums(beta_nodes)) & w > 0
     if (any(ok)) colSums(w[ok] / sum(w[ok]) * beta_nodes[ok, , drop = FALSE])
     else rep(NA_real_, p_fix)
-  } else colMeans(draws)
+  } else (.grid_mixture_moments(draws)$mean %||% colMeans(draws))
   names(beta_mean) <- beta_names
 
   # --- outer Pareto-k-hat: is the Gaussian grid proposal correctable? --------
@@ -1939,7 +2051,11 @@ tulpa_re_cov_nested <- function(y, n_trials = NULL, X, re_terms,
   # the nested integration is trustworthy (< 0.7) or the hyperparameter
   # posterior is too skewed / heavy-tailed for the grid (>= 0.7). Run after the
   # draw synthesis and with the RNG state restored, so existing draws are
-  # bit-for-bit unchanged whether or not the diagnostic is requested.
+  # bit-for-bit unchanged whether or not the diagnostic is requested; the
+  # proposal sample comes from `k_stream`, the stream the fit started on.
+  # Its `k_samples` inner solves are the diagnostic's whole cost, so they go to
+  # the compiled batch in one call per proposal, warm-started at the centre
+  # node's mode and spread over `k_width` threads.
   # A decline says which one it was rather than a bare NA.
   pareto_k <- NA_real_; k_is_ess <- NA_real_; k_source <- NA_character_
   k_first  <- NA_real_; k_tp <- NA_integer_
@@ -1947,13 +2063,21 @@ tulpa_re_cov_nested <- function(y, n_trials = NULL, X, re_terms,
                 else .k_decline_label(.k_decline("no_varying_axis",
                                                  "no free covariance coordinate"))
   if (isTRUE(diagnose_k) && k > 0L) {
-    kd <- .with_preserved_seed(tryCatch(
-      .nested_outer_pareto_k(
-        log_target = function(th) inner_logmarg(.re_cov_theta_to_L_list(th, layout)) +
-          log_prior_theta(th),
-        theta_hat = theta_hat, L_scale = L_scale, n_samples = k_samples,
-        tail_points = k_tail_points),
-      error = function(e) NULL))
+    log_target_batched <- function(Th) {
+      L_lists <- lapply(seq_len(nrow(Th)), function(i)
+        .re_cov_theta_to_L_list(Th[i, ], layout))
+      core$inner_logmarg_batch(L_lists, x_init = x_centre,
+                               n_threads_outer = k_width) +
+        apply(Th, 1L, log_prior_theta)
+    }
+    kd <- .with_preserved_seed({
+      if (!is.null(k_stream)) .make_seed_restore(k_stream)()
+      tryCatch(
+        .nested_outer_pareto_k(
+          log_target_batched, theta_hat = theta_hat, L_scale = L_scale,
+          n_samples = k_samples, tail_points = k_tail_points),
+        error = function(e) NULL)
+    })
     if (is.null(kd)) {
       k_declined <- .k_decline_label(.k_decline("degenerate_proposal",
                                                 "the scorer errored"))

@@ -57,7 +57,23 @@
 }
 
 
+test_that("a GP coefficient needs a time variable with spacing", {
+  sim <- .tvcgp_sim(n_t = 6L, reps = 4L)
+  d <- sim$d
+  d$day <- factor(d$day)
+  expect_error(
+    tulpa(y ~ x, data = d, family = "poisson",
+          temporal = temporal_tvc("day", terms = ~ x - 1, structure = "gp"),
+          mode = "exact",
+          control = list(n_iter = 4L, n_warmup = 2L, seed = 1L)),
+    "needs a numeric time variable")
+})
+
+skip_on_cran_budget()
+
+
 test_that("the constructor takes a kernel and refuses what has no closed form", {
+  skip_on_cran_budget()
   s <- temporal_tvc("day", terms = ~ x - 1, structure = "gp")
   expect_equal(s$structure, "gp")
   expect_equal(s$cov, "exponential")
@@ -83,18 +99,7 @@ test_that("the constructor takes a kernel and refuses what has no closed form", 
   expect_null(temporal_tvc("day", structure = "rw1", cov = "matern")$cov)
 })
 
-
-test_that("a GP coefficient needs a time variable with spacing", {
-  sim <- .tvcgp_sim(n_t = 6L, reps = 4L)
-  d <- sim$d
-  d$day <- factor(d$day)
-  expect_error(
-    tulpa(y ~ x, data = d, family = "poisson",
-          temporal = temporal_tvc("day", terms = ~ x - 1, structure = "gp"),
-          mode = "exact",
-          control = list(n_iter = 4L, n_warmup = 2L, seed = 1L)),
-    "needs a numeric time variable")
-})
+skip_on_cran()
 
 
 test_that("the field samples an amplitude and a lengthscale per coefficient", {
@@ -197,11 +202,13 @@ test_that("temporal_corr() reports the GP coefficient's own hyperparameters", {
   expect_true("lengthscale_tvc_gp" %in% rownames(tc))
   # An amplitude is a standard deviation, not the log-variance sampled, and a
   # lengthscale is on the time axis, not the unit position of the logit that
-  # samples it: the support is (0.01, 10) at both GP doors.
+  # samples it: the support is (0.01, 10) in the kernel's standardized units,
+  # reported in the user's own time units (gcol33/tulpa#907).
   expect_gt(tc["sigma_tvc_gp", "mean"], 0)
   ell <- tc["lengthscale_tvc_gp", "mean"]
-  expect_gt(ell, 0.01)
-  expect_lt(ell, 10)
+  ts <- fit$temporal$time_scale
+  expect_gt(ell, fit$temporal$phi_prior_lower * ts)
+  expect_lt(ell, fit$temporal$phi_prior_upper * ts)
   # A discrete-structure fit reports the precision instead, and neither row.
   fit_rw <- .tvcgp_fit(sim, temporal_tvc("day", terms = ~ x - 1,
                                          structure = "rw1"), n_iter = 60L)

@@ -1,3 +1,192 @@
+
+skip_on_cran_budget()
+
+test_that("the ceiling DECLINES by default, and the floor still clamps", {
+    skip_on_cran_budget()
+    # The measured defaults (gcol33/tulpa#387): a clamped ceiling means the
+    # stencil could not resolve that direction, and laying an axis from the
+    # substituted number never wins a trial and loses none when skipped (7-0
+    # paired). A clamped FLOOR widens a too-narrow axis, which is the direction
+    # that cannot rail, and declining there more than doubles the summed
+    # |coverage - nominal| (0.1614 -> 0.3379), over-covering every level.
+    expect_identical(.nl_recenter("sd_clamp_policy"), "decline")
+    expect_identical(.nl_recenter("sd_floor_policy"), "clamp")
+
+    rc <- .nl_recenter_axis_full("log", 0, .nl_recenter("max_sd_u") * 10)
+    expect_null(rc$nodes)
+    expect_identical(rc$reason, "sd_ceiling_unresolved")
+    expect_identical(rc$sd_clamp, "ceiling")
+    expect_identical(rc$sd_raw, .nl_recenter("max_sd_u") * 10)
+
+    # An SD the stencil DID resolve is untouched by the policy.
+    ok <- .nl_recenter_axis_full("log", 0, 0.4)
+    expect_null(ok$reason)
+    expect_length(ok$nodes, .nl_recenter("n_pts"))
+
+    # The floor carries its own policy, so declining the ceiling does not
+    # silently start declining the floor as well.
+    withr::local_options(list(tulpa.recenter.min_sd_u = 0.15))
+    fl <- .nl_recenter_axis_full("log", 0, .nl_recenter("min_sd_u") / 10)
+    expect_identical(fl$sd_clamp, "floor")
+    expect_null(fl$reason)
+})
+
+test_that("the relative ceiling caps by the incoming span, or falls back", {
+    skip_on_cran_budget()
+    withr::local_options(list(tulpa.recenter.sd_clamp_policy = "relative",
+                              tulpa.recenter.min_sd_u = 0.15))
+    span <- .nl_recenter("span")
+    huge <- .nl_recenter("max_sd_u") * 10
+
+    # An incoming axis covering 4 nats caps the re-placed axis at the same 4.
+    rel <- .nl_recenter_axis_full("log", 0, huge, ref_span_u = 4)
+    expect_identical(rel$sd_clamp, "ceiling")
+    expect_equal(diff(range(log(rel$nodes))), 4, tolerance = 1e-12)
+
+    # With no reference span the policy has nothing to be relative TO, and the
+    # absolute ceiling applies rather than a guess.
+    for (ref in list(NULL, NA_real_, 0, -1)) {
+        fb <- .nl_recenter_axis_full("log", 0, huge, ref_span_u = ref)
+        expect_equal(diff(range(log(fb$nodes))),
+                     2 * span * .nl_recenter("max_sd_u"), tolerance = 1e-12)
+    }
+
+    # The floor still wins over a vanishing reference span: the point of
+    # re-placing is to bracket the mode with real spread.
+    tiny <- .nl_recenter_axis_full("log", 0, huge, ref_span_u = 1e-8)
+    expect_equal(diff(range(log(tiny$nodes))),
+                 2 * span * .nl_recenter("min_sd_u"), tolerance = 1e-12)
+})
+
+test_that("the incoming span is read in each axis's own coordinate", {
+    skip_on_cran_budget()
+    # `.nl_axis_span_u()` is the registry/joint reader (log, logit01, identity);
+    # the spatiotemporal driver's `rho` lives on (-1, 1) instead, so it has its
+    # own. Both feed the SAME clamp -- the ST path no longer carries a second
+    # copy of the bounds.
+    expect_equal(.nl_axis_span_u(c(1, exp(2)), "log"), 2, tolerance = 1e-12)
+    expect_true(is.na(.nl_axis_span_u(5, "log")))          # one node: no span
+    expect_true(is.na(.nl_axis_span_u(NULL, "log")))
+    expect_true(is.na(.nl_axis_span_u(c(1, 2), NA_character_)))
+
+    res <- list(theta_grid = cbind(rho = c(-0.5, 0, 0.5)),
+                theta_names = "rho")
+    expect_equal(.nl_axis_span_u_st(res, "rho"),
+                 .st_axis_fwd("rho", 0.5) - .st_axis_fwd("rho", -0.5),
+                 tolerance = 1e-12)
+})
+
+test_that("a recentred registry fit records what its axis was laid from", {
+    skip_on_cran_budget()
+    # A target that is SHARP in rho and nearly flat in log-sigma: the FD stencil
+    # reads a mode SD of 8 nats on sigma, well past the ceiling, so the axis is
+    # laid from a substituted spread. That is the #387 case, and the fit has to
+    # say so.
+    sg <- .nl_grid_axis("field_sd")
+    rg <- .nl_grid_axis("bym2_rho")
+    gr <- expand.grid(sigma = sg, rho = rg, KEEP.OUT.ATTRS = FALSE)
+    theta_grid <- cbind(sigma = gr$sigma, rho = gr$rho)
+    synthetic_lm <- function(tm)
+        -0.5 * ((log(tm[, 1L]) - log(0.55)) / 8)^2 +
+        -0.5 * ((stats::qlogis(tm[, 2L]) - 1.2) / 0.9)^2
+    log_marg <- synthetic_lm(theta_grid)
+    w <- exp(log_marg - max(log_marg)); w <- w / sum(w)
+    res <- .joint_attach_pareto_k_regime(
+        list(theta_grid = theta_grid, theta_names = c("sigma", "rho"),
+             weights = w, log_marginal = log_marg))
+    refit <- function(prior_i) {
+        ng <- cbind(sigma = prior_i$sigma_grid, rho = prior_i$rho_grid)
+        lm_new <- synthetic_lm(ng)
+        w_new  <- exp(lm_new - max(lm_new)); w_new <- w_new / sum(w_new)
+        .joint_attach_pareto_k_regime(
+            list(theta_grid = ng, theta_names = c("sigma", "rho"),
+                 weights = w_new, log_marginal = lm_new))
+    }
+    run <- function() .nl_registry_grid_rescue(
+        res, "bym2", list(type = "bym2"), refit,
+        function(prior_i, tm) synthetic_lm(tm), policy = "always")
+
+    # Under `"clamp"` the axis IS laid, from the substituted spread, and the fit
+    # says as much.
+    out <- withr::with_options(
+        list(tulpa.recenter.sd_clamp_policy = "clamp"), run())$res
+    expect_identical(out$outer_grid_placement, "auto_recentered")
+    cl <- out$outer_grid_recenter_sd_clamp
+    expect_identical(unname(cl[["sigma"]]), "ceiling")
+    # rho's own curvature is resolved, so it is not clamped -- the record is per
+    # axis, not per fit.
+    expect_identical(unname(cl[["rho"]]), "none")
+    raw  <- out$outer_grid_recenter_sd_raw
+    used <- out$outer_grid_recenter_sd_used
+    expect_equal(unname(raw[["sigma"]]), 8, tolerance = 0.05)
+    expect_identical(unname(used[["sigma"]]), .nl_recenter("max_sd_u"))
+    # The unclamped axis reports the same number twice, which is what "the
+    # stencil measured this" looks like.
+    expect_equal(unname(raw[["rho"]]), unname(used[["rho"]]), tolerance = 1e-12)
+
+    # Under the shipped default the sigma axis is NOT laid -- but rho, whose
+    # curvature the stencil did resolve, still is. The decline is per axis.
+    dflt <- run()$res
+    expect_identical(dflt$outer_grid_placement, "auto_recentered")
+    expect_identical(unname(dflt$outer_grid_recenter_sd_clamp[["sigma"]]),
+                     "ceiling")
+    expect_equal(unname(dflt$outer_grid_recenter_sd_raw[["sigma"]]), 8,
+                 tolerance = 0.05)
+    expect_false("sigma" %in% names(dflt$outer_grid_recenter_sd_used))
+    expect_identical(unname(dflt$outer_grid_recenter_axes), c("sigma", "rho"))
+
+    # And the placement note says the bound was hit, so a reader is not left to
+    # infer it from the width.
+    note <- .tulpa_grid_placement_note(.tulpa_grid_placement(out))
+    expect_match(note, "mode SD hit its bound on .*sigma")
+})
+
+test_that("declining on the ceiling is visible as its own reason", {
+    skip_on_cran_budget()
+    sg <- .nl_grid_axis("field_sd")
+    theta_grid <- cbind(sigma = sg)
+    synthetic_lm <- function(tm) -0.5 * ((log(tm[, 1L]) - log(0.55)) / 8)^2
+    log_marg <- synthetic_lm(theta_grid)
+    w <- exp(log_marg - max(log_marg)); w <- w / sum(w)
+    res <- .joint_attach_pareto_k_regime(
+        list(theta_grid = theta_grid, theta_names = "sigma",
+             weights = w, log_marginal = log_marg))
+    refit <- function(prior_i) {
+        ng <- cbind(sigma = prior_i$sigma_grid)
+        lm_new <- synthetic_lm(ng)
+        w_new  <- exp(lm_new - max(lm_new)); w_new <- w_new / sum(w_new)
+        .joint_attach_pareto_k_regime(
+            list(theta_grid = ng, theta_names = "sigma",
+                 weights = w_new, log_marginal = lm_new))
+    }
+    rescue <- .nl_registry_grid_rescue(res, "iid", list(type = "iid"), refit,
+                                       function(prior_i, tm) synthetic_lm(tm),
+                                       policy = "always")
+    # The fit says which of the two reasons applied -- not the generic
+    # "no_usable_curvature", which would read as "the stencil failed" rather
+    # than "the stencil said something the policy refuses to lay an axis from".
+    expect_identical(rescue$res$outer_grid_recenter_declined,
+                     "sd_ceiling_unresolved")
+    expect_false(identical(rescue$res$outer_grid_placement, "auto_recentered"))
+    # A declining rescue writes NO axis back onto the prior, so the grid the
+    # caller supplied is the grid that gets integrated.
+    expect_null(rescue$prior$sigma_grid)
+    expect_identical(rescue$res$theta_grid, theta_grid)
+})
+
+test_that("every door lays an axis at the measured SD, and a caller-set floor still binds", {
+    skip_on_cran_budget()
+    expect_identical(.nl_recenter("min_sd_u"), 0)
+    fl <- .nl_recenter_axis_full("log", 0, 1e-3)
+    expect_identical(fl$sd_clamp, "none")
+    expect_equal(fl$sd_used, 1e-3)
+    withr::local_options(list(tulpa.recenter.min_sd_u = 0.15))
+    fl <- .nl_recenter_axis_full("log", 0, 0.015)
+    expect_identical(fl$sd_clamp, "floor")
+    expect_equal(fl$sd_used, 0.15)
+})
+
+skip_on_cran()
 # The mode-SD clamp on a recentred outer axis (gcol33/tulpa#387).
 #
 # The clamp substitutes a number for a curvature the FD stencil could not read.
@@ -9,6 +198,8 @@
 # replaced.
 
 test_that("the clamp reports which bound it hit, and the SD it measured", {
+    skip_on_cran()
+    withr::local_options(list(tulpa.recenter.min_sd_u = 0.15))
     mn <- .nl_recenter("min_sd_u")
     mx <- .nl_recenter("max_sd_u")
 
@@ -80,170 +271,4 @@ test_that("the clamp policy lays exactly the axis the pre-#387 formula did", {
             expect_identical(.nl_recenter_axis(tag, m, s), ref(tag, m, s))
         }
     }
-})
-
-test_that("the ceiling DECLINES by default, and the floor still clamps", {
-    # The measured defaults (gcol33/tulpa#387): a clamped ceiling means the
-    # stencil could not resolve that direction, and laying an axis from the
-    # substituted number never wins a trial and loses none when skipped (7-0
-    # paired). A clamped FLOOR widens a too-narrow axis, which is the direction
-    # that cannot rail, and declining there more than doubles the summed
-    # |coverage - nominal| (0.1614 -> 0.3379), over-covering every level.
-    expect_identical(.nl_recenter("sd_clamp_policy"), "decline")
-    expect_identical(.nl_recenter("sd_floor_policy"), "clamp")
-
-    rc <- .nl_recenter_axis_full("log", 0, .nl_recenter("max_sd_u") * 10)
-    expect_null(rc$nodes)
-    expect_identical(rc$reason, "sd_ceiling_unresolved")
-    expect_identical(rc$sd_clamp, "ceiling")
-    expect_identical(rc$sd_raw, .nl_recenter("max_sd_u") * 10)
-
-    # An SD the stencil DID resolve is untouched by the policy.
-    ok <- .nl_recenter_axis_full("log", 0, 0.4)
-    expect_null(ok$reason)
-    expect_length(ok$nodes, .nl_recenter("n_pts"))
-
-    # The floor carries its own policy, so declining the ceiling does not
-    # silently start declining the floor as well.
-    fl <- .nl_recenter_axis_full("log", 0, .nl_recenter("min_sd_u") / 10)
-    expect_identical(fl$sd_clamp, "floor")
-    expect_null(fl$reason)
-})
-
-test_that("the relative ceiling caps by the incoming span, or falls back", {
-    withr::local_options(list(tulpa.recenter.sd_clamp_policy = "relative"))
-    span <- .nl_recenter("span")
-    huge <- .nl_recenter("max_sd_u") * 10
-
-    # An incoming axis covering 4 nats caps the re-placed axis at the same 4.
-    rel <- .nl_recenter_axis_full("log", 0, huge, ref_span_u = 4)
-    expect_identical(rel$sd_clamp, "ceiling")
-    expect_equal(diff(range(log(rel$nodes))), 4, tolerance = 1e-12)
-
-    # With no reference span the policy has nothing to be relative TO, and the
-    # absolute ceiling applies rather than a guess.
-    for (ref in list(NULL, NA_real_, 0, -1)) {
-        fb <- .nl_recenter_axis_full("log", 0, huge, ref_span_u = ref)
-        expect_equal(diff(range(log(fb$nodes))),
-                     2 * span * .nl_recenter("max_sd_u"), tolerance = 1e-12)
-    }
-
-    # The floor still wins over a vanishing reference span: the point of
-    # re-placing is to bracket the mode with real spread.
-    tiny <- .nl_recenter_axis_full("log", 0, huge, ref_span_u = 1e-8)
-    expect_equal(diff(range(log(tiny$nodes))),
-                 2 * span * .nl_recenter("min_sd_u"), tolerance = 1e-12)
-})
-
-test_that("the incoming span is read in each axis's own coordinate", {
-    # `.nl_axis_span_u()` is the registry/joint reader (log, logit01, identity);
-    # the spatiotemporal driver's `rho` lives on (-1, 1) instead, so it has its
-    # own. Both feed the SAME clamp -- the ST path no longer carries a second
-    # copy of the bounds.
-    expect_equal(.nl_axis_span_u(c(1, exp(2)), "log"), 2, tolerance = 1e-12)
-    expect_true(is.na(.nl_axis_span_u(5, "log")))          # one node: no span
-    expect_true(is.na(.nl_axis_span_u(NULL, "log")))
-    expect_true(is.na(.nl_axis_span_u(c(1, 2), NA_character_)))
-
-    res <- list(theta_grid = cbind(rho = c(-0.5, 0, 0.5)),
-                theta_names = "rho")
-    expect_equal(.nl_axis_span_u_st(res, "rho"),
-                 .st_axis_fwd("rho", 0.5) - .st_axis_fwd("rho", -0.5),
-                 tolerance = 1e-12)
-})
-
-test_that("a recentred registry fit records what its axis was laid from", {
-    # A target that is SHARP in rho and nearly flat in log-sigma: the FD stencil
-    # reads a mode SD of 8 nats on sigma, well past the ceiling, so the axis is
-    # laid from a substituted spread. That is the #387 case, and the fit has to
-    # say so.
-    sg <- .nl_grid_axis("field_sd")
-    rg <- .nl_grid_axis("bym2_rho")
-    gr <- expand.grid(sigma = sg, rho = rg, KEEP.OUT.ATTRS = FALSE)
-    theta_grid <- cbind(sigma = gr$sigma, rho = gr$rho)
-    synthetic_lm <- function(tm)
-        -0.5 * ((log(tm[, 1L]) - log(0.55)) / 8)^2 +
-        -0.5 * ((stats::qlogis(tm[, 2L]) - 1.2) / 0.9)^2
-    log_marg <- synthetic_lm(theta_grid)
-    w <- exp(log_marg - max(log_marg)); w <- w / sum(w)
-    res <- .joint_attach_pareto_k_regime(
-        list(theta_grid = theta_grid, theta_names = c("sigma", "rho"),
-             weights = w, log_marginal = log_marg))
-    refit <- function(prior_i) {
-        ng <- cbind(sigma = prior_i$sigma_grid, rho = prior_i$rho_grid)
-        lm_new <- synthetic_lm(ng)
-        w_new  <- exp(lm_new - max(lm_new)); w_new <- w_new / sum(w_new)
-        .joint_attach_pareto_k_regime(
-            list(theta_grid = ng, theta_names = c("sigma", "rho"),
-                 weights = w_new, log_marginal = lm_new))
-    }
-    run <- function() .nl_registry_grid_rescue(
-        res, "bym2", list(type = "bym2"), refit,
-        function(prior_i, tm) synthetic_lm(tm), policy = "always")
-
-    # Under `"clamp"` the axis IS laid, from the substituted spread, and the fit
-    # says as much.
-    out <- withr::with_options(
-        list(tulpa.recenter.sd_clamp_policy = "clamp"), run())$res
-    expect_identical(out$outer_grid_placement, "auto_recentered")
-    cl <- out$outer_grid_recenter_sd_clamp
-    expect_identical(unname(cl[["sigma"]]), "ceiling")
-    # rho's own curvature is resolved, so it is not clamped -- the record is per
-    # axis, not per fit.
-    expect_identical(unname(cl[["rho"]]), "none")
-    raw  <- out$outer_grid_recenter_sd_raw
-    used <- out$outer_grid_recenter_sd_used
-    expect_equal(unname(raw[["sigma"]]), 8, tolerance = 0.05)
-    expect_identical(unname(used[["sigma"]]), .nl_recenter("max_sd_u"))
-    # The unclamped axis reports the same number twice, which is what "the
-    # stencil measured this" looks like.
-    expect_equal(unname(raw[["rho"]]), unname(used[["rho"]]), tolerance = 1e-12)
-
-    # Under the shipped default the sigma axis is NOT laid -- but rho, whose
-    # curvature the stencil did resolve, still is. The decline is per axis.
-    dflt <- run()$res
-    expect_identical(dflt$outer_grid_placement, "auto_recentered")
-    expect_identical(unname(dflt$outer_grid_recenter_sd_clamp[["sigma"]]),
-                     "ceiling")
-    expect_equal(unname(dflt$outer_grid_recenter_sd_raw[["sigma"]]), 8,
-                 tolerance = 0.05)
-    expect_false("sigma" %in% names(dflt$outer_grid_recenter_sd_used))
-    expect_identical(unname(dflt$outer_grid_recenter_axes), c("sigma", "rho"))
-
-    # And the placement note says the bound was hit, so a reader is not left to
-    # infer it from the width.
-    note <- .tulpa_grid_placement_note(.tulpa_grid_placement(out))
-    expect_match(note, "mode SD hit its bound on .*sigma")
-})
-
-test_that("declining on the ceiling is visible as its own reason", {
-    sg <- .nl_grid_axis("field_sd")
-    theta_grid <- cbind(sigma = sg)
-    synthetic_lm <- function(tm) -0.5 * ((log(tm[, 1L]) - log(0.55)) / 8)^2
-    log_marg <- synthetic_lm(theta_grid)
-    w <- exp(log_marg - max(log_marg)); w <- w / sum(w)
-    res <- .joint_attach_pareto_k_regime(
-        list(theta_grid = theta_grid, theta_names = "sigma",
-             weights = w, log_marginal = log_marg))
-    refit <- function(prior_i) {
-        ng <- cbind(sigma = prior_i$sigma_grid)
-        lm_new <- synthetic_lm(ng)
-        w_new  <- exp(lm_new - max(lm_new)); w_new <- w_new / sum(w_new)
-        .joint_attach_pareto_k_regime(
-            list(theta_grid = ng, theta_names = "sigma",
-                 weights = w_new, log_marginal = lm_new))
-    }
-    rescue <- .nl_registry_grid_rescue(res, "iid", list(type = "iid"), refit,
-                                       function(prior_i, tm) synthetic_lm(tm),
-                                       policy = "always")
-    # The fit says which of the two reasons applied -- not the generic
-    # "no_usable_curvature", which would read as "the stencil failed" rather
-    # than "the stencil said something the policy refuses to lay an axis from".
-    expect_identical(rescue$res$outer_grid_recenter_declined,
-                     "sd_ceiling_unresolved")
-    expect_false(identical(rescue$res$outer_grid_placement, "auto_recentered"))
-    # A declining rescue writes NO axis back onto the prior, so the grid the
-    # caller supplied is the grid that gets integrated.
-    expect_null(rescue$prior$sigma_grid)
-    expect_identical(rescue$res$theta_grid, theta_grid)
 })

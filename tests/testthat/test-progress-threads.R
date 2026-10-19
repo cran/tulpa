@@ -108,6 +108,8 @@ test_that("tulpa_iter_progress omits the threads field when serial", {
   list(out = out, fit = fit)
 }
 
+skip_on_cran()
+
 test_that("nested-laplace-joint progress line shows the outer-thread count", {
   skip_on_cran()
   # The count is the REALISED outer width, which is what this file's own header
@@ -126,6 +128,8 @@ test_that("nested-laplace-joint progress line shows the outer-thread count", {
   # other and neither can drift from the clamp.
   n_out <- 4L
   r <- .fit_joint_88(n_threads_outer = n_out)
+  skip_if(identical(r$fit$n_threads_outer_realised, 1L),
+          "the outer width resolved to 1 (OMP_NUM_THREADS or the OpenMP thread limit)")
   joint_lines <- grep("^\\[nested-laplace-joint\\]", r$out, value = TRUE)
   expect_gt(length(joint_lines), 0L)
   thr <- regmatches(joint_lines, regexpr("\\| [0-9]+ threads$", joint_lines))

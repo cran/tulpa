@@ -43,6 +43,21 @@
 #' `sigma = 0` boundary. `hyperprior = "flat"` maximizes the marginal likelihood
 #' alone.
 #'
+#' The marginal likelihood is marginal over the fixed effects too: the inner
+#' Laplace approximation integrates `beta` out together with the random
+#' effects (under `beta_prior`, or the inner solve's vague `N(0, 100^2)` default)
+#' rather than profiling it. `hyperprior = "flat"` is therefore a RESTRICTED,
+#' REML-type estimate, not maximum likelihood: for a gaussian response it is
+#' REML, and for a non-gaussian one it agrees with
+#' `glmmTMB(..., REML = TRUE)`, not with the ML fit of `lme4::glmer()` or
+#' `glmmTMB(..., REML = FALSE)`. On a binomial random intercept with 40 groups
+#' of 6 the three read RE SDs of 0.7931 (`tulpa_eb`), 0.7931 (glmmTMB REML) and
+#' 0.7594 (ML); the fixed effects at `theta_hat` match the REML fit's as well.
+#' The restriction is what removes ML's downward bias in the variance
+#' components when `beta` is estimated from the same data, and it carries over
+#' to `n_quad > 1` and to `estimate_phi = TRUE`. Validating against `glmer()`
+#' should expect exactly that gap.
+#'
 #' The reported fixed-effect covariance is the conditional one at `theta_hat`
 #' (`solve(H_beta)`). It does not include the hyperparameter uncertainty that
 #' [tulpa_re_cov_nested()] integrates over, so EB intervals are narrower --
@@ -68,8 +83,9 @@
 #'   prior is part of the maximized objective, so it regularizes the estimate:
 #'   with few groups it is what keeps a block off the `sigma = 0` boundary.
 #' @param hyperprior `"proper"` (default) or `"flat"`. `"flat"` maximizes with
-#'   `log_prior_theta` the zero function -- an unpenalized maximum-marginal-
-#'   likelihood estimate, which can reach the `sigma = 0` boundary on small
+#'   `log_prior_theta` the zero function -- an unpenalized restricted
+#'   (REML-type) estimate, `beta` integrated out rather than profiled (see
+#'   Details), which can reach the `sigma = 0` boundary on small
 #'   designs (see the `"lower end of the search bracket"` warning). `"proper"`
 #'   builds the PC + LKJ prior from `prior_sigma` / `eta`, regularizing the
 #'   estimate away from that boundary. Ignored when `log_prior_theta` is
@@ -93,7 +109,9 @@
 #'
 #'   The dispersion enters unpenalized -- the hyperprior covers the covariance
 #'   coordinates only -- so this is the ML-II estimate of `phi`, not a MAP under
-#'   an undeclared prior.
+#'   an undeclared prior. Like the covariances it is read off the likelihood
+#'   marginal over `beta`, so it is the restricted (REML-type) estimate: for a
+#'   gaussian response, the REML residual variance.
 #'
 #'   Available for every family carrying a dispersion, which is every front-door
 #'   family except `poisson`, `binomial` and `truncated_poisson` -- those have no
@@ -216,6 +234,11 @@ tulpa_eb <- function(y, n_trials = NULL, X, re_terms,
                      X_zi = NULL, zi_prior_sd = 2.5,
                      control = list()) {
   tulpa_check_control(control, .CONTROL_KEYS$eb, "tulpa_eb")
+  # A family typo reached the inner solve and came back as 39 warnings and "the
+  # inner Laplace solve failed" (gcol33/tulpa#886); name it, as
+  # tulpa_re_cov_nested() does.
+  family <- .canonical_family(family)
+  .family_or_stop(family)
   hyperprior <- .hp_choice(match.arg(hyperprior))
   log_prior_theta <- .re_cov_resolve_hyperprior(hyperprior, log_prior_theta)
   max_iter    <- as.integer(control$max_iter %||% 100L)
@@ -248,8 +271,7 @@ tulpa_eb <- function(y, n_trials = NULL, X, re_terms,
     stop("`control$marginal_step` must be a single positive number.",
          call. = FALSE)
   }
-  n_quad <- as.integer(n_quad)
-  if (n_quad < 1L) stop("`n_quad` must be >= 1.", call. = FALSE)
+  n_quad <- .check_n_quad(n_quad)
 
   # need_scale = FALSE: the numerical outer Hessian exists to place integration
   # nodes. EB places none, and asking Nelder-Mead for it costs O(k^2) extra
@@ -277,9 +299,15 @@ tulpa_eb <- function(y, n_trials = NULL, X, re_terms,
   phi_fit   <- core$phi_hat %||% phi
 
   # Re-solve at theta_hat through the SAME closure the optimizer drove, so the
-  # reported fit cannot come from a differently-configured inner solve.
+  # reported fit cannot come from a differently-configured inner solve. It keeps
+  # the joint latent precision (`H_latent`), so posterior_predict() and the
+  # WAIC/LOO criteria draw the random effects jointly with the fixed effects
+  # rather than holding them at the mode (gcol33/tulpa#871). The raw kernel copy
+  # is dropped: `H_latent` is the one a caller reads. The AGHQ inner marginal
+  # (n_quad > 1) integrates each group out and has no joint field to keep.
   L_hat <- .re_cov_theta_to_L_list(theta_hat, layout)
-  fit_hat <- core$inner_fit(L_hat, phi_fit)
+  fit_hat <- core$inner_fit(L_hat, phi_fit, joint_hessian = (n_quad == 1L))
+  if (!is.null(fit_hat)) fit_hat$H_joint <- NULL
   if (is.null(fit_hat) || is.null(fit_hat$mode) ||
       length(fit_hat$log_marginal) != 1L || !is.finite(fit_hat$log_marginal)) {
     stop("tulpa_eb(): the inner Laplace solve failed at the maximizing Sigma. ",

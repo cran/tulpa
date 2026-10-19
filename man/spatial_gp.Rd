@@ -2,6 +2,8 @@
 % Please edit documentation in R/spatial_gp.R
 \name{spatial_gp}
 \alias{spatial_gp}
+\alias{print.tulpa_gp}
+\alias{print.tulpa_hsgp}
 \title{Gaussian process spatial structure (NNGP)}
 \usage{
 spatial_gp(
@@ -18,6 +20,10 @@ spatial_gp(
   scale_coords = TRUE,
   parameterization = c("noncentered", "centered", "collapsed")
 )
+
+\method{print}{tulpa_gp}(x, ...)
+
+\method{print}{tulpa_hsgp}(x, ...)
 }
 \arguments{
 \item{coords}{A formula (\code{~ lon + lat}) or character vector naming the
@@ -55,13 +61,20 @@ multi-process model. \code{NULL} (default) shares the effect; \code{FALSE} fits
 process-specific effects and emits a warning.}
 
 \item{scale_coords}{Logical. Standardize coordinates before fitting
-(default \code{TRUE}).}
+(default \code{TRUE}): each column is centred and all are divided by one
+common factor, so distances keep their proportions and an isotropic
+kernel stays isotropic. \code{\link[=spatial_range]{spatial_range()}} reports the range in the
+original coordinate units either way.}
 
 \item{parameterization}{Latent parameterization for the exact-NUTS field.
 One of \code{"noncentered"} (default; samples \code{z ~ N(0, I)} and reconstructs the
 field as \code{w = f(z, sigma2, phi)}, avoiding the field/hyperparameter funnel),
 \code{"centered"} (places the NNGP density on the field directly), or
 \code{"collapsed"} (deprecated).}
+
+\item{x}{A \code{tulpa_gp} or \code{tulpa_hsgp} specification.}
+
+\item{...}{Ignored.}
 }
 \value{
 A \code{tulpa_gp} object (also of class \code{tulpa_spatial}).

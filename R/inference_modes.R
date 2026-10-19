@@ -1,4 +1,4 @@
-#' Inference Mode System
+#' Inference mode system
 #'
 #' @description
 #' tulpa uses an explicit tier system for inference that encodes
@@ -50,7 +50,7 @@
 #'    Adding a backend never introduces a new epistemic promise.
 #'
 #' @name inference_modes
-#' @keywords internal
+#' @noRd
 NULL
 
 
@@ -58,13 +58,13 @@ NULL
 # Tier metadata + backend registry (single source of truth)
 # ==============================================================================
 
-#' Tier metadata: the epistemic guarantee attached to each tier.
+#' Tier metadata: the epistemic guarantee attached to each tier
 #'
 #' Tier *membership* (which backends live in a tier) is not stored here -- it
 #' is derived from `BACKEND_REGISTRY`. This table holds only the per-tier
 #' description/guarantee so the two never drift.
 #'
-#' @keywords internal
+#' @noRd
 TIER_META <- list(
   exact = list(
     tier = 1L,
@@ -90,7 +90,7 @@ TIER_META <- list(
 )
 
 
-#' Backend registry -- single source of truth for the inference backends.
+#' Backend registry -- single source of truth for the inference backends
 #'
 #' @description
 #' One entry per backend. Adding a backend is a single entry here; tier
@@ -130,6 +130,10 @@ TIER_META <- list(
 #' * `cabi`     -- the registered C-ABI callable backing the backend (the symbol
 #'     a model package reaches via `LinkingTo: tulpa`, and the one an R wrapper
 #'     would call), or `NULL`.
+#' * `carries_weights` -- `TRUE` when a `"design"` backend threads observation
+#'     `weights` into its likelihood (non-spatially); absent otherwise. Every
+#'     `"logpost"` backend carries them through the log-posterior builder, and
+#'     `.backend_carries_weights()` is the one predicate reading both.
 #' * `hyperprior` -- `TRUE` when the backend's fitter takes the outer
 #'     `hyperprior = c("proper", "flat")` choice `tulpa()` forwards; absent
 #'     otherwise.
@@ -139,7 +143,7 @@ TIER_META <- list(
 #' `family$distribution`, and `family$numerator$distribution` (tulpaRatio-style
 #' ratio families nest a per-process distribution).
 #'
-#' @keywords internal
+#' @noRd
 BACKEND_REGISTRY <- list(
   # ---- Tier 1: Exact ----
   hmc = list(
@@ -231,12 +235,17 @@ BACKEND_REGISTRY <- list(
   laplace = list(
     emits = "iid",
     tier = "structured", input = "design", fitter = "tulpa_laplace",
-    families = NULL, cabi = "tulpa_laplace_spec_dense"
+    families = NULL, cabi = "tulpa_laplace_spec_dense", carries_weights = TRUE
   ),
   re_cov_nested = list(
     emits = "iid",
     tier = "structured", input = "design", fitter = "tulpa_re_cov_nested",
     families = NULL, cabi = NULL, hyperprior = TRUE,
+    # Its inner solve is tulpa_laplace()'s non-spatial kernel, which scales each
+    # row's log-likelihood by its weight, so a weighted (1 | g) model keeps its
+    # scale INTEGRATED rather than being routed to a conditional backend
+    # (gcol33/tulpa#874).
+    carries_weights = TRUE,
     note = paste("Correlated random-slope term (1 + x | g): nested-Laplace",
                  "integration over the RE covariance Sigma (CCD design + PC/LKJ",
                  "prior). Auto-selected from the Laplace path for a single",
@@ -286,14 +295,6 @@ BACKEND_REGISTRY <- list(
              "tulpa_nested_laplace_car_proper", "tulpa_nested_laplace_temporal",
              "tulpa_nested_laplace_nngp", "tulpa_nested_laplace_hsgp"),
     hyperprior = TRUE,
-    # The multi-block converter behind cpp_nested_laplace_multi
-    # (.nl_block_spec_for_cpp(), R/nested_laplace.R) has no gp / nngp / hsgp
-    # arm -- only icar / bym2 / car_proper / rw1 / rw2 / ar1 / iid / spde /
-    # tgmrf -- so a continuous field's own (1 | g) turning the fit into a
-    # multi-block prior reaches a refusal deep in that dispatch rather than at
-    # the front door (gcol33/tulpa#794). A continuous field with no RE term
-    # stays single-block and is unaffected.
-    carries_continuous_spatial_re = FALSE,
     note = "Single-arm nested Laplace; integrates latent-block hyperparameters"
   ),
   nested_laplace_joint = list(
@@ -339,8 +340,8 @@ BACKEND_REGISTRY <- list(
 )
 
 
-#' Backend names belonging to a tier (derived from the registry).
-#' @keywords internal
+#' Backend names belonging to a tier (derived from the registry)
+#' @noRd
 .tier_backends <- function(tier_key) {
   names(Filter(function(e) e$tier == tier_key, BACKEND_REGISTRY))
 }
@@ -351,10 +352,12 @@ BACKEND_REGISTRY <- list(
 }
 
 
-#' Inference tiers with their properties (derived from `TIER_META` +
-#' `BACKEND_REGISTRY`). Preserves the `INFERENCE_TIERS$<tier>$backends`
-#' interface relied on by downstream code and tests.
-#' @keywords internal
+#' Inference tiers with their properties
+#'
+#' Derived from `TIER_META` and `BACKEND_REGISTRY`.
+#' Preserves the `INFERENCE_TIERS$<tier>$backends` interface relied on by
+#' downstream code and tests.
+#' @noRd
 INFERENCE_TIERS <- local({
   out <- vector("list", length(TIER_META))
   names(out) <- names(TIER_META)
@@ -365,8 +368,8 @@ INFERENCE_TIERS <- local({
 })
 
 
-#' Backend -> supported families, derived from the registry.
-#' @keywords internal
+#' Backend -> supported families, derived from the registry
+#' @noRd
 BACKEND_FAMILY_SUPPORT <- local({
   out <- list()
   for (b in names(BACKEND_REGISTRY)) {
@@ -377,8 +380,8 @@ BACKEND_FAMILY_SUPPORT <- local({
 })
 
 
-#' All registered backends across every tier (derived from the registry).
-#' @keywords internal
+#' All registered backends across every tier (derived from the registry)
+#' @noRd
 ALL_BACKENDS <- names(BACKEND_REGISTRY)
 
 
@@ -409,6 +412,14 @@ ALL_BACKENDS <- names(BACKEND_REGISTRY)
 # Of those, the ones whose projection is applied on the CONTINUOUS kernel.
 .RSR_CONTINUOUS <- c("gp", "nngp")
 
+# The `spatial_type` tulpa() hands the backend selector for a restricted field:
+# "rsr" for an areal one and "gp_rsr" for a continuous one. Both also ride the
+# nested-Laplace multi-block driver, which reads the unit projector as the
+# block's `projector`.
+.rsr_spatial_type <- function(field_type) {
+  if (field_type %in% .RSR_CONTINUOUS) "gp_rsr" else "rsr"
+}
+
 # SPDE is also coordinate-addressed (no spatial(col) term) and nested-integrated,
 # but it carries its OWN nested engine -- fit_spde() rebuilds the Matern precision
 # Q(range, sigma) per node via the FEM Q-builder and integrates (range, sigma)
@@ -436,7 +447,13 @@ ALL_BACKENDS <- names(BACKEND_REGISTRY)
 # converter .spatial_spec_to_nl_prior); SPDE is redirected to the `spde` backend.
 # Types outside this set stay on the conditional Laplace path under auto/structured.
 .NL_FRONTDOOR_NESTED <- c(.NL_FRONTDOOR_AREAL, .NL_FRONTDOOR_CONTINUOUS,
-                          .NL_FRONTDOOR_SPDE)
+                          .NL_FRONTDOOR_SPDE, "rsr", "gp_rsr")
+
+# Spatial types that can share the nested-Laplace multi-block stack with a
+# random-effect term, a temporal field, smoothers or latent blocks: the areal
+# and continuous fields, restricted or not.
+.NL_FRONTDOOR_STACKABLE <- c(.NL_FRONTDOOR_AREAL, .NL_FRONTDOOR_CONTINUOUS,
+                             "rsr", "gp_rsr")
 
 # The subset of .NL_FRONTDOOR_NESTED the exact ModelData NUTS sampler (`hmc`
 # and its siblings) also threads directly -- read off dispatch_glmm_modeldata()
@@ -450,8 +467,8 @@ ALL_BACKENDS <- names(BACKEND_REGISTRY)
                                .NL_FRONTDOOR_CONTINUOUS)
 
 
-#' Test whether a backend supports the given family.
-#' @keywords internal
+#' Test whether a backend supports the given family
+#' @noRd
 backend_supports_family <- function(backend, family) {
   supported <- BACKEND_REGISTRY[[backend]]$families
   if (is.null(supported)) return(TRUE)  # unrestricted backend
@@ -463,7 +480,7 @@ backend_supports_family <- function(backend, family) {
 
 
 #' Redirect a backend selection: swap the backend and restamp mode / tier /
-#' tier name from the registry, recording the reason shown on the fit.
+#' tier name from the registry, recording the reason shown on the fit
 #'
 #' A redirect off an EXPLICIT request (anything but `mode = "auto"`) is an
 #' override, not a resolution: the fit does what the model structure requires
@@ -484,7 +501,7 @@ backend_supports_family <- function(backend, family) {
 #' redirected from `nested_laplace` to `spde` is the same mode and tier reaching
 #' its own integrator. Those are recorded, not warned about, so a documented route
 #' does not warn on every fit.
-#' @keywords internal
+#' @noRd
 .sel_redirect <- function(sel, backend, reason, notify = TRUE) {
   if (isTRUE(sel$explicit) && is.null(sel$overridden) &&
       !identical(sel$backend, backend)) {
@@ -520,7 +537,7 @@ backend_supports_family <- function(backend, family) {
 #' Get tier for a backend
 #' @param backend Character string naming the backend
 #' @return List with tier information
-#' @keywords internal
+#' @noRd
 get_backend_tier <- function(backend) {
   entry <- BACKEND_REGISTRY[[backend]]
   if (is.null(entry)) {
@@ -543,14 +560,14 @@ get_backend_tier <- function(backend) {
 # ==============================================================================
 
 #' Is a backend reachable from R (does it have an R-level fitter)?
-#' @keywords internal
+#' @noRd
 backend_is_reachable <- function(backend) {
   entry <- BACKEND_REGISTRY[[backend]]
   !is.null(entry) && !is.null(entry$fitter)
 }
 
 
-#' Error if a selected backend has no R-level fitter.
+#' Error if a selected backend has no R-level fitter
 #'
 #' @description
 #' Enforces the registry honesty contract: a backend may ship a C++ kernel
@@ -559,7 +576,7 @@ backend_is_reachable <- function(backend) {
 #' selecting it errors with a precise message naming the C-ABI symbol, rather
 #' than pretending to dispatch.
 #'
-#' @keywords internal
+#' @noRd
 assert_backend_reachable <- function(backend) {
   entry <- BACKEND_REGISTRY[[backend]]
   if (is.null(entry)) {
@@ -580,18 +597,18 @@ assert_backend_reachable <- function(backend) {
 }
 
 
-#' Resolve the R fitter function for a backend (errors if unreachable).
+#' Resolve the R fitter function for a backend (errors if unreachable)
 #'
 #' Looks up the fitter *name* string in the registry and resolves it lazily,
 #' so the registry stays independent of source-file load order.
-#' @keywords internal
+#' @noRd
 resolve_backend_fitter <- function(backend) {
   assert_backend_reachable(backend)
   match.fun(BACKEND_REGISTRY[[backend]]$fitter)
 }
 
 
-#' Dispatch a fit to the backend chosen by the mode/tier system.
+#' Dispatch a fit to the backend chosen by the mode/tier system
 #'
 #' @description
 #' The routing spine. Resolves `mode` to a concrete backend via
@@ -610,7 +627,7 @@ resolve_backend_fitter <- function(backend) {
 #'   Model characteristics forwarded to [select_inference_mode()].
 #' @return The fitter's result, with `inference_mode`, `inference_tier`,
 #'   `backend`, and `selection_reason` ensured.
-#' @keywords internal
+#' @noRd
 tulpa_dispatch <- function(mode,
                            fitter_args = list(),
                            family = NULL,
@@ -640,7 +657,7 @@ tulpa_dispatch <- function(mode,
 }
 
 
-#' Attach the standard `tulpa_fit` contract to a fitter's result.
+#' Attach the standard `tulpa_fit` contract to a fitter's result
 #'
 #' The dispatch layer and the fitters that return generic-accessor-facing
 #' objects route their return value through this helper (some special-purpose
@@ -679,7 +696,7 @@ tulpa_dispatch <- function(mode,
 #'   full design bundle `tulpa()` attaches post-dispatch) wins.
 #' @param extra_class Subclass(es) to prepend before `tulpa_fit`.
 #' @return The enriched fit, classed `c(extra_class, ..., "tulpa_fit")`.
-#' @keywords internal
+#' @noRd
 .finalize_fit <- function(fit, backend = NULL, draws_kind = NULL,
                           n_fixed = NULL, fixed_names = NULL,
                           param_names = NULL, extra_class = NULL,
@@ -833,7 +850,7 @@ tulpa_dispatch <- function(mode,
 #' Map mode to valid backends
 #' @param mode Character: "auto", "exact", "structured", or "optimized"
 #' @return Character vector of valid backends for this mode
-#' @keywords internal
+#' @noRd
 get_mode_backends <- function(mode) {
   mode <- tolower(mode)
 
@@ -883,7 +900,7 @@ get_mode_backends <- function(mode) {
 #'   - tier_name: The tier name
 #'   - reason: Explanation for the selection
 #'
-#' @keywords internal
+#' @noRd
 select_inference_mode <- function(mode,
                                   family,
                                   n_obs,
@@ -961,7 +978,7 @@ select_inference_mode <- function(mode,
 #'
 #' **Critical rule**: Auto never selects Tier 3 (Optimized).
 #'
-#' @keywords internal
+#' @noRd
 auto_select_mode <- function(family, n_obs, has_spatial, has_temporal, has_latent, temporal = NULL,
                              spatial_type = NULL, has_re = FALSE,
                              feat = list()) {
@@ -969,11 +986,6 @@ auto_select_mode <- function(family, n_obs, has_spatial, has_temporal, has_laten
   # .auto_backend_ok(). The `spatial` flag is set from has_spatial so a caller
   # cannot pass the two inconsistently.
   feat$spatial <- isTRUE(has_spatial)
-  # A continuous spatial field (gp / nngp / hsgp) plus a formula RE term is a
-  # feature nested_laplace's multi-block converter cannot carry (gcol33/tulpa#794);
-  # an areal field + RE stays single-block prior handling and is unaffected.
-  feat$continuous_spatial_re <- isTRUE(has_re) && isTRUE(has_spatial) &&
-    tolower(spatial_type %||% "") %in% .NL_FRONTDOOR_CONTINUOUS
 
   # Latent prior blocks (`latent(tgmrf(...))`) integrate their hyperparameters
   # via nested Laplace -- the designed Tier 2 hot path for latent Gaussian
@@ -1067,8 +1079,9 @@ auto_select_mode <- function(family, n_obs, has_spatial, has_temporal, has_laten
   # preference order:
   #  * binomial areal (icar/bym2/rsr): exact component-wise Polya-Gamma Gibbs
   #    (Tier 1). The PG samplers update the field component-wise, avoiding
-  #    HMC's curse of dimensionality. RSR (an ICAR field projected orthogonal to
-  #    the covariates) has a gibbs-only tulpa() grammar arm, so auto can pick it.
+  #    HMC's curse of dimensionality. A restricted field (spatial_rsr()) goes
+  #    here too, areal or continuous; a continuous one has no other backend.
+  #    An areal one under another family reaches nested Laplace below.
   #    dispatch_gibbs_spatial() also handles gp / nngp / multiscale_gp, but auto
   #    deliberately routes those to the more general nested path below (their
   #    Gibbs samplers need one observation per location); they stay reachable via
@@ -1087,7 +1100,7 @@ auto_select_mode <- function(family, n_obs, has_spatial, has_temporal, has_laten
     # from auto only when there is no temporal field. spatial_car()'s exported
     # "car" is the same intrinsic ICAR field dispatch_gibbs_spatial() dispatches
     # under "icar" (gcol33/tulpa#819).
-    if (.areal_gibbs_type(spatial_type) %in% c("icar", "bym2", "rsr") &&
+    if (.areal_gibbs_type(spatial_type) %in% c("icar", "bym2", "rsr", "gp_rsr") &&
         identical(fam_nm, "binomial") &&
         !has_temporal && .auto_backend_ok("gibbs", family, feat)) {
       return(list(
@@ -1180,7 +1193,9 @@ auto_select_mode <- function(family, n_obs, has_spatial, has_temporal, has_laten
   # ~ 1)` picked this branch unconditionally and errored at the front door's
   # zero-inflation guard on the very call that picked it). Gate on
   # .auto_backend_ok() and fall back to the exact ModelData sampler, which
-  # carries ziformula / phi2 / offset / weights all at once, before refusing.
+  # carries ziformula / phi2 / offset at once, before refusing. It does NOT
+  # carry weights (the ModelData likelihood has no per-row multiplier), and a
+  # weighted call reaching here refuses rather than fits unweighted.
   if (.auto_backend_ok("mala", family, feat)) {
     return(list(
       mode = "exact", backend = "mala", tier = 1L, tier_name = "Exact",
@@ -1222,19 +1237,31 @@ auto_select_mode <- function(family, n_obs, has_spatial, has_temporal, has_laten
   if (is.null(reg)) return(FALSE)
   on <- function(k) isTRUE(feat[[k]])
   if (on("offset") && identical(reg$carries_offset, FALSE)) return(FALSE)
-  if (on("continuous_spatial_re") &&
-      identical(reg$carries_continuous_spatial_re, FALSE)) return(FALSE)
   if (on("ziformula") && !backend %in% .zi_backends()) return(FALSE)
   if (on("phi2") && !backend %in% .phi2_backends()) return(FALSE)
-  # Weights run through a log-posterior sampler, or through the non-spatial
-  # Laplace kernel; the spatial qualification is a property of the CALL, so it
-  # travels in `feat` rather than in the registry.
+  # The spatial qualification is a property of the CALL, so it travels in
+  # `feat` rather than in the registry.
   if (on("weights") &&
-      !(identical(reg$input, "logpost") ||
-        (identical(backend, "laplace") && !on("spatial")))) return(FALSE)
+      !.backend_carries_weights(backend, spatial = on("spatial"))) return(FALSE)
   mx <- reg$max_re_terms
   if (!is.null(mx) && isTRUE((feat$n_re_terms %||% 0L) > mx)) return(FALSE)
   TRUE
+}
+
+
+# Does `backend` carry observation weights on a call with (`spatial = TRUE`) or
+# without a spatial field? Every log-posterior backend does, through the R
+# log-posterior builder; a design backend does when the registry declares
+# `carries_weights`, and then non-spatially only -- the spatial Laplace solvers
+# have no weight channel. The one predicate the auto selector and the fitter
+# argument assembly both read, so what auto picks for a weighted call is what
+# dispatch accepts.
+#' @keywords internal
+.backend_carries_weights <- function(backend, spatial = FALSE) {
+  reg <- BACKEND_REGISTRY[[backend]]
+  if (is.null(reg)) return(FALSE)
+  if (identical(reg$input, "logpost")) return(TRUE)
+  isTRUE(reg$carries_weights) && !isTRUE(spatial)
 }
 
 
@@ -1256,7 +1283,7 @@ auto_select_mode <- function(family, n_obs, has_spatial, has_temporal, has_laten
 
 
 #' Select best backend within a mode
-#' @keywords internal
+#' @noRd
 select_backend_for_mode <- function(mode, family, n_obs, has_spatial, has_temporal,
                                     has_latent = FALSE, spatial_type = NULL,
                                     has_re = FALSE, feat = list()) {
@@ -1317,43 +1344,80 @@ select_backend_for_mode <- function(mode, family, n_obs, has_spatial, has_tempor
 #' Ensures the fit object was created with the expected inference mode.
 #' Useful for enforcing mode requirements in downstream analysis.
 #'
+#' A fit matches a mode when the mode names either the backend that ran
+#' (`fit$backend`, e.g. `"laplace"`, `"mala"`, `"re_cov_gibbs"`) or the tier it
+#' ran in (`fit$inference_mode`: `"exact"`, `"structured"`, `"optimized"`). So a
+#' fit made with `mode = "laplace"` validates against both `"laplace"` and
+#' `"structured"`, and a fit made with `mode = "auto"` validates against the
+#' backend and the tier auto chose. A request that `tulpa()` overrode (see
+#' `fit$mode_overridden`) validates against what ran, not what was asked for.
+#'
 #' @param fit A tulpa_fit object
-#' @param expected_mode Mode that should have been used
+#' @param expected_mode Mode(s) that should have been used: a character vector
+#'   of backend and / or tier names, any one of which is accepted.
 #' @param error If TRUE (default), error on mismatch. If FALSE, return logical.
 #'
 #' @return If error = FALSE, returns TRUE/FALSE. Otherwise errors on mismatch.
 #'
+#' @examples
+#' \donttest{
+#' set.seed(1)
+#' d <- data.frame(x = rnorm(60))
+#' d$y <- rpois(60, exp(0.5 + 0.3 * d$x))
+#' fit <- tulpa(y ~ x, data = d, family = "poisson", mode = "hmc",
+#'              control = list(n_iter = 400L, warmup = 200L, n_chains = 2L,
+#'                             seed = 1L))
+#' validate_mode(fit, "exact")                      # the tier hmc runs in
+#' validate_mode(fit, "structured", error = FALSE)  # FALSE
+#' }
 #' @export
 validate_mode <- function(fit, expected_mode, error = TRUE) {
   if (!inherits(fit, "tulpa_fit")) {
     stop("fit must be a tulpa_fit object", call. = FALSE)
   }
-
-  actual_mode <- fit$inference_mode %||% "unknown"
-  actual_tier <- fit$inference_tier %||% NA
-
-  expected_mode <- tolower(expected_mode)
-
-  # Check if modes match
-  match <- (actual_mode == expected_mode)
-
-  # Also accept tier-based matching
- if (!match && expected_mode %in% names(INFERENCE_TIERS)) {
-    expected_tier <- INFERENCE_TIERS[[expected_mode]]$tier
-    match <- !is.na(actual_tier) && (actual_tier == expected_tier)
+  if (!is.character(expected_mode) || !length(expected_mode) ||
+      anyNA(expected_mode)) {
+    stop("`expected_mode` must be a non-empty character vector of mode names.",
+         call. = FALSE)
   }
 
-  if (!match && error) {
+  actual_backend <- tolower(fit$backend %||% NA_character_)
+  actual_mode    <- tolower(fit$inference_mode %||% NA_character_)
+  actual_tier    <- fit$inference_tier %||% NA
+
+  # `fit$inference_mode` holds the TIER name, so comparing against it alone
+  # rejected the backend a fit was run with (gcol33/tulpa#879). A name that is
+  # neither a tier, a backend, nor this fit's own backend is a typo rather
+  # than a mismatch, and says so.
+  expected_mode <- tolower(expected_mode)
+  known <- c(names(INFERENCE_TIERS), ALL_BACKENDS, actual_backend)
+  unknown <- setdiff(expected_mode, known)
+  if (length(unknown)) {
+    stop(sprintf(paste0(
+      "`expected_mode` names unknown mode(s): %s. Use a tier (%s) or a ",
+      "backend (%s)."),
+      paste0("'", unknown, "'", collapse = ", "),
+      paste(names(INFERENCE_TIERS), collapse = ", "),
+      paste(ALL_BACKENDS, collapse = ", ")), call. = FALSE)
+  }
+
+  expected_tiers <- vapply(intersect(expected_mode, names(INFERENCE_TIERS)),
+                           function(m) INFERENCE_TIERS[[m]]$tier, integer(1))
+  match <- any(expected_mode %in% c(actual_backend, actual_mode)) ||
+    (!is.na(actual_tier) && actual_tier %in% expected_tiers)
+
+  if (!match && isTRUE(error)) {
     stop(sprintf(
-      "Mode mismatch: fit used '%s' (Tier %s) but expected '%s'.\n%s",
-      actual_mode,
+      "Mode mismatch: fit used backend '%s' (%s, Tier %s) but expected %s.\n%s",
+      fit$backend %||% "unknown",
+      fit$inference_mode %||% "unknown tier",
       ifelse(is.na(actual_tier), "?", actual_tier),
-      expected_mode,
+      paste0("'", expected_mode, "'", collapse = " or "),
       "Refit the model with the correct mode, or adjust your expectations."
     ), call. = FALSE)
   }
 
-  return(match)
+  match
 }
 
 
@@ -1370,6 +1434,8 @@ validate_mode <- function(fit, expected_mode, error = TRUE) {
 #'   available inference modes, their tiers, guarantees, and use cases to the
 #'   console.
 #'
+#' @examples
+#' inference_mode_info()
 #' @export
 inference_mode_info <- function() {
   cat("tulpa Inference Modes\n")
@@ -1425,36 +1491,3 @@ inference_mode_info <- function() {
 }
 
 
-#' Format tier information for display
-#'
-#' @param tier_info List from get_backend_tier()
-#' @param verbose Include full description
-#' @return Character string
-#' @keywords internal
-format_tier_info <- function(tier_info, verbose = FALSE) {
-  if (verbose) {
-    sprintf(
-      "Tier %d (%s): %s",
-      tier_info$tier,
-      tier_info$name,
-      tier_info$description
-    )
-  } else {
-    sprintf("Tier %d (%s)", tier_info$tier, tier_info$name)
-  }
-}
-
-
-#' Format mode selection message
-#'
-#' @param selection List from select_inference_mode()
-#' @return Character string for display
-#' @keywords internal
-format_mode_selection <- function(selection) {
-  lines <- c(
-    sprintf("Mode: %s", selection$tier_name),
-    sprintf("Backend: %s", selection$backend),
-    sprintf("Reason: %s", selection$reason)
-  )
-  paste(lines, collapse = "\n")
-}

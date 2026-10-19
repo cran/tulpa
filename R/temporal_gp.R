@@ -95,14 +95,9 @@ temporal_multiscale <- function(time_var,
 }
 
 
-#' Print method for tulpa_temporal_multiscale
-#'
-#' @param x A tulpa_temporal_multiscale object
-#' @param ... Ignored
-#'
-#' @return The input `x`, returned invisibly. Called for the side effect of
-#'   printing the multi-scale temporal specification to the console.
-#'
+#' @rdname temporal_multiscale
+#' @param x A `tulpa_temporal_multiscale` specification.
+#' @param ... Ignored.
 #' @export
 print.tulpa_temporal_multiscale <- function(x, ...) {
   cat("tulpa Multi-Scale temporal specification\n")
@@ -157,11 +152,15 @@ print.tulpa_temporal_multiscale <- function(x, ...) {
 #' when fitting through a design-matrix door.
 #'
 #' @param temporal A [temporal_multiscale()] object (or a single-component
-#'   temporal spec, dispatched to [validate_temporal()]).
+#'   temporal spec, dispatched to `validate_temporal()`).
 #' @param data Data frame containing the time column named in `temporal`.
 #'
 #' @return Updated object with indices computed.
 #' @seealso [validate_gp()], [temporal_multiscale()]
+#' @examples
+#' tm <- temporal_multiscale("t", trend = "rw1", seasonal = 12)
+#' tm <- validate_temporal_multiscale(tm, data.frame(t = 1:36))
+#' class(tm)
 #' @export
 validate_temporal_multiscale <- function(temporal, data) {
   if (is.null(temporal)) return(NULL)
@@ -175,15 +174,8 @@ validate_temporal_multiscale <- function(temporal, data) {
     assert_columns_exist(temporal$group_var, data, role = "Temporal group")
   }
 
-  # Get time values and create indices
-  time_vals <- data[[temporal$time_var]]
-
-  if (is.factor(time_vals)) {
-    time_factor <- time_vals
-  } else {
-    unique_times <- sort(unique(time_vals))
-    time_factor <- factor(time_vals, levels = unique_times)
-  }
+  time_factor <- .resolve_time_index(data[[temporal$time_var]],
+                                     temporal$time_var)
 
   temporal$n_times <- nlevels(time_factor)
   temporal$time_index <- as.integer(time_factor)
@@ -305,7 +297,7 @@ validate_temporal_multiscale <- function(temporal, data) {
   invisible(NULL)
 }
 
-#' Gaussian Process temporal structure
+#' Gaussian process temporal structure
 #'
 #' @description
 #' Specify a Gaussian Process (GP) temporal random effect for irregularly-spaced
@@ -338,7 +330,9 @@ validate_temporal_multiscale <- function(temporal, data) {
 #' @param shared Logical; if TRUE (default), temporal effect enters both
 #'   all processes.
 #' @param scale_coords Logical; if TRUE (default), time values are scaled to
-#'   unit variance before computing distances.
+#'   unit variance before computing distances. Either way the lengthscale's
+#'   support is placed relative to the spread of the times, and
+#'   [temporal_corr()] reports the lengthscale in the original time units.
 #' @param parameterization Parameterization for GP effects:
 #'   `"noncentered"` (default) stores z ~ N(0,1) and scales by covariance
 #'   (better for weakly-informed effects);
@@ -455,14 +449,9 @@ temporal_gp <- function(time_var,
 }
 
 
-#' Print method for tulpa_temporal_gp
-#'
-#' @param x A tulpa_temporal_gp object
-#' @param ... Ignored
-#'
-#' @return The input `x`, returned invisibly. Called for the side effect of
-#'   printing the Gaussian-process temporal specification to the console.
-#'
+#' @rdname temporal_gp
+#' @param x A `tulpa_temporal_gp` specification.
+#' @param ... Ignored.
 #' @export
 print.tulpa_temporal_gp <- function(x, ...) {
   cat("tulpa Gaussian Process temporal specification\n")
@@ -497,7 +486,7 @@ print.tulpa_temporal_gp <- function(x, ...) {
 #' @param data Data frame
 #'
 #' @return Updated object with computed time structure
-#' @keywords internal
+#' @noRd
 validate_temporal_gp <- function(temporal, data) {
   if (is.null(temporal)) return(NULL)
   if (!inherits(temporal, "tulpa_temporal_gp")) return(temporal)
@@ -512,6 +501,10 @@ validate_temporal_gp <- function(temporal, data) {
 
   # Extract time values
   time_vals <- data[[temporal$time_var]]
+  # The distinct instants in the user's own units (and class), which is what a
+  # read-back labels the field by; the kernel sees the scaled numeric values
+  # below, in the same order (gcol33/tulpa#905).
+  temporal$time_levels <- sort(unique(time_vals))
 
   # Convert to numeric
   if (!is.numeric(time_vals)) {
@@ -543,6 +536,11 @@ validate_temporal_gp <- function(temporal, data) {
     time_vals <- as.vector(scaled)
   }
   temporal$time_scale <- time_scale
+  # The lengthscale support, laid out on the spread of the times the kernel
+  # sees: 1 once scaled, sd(time) in raw units (gcol33/tulpa#907).
+  phi_b <- .gp_phi_bounds(stats::sd(time_vals))
+  temporal$phi_prior_lower <- phi_b[["lower"]]
+  temporal$phi_prior_upper <- phi_b[["upper"]]
   temporal$period_scaled <-
     if (is.null(temporal$period)) NULL else as.numeric(temporal$period) / time_scale
 

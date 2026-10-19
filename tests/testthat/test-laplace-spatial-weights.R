@@ -95,6 +95,18 @@
 }
 
 
+test_that("a spatial fit rejects a weights vector of the wrong length", {
+  a <- .areal_fixture(702L, N = 60L)
+  expect_error(
+    tulpa_laplace(a$y, a$ntr, a$X, family = "binomial", spatial = a$spatial,
+                  weights = rep(1, a$N - 1L)),
+    regexp = "length"
+  )
+})
+
+skip_on_cran()
+
+
 test_that("an all-ones weight vector is exactly a no-op on every spatial kernel", {
   skip_on_cran()
   # This is the gate that protects every existing spatial fit: nothing may move
@@ -227,21 +239,16 @@ test_that("the spatial mode and its H_beta describe the same weighted model", {
 
   H <- ref$hess(fit$mode)
   idx_b <- seq_len(p); idx_u <- p + seq_len(ref$n_units)
+  # The field's level is a hard sum-to-zero constraint, so the Schur takes the
+  # field block's inverse conditioned on 1'u = 0 (gcol33/tulpa#901).
+  Pinv <- solve(H[idx_u, idx_u])
+  a <- rowSums(Pinv)
+  Pinv_c <- Pinv - tcrossprod(a) / sum(a)
   schur <- H[idx_b, idx_b] -
-    H[idx_b, idx_u] %*% solve(H[idx_u, idx_u], t(H[idx_b, idx_u]))
+    H[idx_b, idx_u] %*% Pinv_c %*% t(H[idx_b, idx_u])
   # The engine's marginal omits the weak fixed-effect ridge the mode carries.
   schur <- schur - diag(1 / 100^2, p)
 
   expect_lt(max(abs(fit$H_beta - schur)) / max(abs(schur)), 1e-6)
   expect_lt(max(abs(ref$score(fit$mode))), 1e-4)
-})
-
-
-test_that("a spatial fit rejects a weights vector of the wrong length", {
-  a <- .areal_fixture(702L, N = 60L)
-  expect_error(
-    tulpa_laplace(a$y, a$ntr, a$X, family = "binomial", spatial = a$spatial,
-                  weights = rep(1, a$N - 1L)),
-    regexp = "length"
-  )
 })

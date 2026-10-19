@@ -34,44 +34,31 @@
 }
 
 # --------------------------------------------------------------------------- #
-# The closed form                                                             #
+# The measurement (gcol33/tulpa#322's harness, no fitting minutes)            #
 # --------------------------------------------------------------------------- #
 
-test_that("the concave axis factor is the box integral, to machine precision", {
-  gr <- expand.grid(g = c(0, 0.25, 1, 2, 4.44, -3), a = c(0.05, 0.5, 1, 3, 20),
-                    h = c(0.25, 1, 2))
-  err_int <- numeric(nrow(gr))
-  err_sim <- numeric(nrow(gr))
-  route   <- character(nrow(gr))
-  for (i in seq_len(nrow(gr))) {
-    f <- tulpa:::.joint_local_ccd_axis_box(gr$g[i], gr$a[i], gr$h[i], gr$h[i])
-    route[i]   <- f$route
-    err_int[i] <- abs(f$log_factor - .bxm_integrate(gr$g[i], gr$a[i],
-                                                    gr$h[i], gr$h[i]))
-    err_sim[i] <- abs(f$log_factor - .bxm_simpson(gr$g[i], gr$a[i],
-                                                  gr$h[i], gr$h[i]))
-  }
-  # Every one of these takes the closed form: the whole point is that a concave
-  # axis needs no quadrature.
-  expect_identical(unique(route), "closed")
-  # Measured over the 90 combinations, on the log scale: 6.13e-14 against
-  # integrate() and 6.08e-14 against Simpson, the two arbiters agreeing with
-  # each other to the same figure. The tolerances are floating slack.
-  expect_lt(max(err_int), 1e-12)
-  expect_lt(max(err_sim), 1e-12)
+# The candidate weight vector: the box multiplier entering as a per-cell design
+# weight, exactly the way the harness takes one.
+.bxm_weights <- function(d) {
+  bm <- tulpa:::.joint_local_ccd_box_mass(d$joint_grid, d$log_marginal,
+                                          d$axis_names, d$axis_tags)
+  base <- if (is.null(d$dnode)) rep(1, nrow(d$joint_grid)) else d$dnode
+  list(bm = bm, w = outer_grid_weights(d, dnode = base * exp(bm$log_box_ratio)))
+}
 
-  # An asymmetric box -- the cell's Voronoi half-widths need not match, and the
-  # factor divides by the axis's own extent so the product stays a multiplier on
-  # the cell's own volume.
-  expect_equal(tulpa:::.joint_local_ccd_axis_box(1.3, 0.7, 0.4, 1.1)$log_factor,
-               .bxm_integrate(1.3, 0.7, 0.4, 1.1), tolerance = 1e-12)
+# Every axis's own u-space level spacing. The multiplier form is only a rule at
+# all because the common cell volume `Delta` cancels in the softmax, and that is
+# a property of the grid rather than of the rule.
+.bxm_spacings <- function(d) {
+  lapply(seq_len(ncol(d$joint_grid)), function(j)
+    diff(sort(unique(tulpa:::.joint_pareto_fwd(d$axis_tags[j],
+                                               d$joint_grid[, j])))))
+}
 
-  # A cell the log-marginal is flat across is its own midpoint atom exactly.
-  expect_equal(tulpa:::.joint_local_ccd_axis_box(0, 0, 1, 1)$log_factor, 0,
-               tolerance = 1e-14)
-})
+skip_on_cran_budget()
 
 test_that("the factor is the issue's pnorm form where that form can be evaluated", {
+  skip_on_cran_budget()
   # exp(0.5 g^2/a) sqrt(2 pi/a) (Phi(h; mu, s) - Phi(-h; mu, s)) / (2h), written
   # out directly. Its two factors diverge against each other as the local peak
   # leaves the box -- exp(0.5 g^2/a) up, the pnorm difference down at the
@@ -102,39 +89,8 @@ test_that("the factor is the issue's pnorm form where that form can be evaluated
   }
 })
 
-# --------------------------------------------------------------------------- #
-# The convex axis                                                             #
-# --------------------------------------------------------------------------- #
-
-test_that("a convex axis is integrated rather than declined", {
-  gr <- expand.grid(g = c(0, 0.5, 2, -2), a = c(0, -0.05, -0.5, -2),
-                    h = c(0.5, 1, 2))
-  err <- numeric(nrow(gr))
-  route <- character(nrow(gr))
-  for (i in seq_len(nrow(gr))) {
-    f <- tulpa:::.joint_local_ccd_axis_box(gr$g[i], gr$a[i], gr$h[i], gr$h[i])
-    expect_false(is.null(f$log_factor))
-    expect_true(is.na(f$reason))
-    route[i] <- f$route
-    err[i] <- abs(f$log_factor - .bxm_simpson(gr$g[i], gr$a[i],
-                                              gr$h[i], gr$h[i]))
-  }
-  expect_identical(unique(route), "numeric")
-  # Measured: 1.3e-14 over the 48 combinations. A bounded interval and a smooth
-  # integrand is where quadrature is exact, which is what buys the convex axis a
-  # factor instead of a decline.
-  expect_lt(max(err), 1e-12)
-
-  # And a near-flat concave axis, where the closed form's own two pieces cancel:
-  # 0.5 g^2/a diverges while the pnorm difference vanishes at the matching rate.
-  # The reading is refused there and taken by quadrature, not returned wrong.
-  f <- tulpa:::.joint_local_ccd_axis_box(0, 1e-14, 1, 1)
-  expect_identical(f$route, "numeric")
-  expect_equal(f$log_factor, .bxm_simpson(0, 1e-14, 1, 1), tolerance = 1e-12)
-  expect_true(is.na(tulpa:::.joint_local_ccd_log_pnorm_diff(-5e-8, 5e-8)))
-})
-
 test_that("a cell convex on one axis keeps the exact factor on the others", {
+  skip_on_cran_budget()
   # The separability is the whole argument for the diagonal rule: the decline is
   # per axis, so three good axes are not thrown away for a fourth the local
   # quadratic came back convex on.
@@ -161,6 +117,7 @@ test_that("a cell convex on one axis keeps the exact factor on the others", {
 # --------------------------------------------------------------------------- #
 
 test_that("the gradient is the same three points the curvature is", {
+  skip_on_cran_budget()
   # An exactly quadratic target in u, so the three-point stencil reproduces both
   # derivatives exactly and the two readings can be checked against the truth
   # rather than against each other.
@@ -197,6 +154,7 @@ test_that("the gradient is the same three points the curvature is", {
 })
 
 test_that("a boundary cell has no centred stencil and keeps its midpoint atom", {
+  skip_on_cran_budget()
   mu <- c(0.3, -0.2); s <- c(0.8, 1.3)
   lv <- list(a = c(-1, 0, 1), b = c(-1, 0, 1))
   gg <- as.matrix(expand.grid(lv, KEEP.OUT.ATTRS = FALSE))
@@ -248,6 +206,7 @@ test_that("a boundary cell has no centred stencil and keeps its midpoint atom", 
 # --------------------------------------------------------------------------- #
 
 test_that("a declined box axis names the gate it fell at", {
+  skip_on_cran_budget()
   # `no_factor`: the quadratic never formed. A box of zero extent has no
   # integral to divide by its own width, and a non-finite coefficient has no
   # integrand at all.
@@ -275,6 +234,7 @@ test_that("a declined box axis names the gate it fell at", {
 })
 
 test_that("a cell's decline tally is per axis, alongside the count", {
+  skip_on_cran_budget()
   # Four axes: one concave and answered in closed form, one whose closed form is
   # refused for conditioning and whose quadrature then returns nothing, one with
   # no extent at all, and one convex axis that is integrated rather than
@@ -303,6 +263,7 @@ test_that("a cell's decline tally is per axis, alongside the count", {
 })
 
 test_that("a refined cell records the box mass beside the cloud's own", {
+  skip_on_cran_budget()
   mu <- c(0.5, 0.5); s <- c(0.3, 0.3)
   lv <- list(a = c(-1, 0.5, 2), b = c(-1, 0.5, 2))
   gg <- as.matrix(expand.grid(lv, KEEP.OUT.ATTRS = FALSE))
@@ -326,27 +287,79 @@ test_that("a refined cell records the box mass beside the cloud's own", {
                tolerance = 1e-12)
 })
 
+skip_on_cran()
+
 # --------------------------------------------------------------------------- #
-# The measurement (gcol33/tulpa#322's harness, no fitting minutes)            #
+# The closed form                                                             #
 # --------------------------------------------------------------------------- #
 
-# The candidate weight vector: the box multiplier entering as a per-cell design
-# weight, exactly the way the harness takes one.
-.bxm_weights <- function(d) {
-  bm <- tulpa:::.joint_local_ccd_box_mass(d$joint_grid, d$log_marginal,
-                                          d$axis_names, d$axis_tags)
-  base <- if (is.null(d$dnode)) rep(1, nrow(d$joint_grid)) else d$dnode
-  list(bm = bm, w = outer_grid_weights(d, dnode = base * exp(bm$log_box_ratio)))
-}
+test_that("the concave axis factor is the box integral, to machine precision", {
+  skip_on_cran()
+  gr <- expand.grid(g = c(0, 0.25, 1, 2, 4.44, -3), a = c(0.05, 0.5, 1, 3, 20),
+                    h = c(0.25, 1, 2))
+  err_int <- numeric(nrow(gr))
+  err_sim <- numeric(nrow(gr))
+  route   <- character(nrow(gr))
+  for (i in seq_len(nrow(gr))) {
+    f <- tulpa:::.joint_local_ccd_axis_box(gr$g[i], gr$a[i], gr$h[i], gr$h[i])
+    route[i]   <- f$route
+    err_int[i] <- abs(f$log_factor - .bxm_integrate(gr$g[i], gr$a[i],
+                                                    gr$h[i], gr$h[i]))
+    err_sim[i] <- abs(f$log_factor - .bxm_simpson(gr$g[i], gr$a[i],
+                                                  gr$h[i], gr$h[i]))
+  }
+  # Every one of these takes the closed form: the whole point is that a concave
+  # axis needs no quadrature.
+  expect_identical(unique(route), "closed")
+  # Measured over the 90 combinations, on the log scale: 6.13e-14 against
+  # integrate() and 6.08e-14 against Simpson, the two arbiters agreeing with
+  # each other to the same figure. The tolerances are floating slack.
+  expect_lt(max(err_int), 1e-12)
+  expect_lt(max(err_sim), 1e-12)
 
-# Every axis's own u-space level spacing. The multiplier form is only a rule at
-# all because the common cell volume `Delta` cancels in the softmax, and that is
-# a property of the grid rather than of the rule.
-.bxm_spacings <- function(d) {
-  lapply(seq_len(ncol(d$joint_grid)), function(j)
-    diff(sort(unique(tulpa:::.joint_pareto_fwd(d$axis_tags[j],
-                                               d$joint_grid[, j])))))
-}
+  # An asymmetric box -- the cell's Voronoi half-widths need not match, and the
+  # factor divides by the axis's own extent so the product stays a multiplier on
+  # the cell's own volume.
+  expect_equal(tulpa:::.joint_local_ccd_axis_box(1.3, 0.7, 0.4, 1.1)$log_factor,
+               .bxm_integrate(1.3, 0.7, 0.4, 1.1), tolerance = 1e-12)
+
+  # A cell the log-marginal is flat across is its own midpoint atom exactly.
+  expect_equal(tulpa:::.joint_local_ccd_axis_box(0, 0, 1, 1)$log_factor, 0,
+               tolerance = 1e-14)
+})
+
+# --------------------------------------------------------------------------- #
+# The convex axis                                                             #
+# --------------------------------------------------------------------------- #
+
+test_that("a convex axis is integrated rather than declined", {
+  skip_on_cran()
+  gr <- expand.grid(g = c(0, 0.5, 2, -2), a = c(0, -0.05, -0.5, -2),
+                    h = c(0.5, 1, 2))
+  err <- numeric(nrow(gr))
+  route <- character(nrow(gr))
+  for (i in seq_len(nrow(gr))) {
+    f <- tulpa:::.joint_local_ccd_axis_box(gr$g[i], gr$a[i], gr$h[i], gr$h[i])
+    expect_false(is.null(f$log_factor))
+    expect_true(is.na(f$reason))
+    route[i] <- f$route
+    err[i] <- abs(f$log_factor - .bxm_simpson(gr$g[i], gr$a[i],
+                                              gr$h[i], gr$h[i]))
+  }
+  expect_identical(unique(route), "numeric")
+  # Measured: 1.3e-14 over the 48 combinations. A bounded interval and a smooth
+  # integrand is where quadrature is exact, which is what buys the convex axis a
+  # factor instead of a decline.
+  expect_lt(max(err), 1e-12)
+
+  # And a near-flat concave axis, where the closed form's own two pieces cancel:
+  # 0.5 g^2/a diverges while the pnorm difference vanishes at the matching rate.
+  # The reading is refused there and taken by quadrature, not returned wrong.
+  f <- tulpa:::.joint_local_ccd_axis_box(0, 1e-14, 1, 1)
+  expect_identical(f$route, "numeric")
+  expect_equal(f$log_factor, .bxm_simpson(0, 1e-14, 1, 1), tolerance = 1e-12)
+  expect_true(is.na(tulpa:::.joint_local_ccd_log_pnorm_diff(-5e-8, 5e-8)))
+})
 
 test_that("the base grid's cells have equal volume, so Delta cancels", {
   skip_on_cran()

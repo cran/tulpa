@@ -39,7 +39,21 @@ make_synthetic_gp_spec <- function(n_obs = 50, k = 5L, seed = 11L) {
   list(spec = spec, n_obs = n_obs, coords = coords_ord, ord = ord)
 }
 
+test_that("laplace_gp_at refuses an unvalidated spec with a clear error", {
+  raw_spec <- spatial_gp(coords = ~ x1 + x2)
+  expect_error(
+    laplace_gp_at(
+      y = rbinom(10, 1, 0.5), n_trials = rep(1L, 10),
+      X = matrix(1, 10, 1), spatial = raw_spec
+    ),
+    "neighbor_info is NULL"
+  )
+})
+
+skip_on_cran_budget()
+
 test_that("dispatch_laplace_spatial routes GP specs (no longer errors)", {
+  skip_on_cran_budget()
   ss <- make_synthetic_gp_spec()
   X  <- matrix(1.0, ss$n_obs, 1)
   y  <- rbinom(ss$n_obs, 1, 0.5)
@@ -62,39 +76,8 @@ test_that("dispatch_laplace_spatial routes GP specs (no longer errors)", {
   if (is.na(msg)) expect_true(is.list(res))
 })
 
-test_that("NNGP Laplace threads an additional iid RE block (issue #74)", {
-  skip_on_cran()
-  ss <- make_synthetic_gp_spec()
-  X  <- matrix(1.0, ss$n_obs, 1)
-  set.seed(7)
-  y  <- rbinom(ss$n_obs, 1, 0.5)
-  n_re <- 3L
-  re_idx <- sample.int(n_re, ss$n_obs, replace = TRUE)
-
-  fit <- dispatch_laplace_spatial(
-    y = y, n_trials = rep(1L, ss$n_obs), X = X,
-    re_idx = re_idx, n_re_groups = n_re, sigma_re = 1.0,
-    spatial = ss$spec, family = "binomial", phi = 1.0,
-    max_iter = 50L, tol = 1e-6, n_threads = 1L
-  )
-
-  # Latent layout [beta (p), re (n_re), w_gp (n_spatial)].
-  expect_length(fit$mode, ncol(X) + n_re + ss$spec$n_spatial)
-  expect_true(is.finite(fit$log_marginal))
-})
-
-test_that("laplace_gp_at refuses an unvalidated spec with a clear error", {
-  raw_spec <- spatial_gp(coords = ~ x1 + x2)
-  expect_error(
-    laplace_gp_at(
-      y = rbinom(10, 1, 0.5), n_trials = rep(1L, 10),
-      X = matrix(1, 10, 1), spatial = raw_spec
-    ),
-    "neighbor_info is NULL"
-  )
-})
-
 test_that("gp_cov_type maps cov + nu correctly", {
+  skip_on_cran_budget()
   expect_equal(gp_cov_type(list(cov = "exponential")), 0L)
   expect_equal(gp_cov_type(list(cov = "matern", nu = 1.5)), 1L)
   # 4, not 2: 2 is the Gaussian kernel in tulpa::CovType, and handing a
@@ -114,6 +97,29 @@ test_that("gp_cov_type maps cov + nu correctly", {
                "exponential.*matern")
   expect_error(gp_cov_type(list(cov = "spherical")),
                "exponential.*matern")
+})
+
+skip_on_cran()
+
+test_that("NNGP Laplace threads an additional iid RE block (issue #74)", {
+  skip_on_cran()
+  ss <- make_synthetic_gp_spec()
+  X  <- matrix(1.0, ss$n_obs, 1)
+  set.seed(7)
+  y  <- rbinom(ss$n_obs, 1, 0.5)
+  n_re <- 3L
+  re_idx <- sample.int(n_re, ss$n_obs, replace = TRUE)
+
+  fit <- dispatch_laplace_spatial(
+    y = y, n_trials = rep(1L, ss$n_obs), X = X,
+    re_idx = re_idx, n_re_groups = n_re, sigma_re = 1.0,
+    spatial = ss$spec, family = "binomial", phi = 1.0,
+    max_iter = 50L, tol = 1e-6, n_threads = 1L
+  )
+
+  # Latent layout [beta (p), re (n_re), w_gp (n_spatial)].
+  expect_length(fit$mode, ncol(X) + n_re + ss$spec$n_spatial)
+  expect_true(is.finite(fit$log_marginal))
 })
 
 test_that("tulpa_laplace(spatial = spatial_gp(...)) runs end-to-end", {

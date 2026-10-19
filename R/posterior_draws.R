@@ -64,11 +64,31 @@
 #'
 #' @seealso [tulpa_hyper_draws()], [tulpa_nested_laplace()],
 #'   [tulpa_nested_laplace_joint()], [posterior_sample()]
+#' @examples
+#' \donttest{
+#' set.seed(1)
+#' S <- 30L                                   # spatial units in a chain
+#' nb <- lapply(seq_len(S), function(s) setdiff(c(s - 1L, s + 1L), c(0L, S + 1L)))
+#' nn <- lengths(nb)
+#' field <- as.numeric(scale(cumsum(rnorm(S, 0, 0.4))))
+#' idx <- rep(seq_len(S), each = 6L); n <- length(idx); x <- rnorm(n)
+#' y <- rbinom(n, 1L, plogis(-0.2 + 0.6 * x + field[idx]))
+#' prior <- list(type = "icar", n_spatial_units = S, spatial_idx = idx,
+#'               adj_row_ptr = c(0L, cumsum(nn)), adj_col_idx = unlist(nb) - 1L,
+#'               n_neighbors = nn, tau_grid = c(0.5, 1, 2, 4, 8))
+#' fit <- tulpa_nested_laplace(y, rep(1L, n), cbind(1, x), prior = prior,
+#'                             family = "binomial",
+#'                             control = list(progress = FALSE))
+#' dr <- tulpa_posterior_draws(fit, n = 200)
+#' colMeans(dr)                # fixed effects, mixed over the outer grid
+#' summary(attr(dr, "theta"))  # the hyperparameter half of the same draws
+#' }
 #' @export
 tulpa_posterior_draws <- function(fit, idx = NULL, n = 1000, ...) {
     UseMethod("tulpa_posterior_draws")
 }
 
+#' @rdname tulpa_posterior_draws
 #' @export
 tulpa_posterior_draws.default <- function(fit, idx = NULL, n = 1000, ...) {
     stop("tulpa_posterior_draws() is implemented for nested-Laplace fits ",
@@ -76,6 +96,7 @@ tulpa_posterior_draws.default <- function(fit, idx = NULL, n = 1000, ...) {
          "Got: ", paste(class(fit), collapse = ", "), ".", call. = FALSE)
 }
 
+#' @rdname tulpa_posterior_draws
 #' @export
 tulpa_posterior_draws.tulpa_nested_laplace <- function(fit, idx = NULL,
                                                        n = 1000, ...) {
@@ -143,6 +164,12 @@ tulpa_posterior_draws.tulpa_nested_laplace <- function(fit, idx = NULL,
     # remain, and `retained_mass` below 1 is how a reader tells that apart from a
     # complete grid.
     attr(out, "retained_mass") <- mom$mass
+    # The mixture the rows were drawn from, so a summary of them can report its
+    # exact moments rather than their Monte-Carlo estimate
+    # (`.grid_mixture_moments()`).
+    attr(out, "grid_mixture") <- list(
+        weights = mom$w, modes = mu,
+        vars = mom$var[, idx, drop = FALSE])
     .nl_attach_hyper_draws(out, fit)
 }
 

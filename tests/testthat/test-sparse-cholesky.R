@@ -1,3 +1,5 @@
+
+skip_on_cran_budget()
 # test-sparse-cholesky.R
 # Validates CHOLMOD sparse solver path (Feature 1)
 # These tests use n_spatial > 200 to trigger the sparse Cholesky backend.
@@ -9,6 +11,7 @@
 # =====================================================================
 
 test_that("ICAR Laplace works with sparse Cholesky (300 sites)", {
+  skip_on_cran_budget()
   adj <- make_grid_adjacency(15, 20)  # 300 sites
   expect_equal(adj$n, 300L)
 
@@ -57,6 +60,7 @@ test_that("ICAR Laplace works with sparse Cholesky (300 sites)", {
 # =====================================================================
 
 test_that("BYM2 Laplace works with sparse Cholesky (225 sites)", {
+  skip_on_cran_budget()
   adj <- make_grid_adjacency(15, 15)  # 225 sites
   expect_equal(adj$n, 225L)
 
@@ -95,6 +99,82 @@ test_that("BYM2 Laplace works with sparse Cholesky (225 sites)", {
   # BYM2: 1 beta + 225 phi_scaled + 225 theta = 451
   expect_equal(length(result$mode), 1L + 2L * 225L)
 })
+
+
+# =====================================================================
+# Test: Poisson ICAR at large scale
+# =====================================================================
+
+test_that("Poisson ICAR works with sparse Cholesky (400 sites)", {
+  skip_on_cran_budget()
+  adj <- make_grid_adjacency(20, 20)  # 400 sites
+  set.seed(123)
+  n_sites <- 400L
+  n_obs <- n_sites * 5L
+
+  X <- matrix(1, nrow = n_obs, ncol = 1)
+  spatial_idx <- as.integer(rep(seq_len(n_sites), each = 5L))
+
+  # Simulate Poisson counts
+  eta <- 1.5 + rnorm(n_sites, 0, 0.3)[spatial_idx]
+  y <- as.integer(rpois(n_obs, lambda = exp(eta)))
+  n_trials <- rep(1L, n_obs)  # unused for Poisson but required by API
+
+  result <- cpp_laplace_fit_spatial(
+    y = y, n = n_trials, X = X,
+    re_idx = rep(0, n_obs), n_re_groups = 0L, sigma_re = 1.0,
+    spatial_idx = spatial_idx, n_spatial_units = n_sites,
+    adj_row_ptr = adj$adj_row_ptr, adj_col_idx = adj$adj_col_idx,
+    n_neighbors = adj$n_neighbors, tau_spatial = 5.0,
+    family = "poisson", phi = 1.0, max_iter = 100L, tol = 1e-6, n_threads = 1L
+  )
+
+  expect_true(result$converged)
+  expect_true(is.finite(result$log_det_Q))
+  expect_true(is.finite(result$log_marginal))
+  expect_equal(length(result$mode), 1L + 400L)
+})
+
+
+# =====================================================================
+# Test: byte-level dense == sparse on IDENTICAL data (single-response path)
+# =====================================================================
+# The dense and sparse factorizations solve the same Newton system, so on the
+# same problem they must agree to Cholesky quantization. The size threshold
+# picks one path per size, so the two must be forced to run on one data set:
+# force_sparse = -1 forces dense, +1 forces sparse. This is the single-response
+# analogue of the joint path's force_sparse equivalence gate
+# (test-nested-laplace-joint-sparse-equivalence.R); it is the check the #57
+# column-major footgun history most wants on this path.
+
+test_that("ICAR single-response: dense and sparse agree byte-level on identical data", {
+  skip_on_cran_budget()
+  adj <- make_grid_adjacency(15, 15)  # 225 sites -> n_x = 226 (auto-sparse)
+  dat <- simulate_spatial_data(
+    n_sites = 225, n_obs_per_site = 4,
+    beta0 = -0.3, tau_spatial = 2.5, adj = adj
+  )
+
+  fit_one <- function(fs) cpp_laplace_fit_spatial(
+    y = dat$y, n = dat$n_trials, X = dat$X,
+    re_idx = rep(0, length(dat$y)), n_re_groups = 0L, sigma_re = 1.0,
+    spatial_idx = dat$spatial_idx, n_spatial_units = 225L,
+    adj_row_ptr = adj$adj_row_ptr, adj_col_idx = adj$adj_col_idx,
+    n_neighbors = adj$n_neighbors, tau_spatial = 2.5,
+    family = "binomial", phi = 1.0, max_iter = 100L, tol = 1e-8,
+    n_threads = 1L, force_sparse = fs
+  )
+  dense  <- fit_one(-1L)
+  sparse <- fit_one(1L)
+
+  expect_true(dense$converged)
+  expect_true(sparse$converged)
+  expect_equal(sparse$log_marginal, dense$log_marginal, tolerance = 1e-8)
+  expect_equal(sparse$log_det_Q,    dense$log_det_Q,    tolerance = 1e-8)
+  expect_equal(sparse$mode,         dense$mode,         tolerance = 1e-7)
+})
+
+skip_on_cran()
 
 
 # =====================================================================
@@ -156,78 +236,6 @@ test_that("sparse and dense paths produce consistent ICAR results", {
   # Intercept estimates should be in the right ballpark
   expect_true(abs(res_small$mode[1] - (-1.0)) < 1.5)
   expect_true(abs(res_large$mode[1] - (-1.0)) < 1.5)
-})
-
-
-# =====================================================================
-# Test: Poisson ICAR at large scale
-# =====================================================================
-
-test_that("Poisson ICAR works with sparse Cholesky (400 sites)", {
-  adj <- make_grid_adjacency(20, 20)  # 400 sites
-  set.seed(123)
-  n_sites <- 400L
-  n_obs <- n_sites * 5L
-
-  X <- matrix(1, nrow = n_obs, ncol = 1)
-  spatial_idx <- as.integer(rep(seq_len(n_sites), each = 5L))
-
-  # Simulate Poisson counts
-  eta <- 1.5 + rnorm(n_sites, 0, 0.3)[spatial_idx]
-  y <- as.integer(rpois(n_obs, lambda = exp(eta)))
-  n_trials <- rep(1L, n_obs)  # unused for Poisson but required by API
-
-  result <- cpp_laplace_fit_spatial(
-    y = y, n = n_trials, X = X,
-    re_idx = rep(0, n_obs), n_re_groups = 0L, sigma_re = 1.0,
-    spatial_idx = spatial_idx, n_spatial_units = n_sites,
-    adj_row_ptr = adj$adj_row_ptr, adj_col_idx = adj$adj_col_idx,
-    n_neighbors = adj$n_neighbors, tau_spatial = 5.0,
-    family = "poisson", phi = 1.0, max_iter = 100L, tol = 1e-6, n_threads = 1L
-  )
-
-  expect_true(result$converged)
-  expect_true(is.finite(result$log_det_Q))
-  expect_true(is.finite(result$log_marginal))
-  expect_equal(length(result$mode), 1L + 400L)
-})
-
-
-# =====================================================================
-# Test: byte-level dense == sparse on IDENTICAL data (single-response path)
-# =====================================================================
-# The dense and sparse factorizations solve the same Newton system, so on the
-# same problem they must agree to Cholesky quantization. The size threshold
-# picks one path per size, so the two must be forced to run on one data set:
-# force_sparse = -1 forces dense, +1 forces sparse. This is the single-response
-# analogue of the joint path's force_sparse equivalence gate
-# (test-nested-laplace-joint-sparse-equivalence.R); it is the check the #57
-# column-major footgun history most wants on this path.
-
-test_that("ICAR single-response: dense and sparse agree byte-level on identical data", {
-  adj <- make_grid_adjacency(15, 15)  # 225 sites -> n_x = 226 (auto-sparse)
-  dat <- simulate_spatial_data(
-    n_sites = 225, n_obs_per_site = 4,
-    beta0 = -0.3, tau_spatial = 2.5, adj = adj
-  )
-
-  fit_one <- function(fs) cpp_laplace_fit_spatial(
-    y = dat$y, n = dat$n_trials, X = dat$X,
-    re_idx = rep(0, length(dat$y)), n_re_groups = 0L, sigma_re = 1.0,
-    spatial_idx = dat$spatial_idx, n_spatial_units = 225L,
-    adj_row_ptr = adj$adj_row_ptr, adj_col_idx = adj$adj_col_idx,
-    n_neighbors = adj$n_neighbors, tau_spatial = 2.5,
-    family = "binomial", phi = 1.0, max_iter = 100L, tol = 1e-8,
-    n_threads = 1L, force_sparse = fs
-  )
-  dense  <- fit_one(-1L)
-  sparse <- fit_one(1L)
-
-  expect_true(dense$converged)
-  expect_true(sparse$converged)
-  expect_equal(sparse$log_marginal, dense$log_marginal, tolerance = 1e-8)
-  expect_equal(sparse$log_det_Q,    dense$log_det_Q,    tolerance = 1e-8)
-  expect_equal(sparse$mode,         dense$mode,         tolerance = 1e-7)
 })
 
 test_that("BYM2 single-response: dense and sparse agree byte-level on identical data", {

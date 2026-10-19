@@ -2,6 +2,8 @@
 # a 1D chain, so it integrates through the nested-Laplace areal (ICAR) path. These
 # tests guard the front-door wiring and the fixed-effect recovery.
 
+skip_on_cran()
+
 make_temporal_data <- function(seed, Tt = 24L, m = 25L, b1 = 0.9) {
   set.seed(seed)
   time <- rep(seq_len(Tt), each = m)
@@ -10,12 +12,27 @@ make_temporal_data <- function(seed, Tt = 24L, m = 25L, b1 = 0.9) {
   list(df = data.frame(x = x, time = time), time = time, ftrue = ftrue, b1 = b1)
 }
 
-test_that("temporal_rw1 routes through tulpa() and recovers the fixed slope", {
-  skip_on_cran()
+# No block in this file reads the outer Pareto-k diagnostic. It runs after the
+# grid integration with the RNG state restored, so turning it off leaves the
+# fit's coefficients, intervals and evidence unchanged and drops its
+# importance-sample inner solves.
+.tfd_ctl <- list(diagnose_k = FALSE)
+
+# One binomial RW1 fit through the auto door. Routing, fixed-slope recovery, the
+# marginalized SE / interval / prediction and the integrated logLik are separate
+# properties of the same fit, so the blocks below read them off this one.
+.tfd_rw1_binomial <- fixture_once(function() {
   d <- make_temporal_data(11)
   d$df$y <- rbinom(nrow(d$df), 1, plogis(-0.2 + d$b1 * d$df$x + d$ftrue[d$time]))
-  fit <- tulpa(y ~ x, data = d$df, family = "binomial",
-               temporal = temporal_rw1("time"), mode = "auto")
+  list(d = d, fit = tulpa(y ~ x, data = d$df, family = "binomial",
+                          temporal = temporal_rw1("time"), mode = "auto",
+                          control = .tfd_ctl))
+})
+
+test_that("temporal_rw1 routes through tulpa() and recovers the fixed slope", {
+  skip_on_cran()
+  fx <- .tfd_rw1_binomial()
+  d <- fx$d; fit <- fx$fit
 
   expect_s3_class(fit, "tulpa_fit")
   expect_equal(fit$backend, "nested_laplace")
@@ -31,18 +48,17 @@ test_that("temporal_rw1 works for a gaussian response", {
   d <- make_temporal_data(12)
   d$df$y <- -0.2 + d$b1 * d$df$x + d$ftrue[d$time] + rnorm(nrow(d$df), 0, 0.7)
   fit <- tulpa(y ~ x, data = d$df, family = "gaussian",
-               temporal = temporal_rw1("time"), mode = "auto", phi = 0.7)
+               temporal = temporal_rw1("time"), mode = "auto", phi = 0.7,
+               control = .tfd_ctl)
   expect_lt(abs(coef(fit)[["x"]] - d$b1), 0.15)
 })
 
 test_that("nested temporal fit reports a marginalized fixed-effect SE", {
   skip_on_cran()
-  d <- make_temporal_data(14)
-  d$df$y <- rbinom(nrow(d$df), 1, plogis(-0.2 + d$b1 * d$df$x + d$ftrue[d$time]))
-  fit <- tulpa(y ~ x, data = d$df, family = "binomial",
-               temporal = temporal_rw1("time"), mode = "auto")
+  fx <- .tfd_rw1_binomial()
+  d <- fx$d; fit <- fx$fit
 
-  sm <- summary(fit)
+  sm <- coef(summary(fit))
   expect_true(is.finite(sm["x", "std.error"]))   # slope SE from grid marginalization
   ci <- confint(fit)["x", ]
   expect_lt(ci[1], d$b1)
@@ -60,7 +76,8 @@ test_that("nested-fit slope CI covers the truth at roughly nominal rate", {
     d <- make_temporal_data(200 + i)
     d$df$y <- rbinom(nrow(d$df), 1, plogis(-0.2 + d$b1 * d$df$x + d$ftrue[d$time]))
     fit <- tulpa(y ~ x, data = d$df, family = "binomial",
-                 temporal = temporal_rw1("time"), mode = "auto")
+                 temporal = temporal_rw1("time"), mode = "auto",
+                 control = .tfd_ctl)
     ci <- confint(fit)["x", ]
     if (ci[1] <= d$b1 && d$b1 <= ci[2]) hits <- hits + 1L
   }
@@ -69,10 +86,7 @@ test_that("nested-fit slope CI covers the truth at roughly nominal rate", {
 
 test_that("logLik and compare_models return one scalar row per nested fit", {
   skip_on_cran()
-  d <- make_temporal_data(15)
-  d$df$y <- rbinom(nrow(d$df), 1, plogis(-0.2 + d$b1 * d$df$x + d$ftrue[d$time]))
-  f_t <- tulpa(y ~ x, data = d$df, family = "binomial",
-               temporal = temporal_rw1("time"), mode = "auto")
+  f_t <- .tfd_rw1_binomial()$fit
 
   expect_length(as.numeric(logLik(f_t)), 1L)   # integrated, not per-grid
   expect_true(is.finite(as.numeric(logLik(f_t))))
@@ -89,7 +103,8 @@ test_that("temporal_rw2 routes through tulpa() and recovers the fixed slope", {
   d <- make_temporal_data(21)
   d$df$y <- rbinom(nrow(d$df), 1, plogis(-0.2 + d$b1 * d$df$x + d$ftrue[d$time]))
   fit <- tulpa(y ~ x, data = d$df, family = "binomial",
-               temporal = temporal_rw2("time"), mode = "auto")
+               temporal = temporal_rw2("time"), mode = "auto",
+               control = .tfd_ctl)
   expect_equal(fit$backend, "nested_laplace")
   expect_match(fit$selection_reason, "rw2")
   expect_lt(abs(coef(fit)[["x"]] - d$b1), 0.15)
@@ -100,7 +115,8 @@ test_that("temporal_ar1 routes through tulpa() and recovers the fixed slope", {
   d <- make_temporal_data(31)
   d$df$y <- rbinom(nrow(d$df), 1, plogis(-0.2 + d$b1 * d$df$x + d$ftrue[d$time]))
   fit <- tulpa(y ~ x, data = d$df, family = "binomial",
-               temporal = temporal_ar1("time"), mode = "auto")
+               temporal = temporal_ar1("time"), mode = "auto",
+               control = .tfd_ctl)
   expect_equal(fit$backend, "nested_laplace")
   expect_match(fit$selection_reason, "ar1")
   expect_lt(abs(coef(fit)[["x"]] - d$b1), 0.15)
@@ -151,7 +167,8 @@ test_that("grouped (panel) temporal routes through tulpa()", {
                    plogis(-0.1 + 0.8 * grid$x +
                           shapes[cbind(grid$time, as.integer(grid$grp))]))
   fit <- tulpa(y ~ x, data = grid, family = "binomial",
-               temporal = temporal_rw1("time", group_var = "grp"), mode = "auto")
+               temporal = temporal_rw1("time", group_var = "grp"), mode = "auto",
+               control = .tfd_ctl)
   expect_s3_class(fit, "tulpa_fit")
   expect_equal(fit$backend, "nested_laplace")
   expect_lt(abs(coef(fit)[["x"]] - 0.8), 0.2)
@@ -172,7 +189,8 @@ test_that("panel-fit slope CI covers the truth at roughly nominal rate", {
                      plogis(-0.1 + b1 * grid$x +
                             shapes[cbind(grid$time, as.integer(grid$grp))]))
     fit <- tulpa(y ~ x, data = grid, family = "binomial",
-                 temporal = temporal_rw1("time", group_var = "grp"), mode = "auto")
+                 temporal = temporal_rw1("time", group_var = "grp"), mode = "auto",
+                 control = .tfd_ctl)
     ci <- confint(fit)["x", ]
     if (ci[1] <= b1 && b1 <= ci[2]) hits <- hits + 1L
   }
@@ -191,16 +209,18 @@ test_that("grouped temporal with one group is identical to the ungrouped fit", {
   df$x <- rnorm(nrow(df))
   df$y <- rbinom(nrow(df), 1, plogis(-0.2 + 0.9 * df$x + ftrue[df$time]))
   f_plain   <- tulpa(y ~ x, data = df, family = "binomial",
-                     temporal = temporal_rw1("time"), mode = "auto")
+                     temporal = temporal_rw1("time"), mode = "auto",
+                     control = .tfd_ctl)
   f_grouped <- tulpa(y ~ x, data = df, family = "binomial",
                      temporal = temporal_rw1("time", group_var = "grp"),
-                     mode = "auto")
+                     mode = "auto", control = .tfd_ctl)
   expect_equal(as.numeric(logLik(f_grouped)), as.numeric(logLik(f_plain)),
                tolerance = 1e-10)
   expect_equal(unname(coef(f_grouped)), unname(coef(f_plain)), tolerance = 1e-8)
 })
 
 test_that("unsupported temporal configurations error clearly", {
+  skip_on_cran()
   d <- make_temporal_data(13)
   d$df$y <- rbinom(nrow(d$df), 1, 0.5)
 
@@ -216,13 +236,73 @@ test_that("unsupported temporal configurations error clearly", {
           temporal = temporal_rw1("time", group_var = "region")),
     "panel"
   )
-  # A continuous spatial field cannot host a temporal block through the front
-  # door yet (only areal space-time is wired).
+  # A multiscale field has no nested-Laplace kernel, so it cannot host a
+  # temporal block through the front door.
   d$df$lon <- rnorm(nrow(d$df)); d$df$lat <- rnorm(nrow(d$df))
   expect_error(
     tulpa(y ~ x, data = d$df, family = "binomial",
-          spatial = spatial_gp(~ lon + lat),
+          spatial = spatial_multiscale(~ lon + lat),
           temporal = temporal_rw1("time")),
     "areal"
   )
+})
+
+test_that("a continuous field shares the nested stack with a temporal field, a smoother and a latent block", {
+  skip_on_cran()
+  set.seed(8)
+  n <- 120L
+  d <- data.frame(lon = runif(n), lat = runif(n), time = rep(1:12, 10),
+                  x = rnorm(n), z = runif(n))
+  d$count <- rpois(n, exp(0.2 + 0.4 * d$x + 0.3 * sin(d$time / 2) +
+                            0.4 * sin(3 * d$lon)))
+  ctl <- list(axis_refine = "none")
+  fit_t <- suppressWarnings(tulpa(
+    count ~ x, data = d, family = "poisson", mode = "nested_laplace",
+    spatial = spatial_gp(~ lon + lat, nn = 6), temporal = temporal_rw1("time"),
+    control = ctl))
+  # The same two blocks handed to the registry door directly.
+  sp <- tulpa:::validate_gp(spatial_gp(~ lon + lat, nn = 6), d)
+  tm <- tulpa:::validate_temporal(temporal_rw1("time"), d)
+  direct <- suppressWarnings(tulpa_nested_laplace(
+    y = d$count, n_trials = rep(1L, n), X = stats::model.matrix(~ x, d),
+    family = "poisson",
+    prior = list(tulpa:::.spatial_spec_to_nl_prior(sp),
+                 tulpa:::.temporal_spec_to_nl_prior(tm)),
+    control = ctl))
+  expect_equal(fit_t$backend, "nested_laplace")
+  expect_equal(fit_t$log_marginal, direct$log_marginal, tolerance = 1e-8)
+  expect_equal(unname(coef(fit_t)), unname(coef(direct)), tolerance = 1e-8)
+
+  fit_s <- suppressWarnings(tulpa(
+    count ~ x + s(z), data = d, family = "poisson", mode = "nested_laplace",
+    spatial = spatial_gp(~ lon + lat, nn = 6), control = ctl))
+  expect_equal(fit_s$backend, "nested_laplace")
+  expect_true(all(is.finite(coef(fit_s))))
+
+  blk <- tgmrf(
+    Q = function(theta) Matrix::Diagonal(n, exp(-2 * theta[1])),
+    prior = function(theta) 0, init = c(log_sigma = 0),
+    bounds = list(lower = log(0.2), upper = log(2)), name = "iid")
+  fit_l <- suppressWarnings(tulpa(
+    count ~ x + latent(blk), data = d, family = "poisson",
+    mode = "nested_laplace", spatial = spatial_gp(~ lon + lat, nn = 6),
+    control = ctl))
+  expect_equal(fit_l$backend, "nested_laplace")
+  expect_true(all(is.finite(coef(fit_l))))
+
+  # An HSGP field takes the same stack as a DENSE_BASIS block.
+  fit_h <- suppressWarnings(tulpa(
+    count ~ x, data = d, family = "poisson", mode = "nested_laplace",
+    spatial = spatial_gp(~ lon + lat, approx = "hsgp"),
+    temporal = temporal_rw1("time"), control = ctl))
+  sh <- tulpa:::validate_hsgp(spatial_gp(~ lon + lat, approx = "hsgp"), d)
+  direct_h <- suppressWarnings(tulpa_nested_laplace(
+    y = d$count, n_trials = rep(1L, n), X = stats::model.matrix(~ x, d),
+    family = "poisson",
+    prior = list(tulpa:::.spatial_spec_to_nl_prior(sh),
+                 tulpa:::.temporal_spec_to_nl_prior(tm)),
+    control = ctl))
+  expect_equal(fit_h$backend, "nested_laplace")
+  expect_equal(fit_h$log_marginal, direct_h$log_marginal, tolerance = 1e-8)
+  expect_equal(unname(coef(fit_h)), unname(coef(direct_h)), tolerance = 1e-8)
 })

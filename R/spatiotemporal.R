@@ -104,6 +104,13 @@ NULL
 #'
 #' @seealso [spatial_car()], [spatial_gp()], [temporal_rw1()], [temporal_ar1()]
 #'
+#' @examples
+#' adj <- matrix(0, 4, 4)
+#' for (i in 1:3) adj[i, i + 1] <- adj[i + 1, i] <- 1
+#' # No backend fits an interaction term, so the constructor refuses; the
+#' # additive model is tulpa(spatial = , temporal = ).
+#' try(spatiotemporal(spatial_car(adj, group_var = "region"),
+#'                    temporal_rw1("year"), type = "IV"))
 #' @export
 spatiotemporal <- function(spatial,
                            temporal,
@@ -131,25 +138,42 @@ spatiotemporal <- function(spatial,
 #' Extract posterior distributions of spatiotemporal interaction effects
 #' from a fitted tulpa model.
 #'
-#' @param object A `tulpa_fit` object carrying a `$spatiotemporal` Knorr-Held
-#'   interaction block. `tulpa()` itself has no `spatiotemporal =` argument;
-#'   such a block comes from a model package's own fitter (see
-#'   [spatiotemporal()] for what the engine itself fits).
+#' @param object A fit carrying a `$spatiotemporal` Knorr-Held interaction
+#'   block (`n_spatial`, `n_times`) and its draws in
+#'   `$.internal$spatiotemporal_draws`. `tulpa()` itself has no
+#'   `spatiotemporal =` argument; such a block comes from a model package's
+#'   own fitter (see [spatiotemporal()] for what the engine itself fits), and
+#'   the default method reads any fit, of any class, that stores it this way.
 #' @param format Output format: `"array"` (default, S x T x draws), `"long"`
 #'   (data frame with s, t, draw, value columns), or `"summary"` (posterior summaries).
 #' @param probs Quantiles to compute if `format = "summary"`.
 #' @param ... Ignored
 #'
-#' @return Spatiotemporal effects in requested format
+#' @return For `format = "array"`, an S x T x draws numeric array carrying
+#'   `n_spatial`, `n_times` and `n_draws` attributes; for `"long"`, a data
+#'   frame with columns `s`, `t`, `draw` and `value`; for `"summary"`, a
+#'   `tulpa_st_summary` data frame with columns `s`, `t`, `mean`, one column
+#'   per entry of `probs` and `sd`, which has `print()` and `plot()` methods.
 #'
 #' @examples
-#' \dontrun{
-#' # `fit` carries a Knorr-Held interaction block, which no tulpa backend
-#' # fits: the spec comes from a model package that configures the
-#' # interaction itself (see spatiotemporal() for what the engine does fit).
+#' # A Knorr-Held interaction block is attached by a model package's own
+#' # fitter (see spatiotemporal() for what the engine fits). The accessor reads
+#' # its layout and an n_draws x (S * T) draw matrix stored s-fastest: column
+#' # (t - 1) * S + s holds region s at time t. Here both are simulated for
+#' # S = 3 regions over T = 4 times.
+#' set.seed(1)
+#' S <- 3L; n_t <- 4L
+#' st_mean <- outer(c(-0.5, 0, 0.5), seq(-0.3, 0.3, length.out = n_t))
+#' draws <- matrix(rnorm(100 * S * n_t, mean = rep(c(st_mean), each = 100),
+#'                       sd = 0.1), nrow = 100)
+#' fit <- structure(
+#'   list(spatiotemporal = list(n_spatial = S, n_times = n_t),
+#'        .internal = list(spatiotemporal_draws = draws)),
+#'   class = "tulpa_fit")
+#'
 #' st_effects <- spatiotemporal_effects(fit, format = "summary")
 #' head(st_effects)
-#' }
+#' dim(spatiotemporal_effects(fit, format = "array"))
 #'
 #' @export
 spatiotemporal_effects <- function(object,
@@ -162,15 +186,15 @@ spatiotemporal_effects <- function(object,
 
 #' @rdname spatiotemporal_effects
 #' @export
-spatiotemporal_effects.tulpa_fit <- function(object,
-                                              format = c("array", "long", "summary"),
-                                              probs = c(0.025, 0.5, 0.975),
-                                              ...) {
+spatiotemporal_effects.default <- function(object,
+                                           format = c("array", "long", "summary"),
+                                           probs = c(0.025, 0.5, 0.975),
+                                           ...) {
 
   format <- match.arg(format)
 
   # Check if model has spatiotemporal effects
-  if (is.null(object$spatiotemporal)) {
+  if (!is.list(object) || is.null(object$spatiotemporal)) {
     stop("Model carries no $spatiotemporal Knorr-Held interaction block. ",
          "tulpa() has no `spatiotemporal =` argument (see ?spatiotemporal); ",
          "such a block is attached by a model package's own interaction ",
@@ -200,7 +224,6 @@ spatiotemporal_effects.tulpa_fit <- function(object,
     attr(result, "n_spatial") <- S
     attr(result, "n_times") <- n_t
     attr(result, "n_draws") <- n_draws
-    class(result) <- c("tulpa_st_array", "array")
     return(result)
 
   } else if (format == "long") {
@@ -214,8 +237,6 @@ spatiotemporal_effects.tulpa_fit <- function(object,
     )
     result$value <- as.vector(st_draws)
     result <- result[, c("s", "t", "draw", "value")]
-
-    class(result) <- c("tulpa_st_long", "data.frame")
     return(result)
 
   } else {
@@ -249,6 +270,15 @@ spatiotemporal_effects.tulpa_fit <- function(object,
     class(result) <- c("tulpa_st_summary", "data.frame")
     return(result)
   }
+}
+
+#' @rdname spatiotemporal_effects
+#' @param x A `tulpa_st_summary` table.
+#' @export
+print.tulpa_st_summary <- function(x, ...) {
+  .print_effect_table(x, sprintf(
+    "Spatiotemporal interaction posterior summary: %d locations x %d times",
+    attr(x, "n_spatial"), attr(x, "n_times")), ...)
 }
 
 
@@ -426,6 +456,9 @@ plot.tulpa_st_summary <- function(x, type = "heatmap", ...) {
 #' stationary covariance functions. Journal of the American Statistical
 #' Association, 94(448), 1330-1340.
 #'
+#' @examples
+#' # No backend fits a joint space-time covariance, so the constructor refuses:
+#' try(spatiotemporal_gp(~ lon + lat, "year", nonsep_type = "gneiting"))
 #' @export
 spatiotemporal_gp <- function(coords,
                               time_var,

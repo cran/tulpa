@@ -2,6 +2,7 @@
 % Please edit documentation in R/hyper_axis_spec.R
 \name{hyper_axis_spec}
 \alias{hyper_axis_spec}
+\alias{print.tulpa_hyper_axis_spec}
 \title{Describe one outer-grid hyperparameter axis}
 \usage{
 hyper_axis_spec(
@@ -16,6 +17,8 @@ hyper_axis_spec(
   log_prior_coord = c("integration", "natural"),
   extend = TRUE
 )
+
+\method{print}{tulpa_hyper_axis_spec}(x, ...)
 }
 \arguments{
 \item{name}{Character. Axis label, used as the column name of the grid
@@ -87,6 +90,10 @@ engine placed wants. \code{FALSE} confines every new node to the interior of the
 declared span: the axis is integrated more finely over exactly the range
 given, and a mode outside it shows up as mass at the edge instead of moving
 the range. Inert when \code{refinable = FALSE}.}
+
+\item{x}{A \code{tulpa_hyper_axis_spec}.}
+
+\item{...}{Ignored.}
 }
 \value{
 An object of class \code{tulpa_hyper_axis_spec} (a validated list with
@@ -96,6 +103,13 @@ the fields listed above).
 Builds a single axis spec for \code{\link[=tulpa_hyper_grid]{tulpa_hyper_grid()}}. Carries the candidate
 values, the optional log-prior, and the metadata (log-scale, bounds,
 refinable flag) that the generic refinement / consistency passes need.
+}
+\examples{
+hyper_axis_spec("sigma", grid = c(0.5, 1, 2), log_scale = TRUE,
+                bounds = c(0, Inf))
+# A zero level on a log-scale axis is a point mass with a declared share:
+hyper_axis_spec("alpha", grid = c(0, 0.5, 1), log_scale = TRUE,
+                bounds = c(0, Inf), atom_mass = 0.5)
 }
 \seealso{
 \code{\link[=tulpa_hyper_grid]{tulpa_hyper_grid()}}.

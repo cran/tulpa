@@ -39,7 +39,10 @@ test_that("every temporal constructor warns on shared = FALSE", {
   }
 })
 
+skip_on_cran_budget()
+
 test_that("every spatial constructor warns on shared = FALSE", {
+  skip_on_cran_budget()
   W <- chain_W(5)
   expect_warning(car(W, shared = FALSE), "Non-shared spatial effects")
   expect_warning(bym2(W, shared = FALSE), "Non-shared spatial effects")
@@ -48,6 +51,7 @@ test_that("every spatial constructor warns on shared = FALSE", {
 })
 
 test_that("every temporal constructor coerces formula and string alike", {
+  skip_on_cran_budget()
   for (f in list(temporal_rw1, temporal_rw2, temporal_ar1)) {
     expect_identical(f(~ year)$time_var, "year")
     expect_identical(f("year")$time_var, "year")
@@ -58,6 +62,7 @@ test_that("every temporal constructor coerces formula and string alike", {
 })
 
 test_that("the spatial constructors reject the same bad graphs", {
+  skip_on_cran_budget()
   ctors <- list(car = car, bym2 = bym2, fld = fld)
   not_square <- matrix(0, 3, 4)
   asym <- chain_W(4); asym[1, 2] <- 0   # break symmetry on one side
@@ -70,6 +75,7 @@ test_that("the spatial constructors reject the same bad graphs", {
 })
 
 test_that("the spatial constructors surface the same structural issues as check_adjacency", {
+  skip_on_cran_budget()
   # These were accepted silently: only check_adjacency() reported them, so a
   # raw matrix handed straight to a constructor built an improper field with
   # no warning.
@@ -80,13 +86,13 @@ test_that("the spatial constructors surface the same structural issues as check_
   weighted <- chain_W(5); weighted[1, 2] <- 2.5; weighted[2, 1] <- 2.5
 
   for (nm in names(ctors)) {
-    expect_warning(ctors[[nm]](isolated), "isolated node", info = nm)
     expect_warning(ctors[[nm]](selfloop), "self-loops", info = nm)
     expect_warning(ctors[[nm]](weighted), "other than 0/1", info = nm)
   }
 })
 
 test_that("a validated tulpa_adjacency passes the constructors without re-warning", {
+  skip_on_cran_budget()
   # .validate_adjacency_arg() short-circuits on a tulpa_adjacency, so an object
   # adjacency() already vetted must not be re-checked or re-warned about.
   adj <- chain_adjacency(5)
@@ -98,6 +104,7 @@ test_that("a validated tulpa_adjacency passes the constructors without re-warnin
 })
 
 test_that("a float-rounded symmetric graph is accepted, matching check_adjacency", {
+  skip_on_cran_budget()
   # The inline checks demanded exact symmetry via isSymmetric(), so a graph
   # check_adjacency() accepts was rejected by the constructors. 1e-14 is inside
   # the 1e-8 tolerance the validator uses, so the graph must be accepted rather
@@ -108,4 +115,34 @@ test_that("a float-rounded symmetric graph is accepted, matching check_adjacency
   W[1, 2] <- W[1, 2] + 1e-14
   expect_warning(car(W), "other than 0/1")
   expect_warning(fld(W), "other than 0/1")
+})
+
+skip_on_cran()
+
+test_that("an isolated node is reported with what the field does with it (#962)", {
+  skip_on_cran()
+  isolated <- chain_W(5); isolated[4, 5] <- 0; isolated[5, 4] <- 0
+  # ICAR and BYM2 give the island a proper prior, so they say which one; the
+  # old text called every field improper there.
+  expect_message(car(isolated), "isolated node.*ICAR field.*N\\(0, 1 / tau\\)")
+  expect_message(fld(isolated), "isolated node.*ICAR field")
+  expect_message(bym2(isolated), "isolated node.*BYM2 field.*unit variance")
+  for (f in list(car, fld, bym2)) {
+    expect_no_warning(suppressMessages(f(isolated)))
+    expect_no_message(f(isolated), message = "improper")
+  }
+  # A proper CAR field leaves the island without a prior, which does warrant
+  # a warning.
+  expect_warning(car(isolated, proper = TRUE),
+                 "isolated node.*proper CAR field puts no prior")
+  expect_warning(spatial(isolated, ~ 1 || g, proper = TRUE),
+                 "isolated node.*proper CAR field puts no prior")
+  # check_adjacency() is field-agnostic, so it states every field's handling.
+  expect_warning(check_adjacency(isolated),
+                 "ICAR field.*BYM2 field.*proper CAR field")
+  # A spec reaching the front door as a bare list is reported once, for its
+  # own field.
+  sp <- suppressMessages(car(isolated))
+  expect_silent(tulpa:::.validate_adjacency_arg(sp$adjacency, "x",
+                                                field = "icar"))
 })

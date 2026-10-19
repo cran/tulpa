@@ -50,6 +50,7 @@ inline std::string ckpt_serialize(const LaplaceResult& r) {
     ckpt_put<std::uint8_t>(buf, r.pd_conditioned ? 1u : 0u);
     ckpt_put<std::uint8_t>(buf, r.start_infeasible ? 1u : 0u);
     ckpt_put<std::uint8_t>(buf, r.s2z_log_det_fallback ? 1u : 0u);
+    ckpt_put<std::uint8_t>(buf, r.s2z_field_indefinite ? 1u : 0u);
     ckpt_put_span(buf, r.mode);
     ckpt_put<std::int32_t>(buf, r.Q_csc_n);
     ckpt_put_span(buf, r.Q_csc_p);
@@ -102,6 +103,7 @@ inline bool ckpt_deserialize(CkptReader& rd, LaplaceResult& r) {
     r.pd_conditioned     = (rd.get<std::uint8_t>() != 0);
     r.start_infeasible   = (rd.get<std::uint8_t>() != 0);
     r.s2z_log_det_fallback = (rd.get<std::uint8_t>() != 0);
+    r.s2z_field_indefinite = (rd.get<std::uint8_t>() != 0);
     r.mode               = rd.get_span<double>();
     r.Q_csc_n            = rd.get<std::int32_t>();
     r.Q_csc_p            = rd.get_span<int>();
@@ -242,7 +244,7 @@ private:
 // fingerprint of everything NOT visible here -- the kernel tag plus its latent
 // structure (adjacency, coords / neighbour graph, temporal layout) -- folded by
 // the caller; this helper then folds the shared observation inputs (y, X,
-// re_idx, ...) and the grid axes on top. Keys are the per-cell coordinate over
+// re_idx, ...) and the grid's axis count on top. Keys are the per-cell coordinate over
 // `grid_axes` (each a
 // length-n_grid column; multi-axis grids are pre-expanded to n_grid R-side).
 // Returns nullptr when `path` is empty, so a caller wires it unconditionally.
@@ -282,16 +284,27 @@ inline std::unique_ptr<GridCheckpoint> make_nl_grid_checkpoint(
     fp.fold_rvec(re_idx);
     fp.fold_rvec_nullable(offset);
     fp.fold_rvec_nullable(weights);
+    // The grid's axis VALUES are not folded: a cell's key is its own exact
+    // coordinate, so a cell solved on one grid is the same solve wherever else
+    // that coordinate appears, and only fully solved cells are recorded (a
+    // screened one never is). Folding them gave every grid of one fit its own
+    // fingerprint, so the placement pass's recentred refit -- the second kernel
+    // call on the same path -- refused the file its first call had just written,
+    // and a front-door fit whose default axis recentred could not checkpoint at
+    // all. The axis COUNT still separates layouts (a key's length is one double
+    // per non-empty axis), as the multi-block entry's `axis_offsets` does.
     int n_grid = grid_axes.empty() ? 0 : static_cast<int>(grid_axes[0].size());
     CellKeyBuilder kb(n_grid);
+    int n_axes = 0;
     for (const auto& ax : grid_axes) {
         // Skip a degenerate (empty) axis: rw1 / rw2 pass an empty rho_grid, and
         // reading n_grid doubles from ax.begin() would run off the buffer.
         if (ax.size()) {
-            fp.fold(ax.begin(), (std::size_t)ax.size() * sizeof(double));
             kb.add_axis(ax.begin());
+            n_axes++;
         }
     }
+    fp.fold_pod(n_axes);
     return std::unique_ptr<GridCheckpoint>(
         new GridCheckpoint(path, fp.value(), kb.take()));
 }

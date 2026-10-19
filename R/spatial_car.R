@@ -20,6 +20,10 @@
 #'   `"car_proper"` when `proper = TRUE`).
 #'
 #' @seealso [spatial_car_proper()], [spatial_bym2()].
+#' @examples
+#' adj <- matrix(0, 10, 10)
+#' for (i in 1:9) adj[i, i + 1] <- adj[i + 1, i] <- 1
+#' spatial_car(adj, level = "group", group_var = "region")
 #' @export
 spatial_car <- function(adjacency, level = c("group", "obs"),
                         group_var = NULL, proper = FALSE, shared = NULL,
@@ -28,7 +32,8 @@ spatial_car <- function(adjacency, level = c("group", "obs"),
   level <- match.arg(level)
   parameterization <- match.arg(parameterization)
 
-  adjacency <- .validate_adjacency_arg(adjacency, "adjacency")
+  adjacency <- .validate_adjacency_arg(
+    adjacency, "adjacency", field = if (proper) "car_proper" else "icar")
 
   # Check for group_var if level = "group"
   if (level == "group" && is.null(group_var)) {
@@ -142,17 +147,25 @@ spatial_car_proper <- function(adjacency,
 #                                   to lie in [1, n_spatial_units].
 #   * character / factor values + rownames(adjacency) set
 #                              -> match by name.
-#   * character / factor values, no rownames
-#                              -> fall back to as.integer(as.factor(.)),
-#                                  but require the number of unique values
-#                                  to equal n_spatial_units (otherwise the
-#                                  factor levels reindex the cells and lose
-#                                  the user's cell identity).
+#   * character / factor values, no rownames, every label a whole number
+#                              -> read as the numeric node index the label
+#                                  spells ("10" is node 10), never as a sort
+#                                  position ("10" sorting before "2").
+#   * factor values, no rownames, other labels
+#                              -> the level order is the node order, and the
+#                                  number of levels must equal n_spatial_units
+#                                  (otherwise the levels reindex the cells and
+#                                  lose the user's cell identity).
+#   * character values, no rownames, other labels
+#                              -> refused. A character vector states no order,
+#                                  so the only order available is the sort
+#                                  order of the labels ("r1", "r10", "r11",
+#                                  "r2", ...), which is not the graph's; it
+#                                  scrambled the field silently
+#                                  (gcol33/tulpa#900).
 #
-# The fallback restriction is the original behavior, kept
-# for backward compatibility with tests that pass factors covering every
-# cell. Users hitting the empty-cell case should switch to integer 1-based
-# indices or attach `rownames(adjacency)`.
+# This is the one resolver for an areal unit column at every door -- tulpa()'s
+# sampler / Laplace / nested routes and the inline spatial() field alike.
 .resolve_spatial_idx <- function(values, n_spatial_units, adjacency,
                                  group_var = "group") {
   if (length(values) == 0L) return(integer(0))
@@ -195,7 +208,19 @@ spatial_car_proper <- function(adjacency,
       }
       return(idx)
     }
-    f <- as.factor(values)
+    if (all(grepl("^[[:space:]]*[0-9]+[[:space:]]*$", char_vals))) {
+      return(.resolve_spatial_idx(as.integer(char_vals), n_spatial_units,
+                                  adjacency, group_var))
+    }
+    if (is.character(values)) {
+      stop("Spatial group variable '", group_var, "' holds character labels ",
+           "but the adjacency carries no rownames, so nothing says which ",
+           "label is which node (sorting the labels gives \"r1\", \"r10\", ",
+           "\"r2\", ..., not the graph's order). Set rownames(adjacency) to ",
+           "the labels, pass 1-based integer node indices, or pass a factor ",
+           "whose levels are in node order.", call. = FALSE)
+    }
+    f <- values
     if (nlevels(f) != n_spatial_units) {
       stop("Spatial group variable '", group_var,
            "' has ", nlevels(f), " unique values but adjacency has ",
@@ -223,7 +248,7 @@ spatial_car_proper <- function(adjacency,
 #' @param adjacency Adjacency matrix
 #'
 #' @return Named vector with `lower` and `upper` bounds for rho
-#' @keywords internal
+#' @noRd
 compute_car_rho_bounds <- function(adjacency) {
   adj <- as.matrix(adjacency)
   diag(adj) <- 0
@@ -231,11 +256,10 @@ compute_car_rho_bounds <- function(adjacency) {
   n <- nrow(adj)
   n_neighbors <- rowSums(adj)
 
-  # Check for isolated nodes (no neighbors)
+  # An isolated node's row of D^-1 W is undefined; the bounds come from the
+  # rest. The constructor's graph check reports the node
+  # (.report_isolated_nodes).
   if (any(n_neighbors == 0)) {
-    warning("Adjacency matrix contains isolated nodes (no neighbors).\n",
-            "These will be treated as independent.", call. = FALSE)
-    # Remove isolated nodes for eigenvalue computation
     keep <- n_neighbors > 0
     adj_sub <- adj[keep, keep]
     n_neighbors_sub <- n_neighbors[keep]
@@ -292,6 +316,10 @@ compute_car_rho_bounds <- function(adjacency) {
 #' @inheritParams spatial_car
 #' @param scale_factor Scaling factor for the ICAR component. If NULL
 #'   (default), computed from the adjacency matrix following Riebler et al.
+#'   On a graph with several connected components each component is scaled
+#'   to unit generalized variance separately and an isolated node (island)
+#'   gets unit variance on its structured part, following Freni-Sterrantino
+#'   et al. (2018). A supplied value is one scale for the whole graph.
 #'
 #' @return A `tulpa_spatial` object
 #'
@@ -299,6 +327,10 @@ compute_car_rho_bounds <- function(adjacency) {
 #' Riebler, A., Sorbye, S. H., Simpson, D., & Rue, H. (2016). An intuitive
 #' Bayesian spatial model for disease mapping that accounts for scaling.
 #' Statistical Methods in Medical Research, 25(4), 1145-1165.
+#'
+#' Freni-Sterrantino, A., Ventrucci, M., & Rue, H. (2018). A note on intrinsic
+#' conditional autoregressive models for disconnected graphs. Spatial and
+#' Spatio-temporal Epidemiology, 26, 25-34.
 #'
 #' @examples
 #' # Create adjacency matrix for 10 regions (chain structure)
@@ -341,7 +373,7 @@ spatial_bym2 <- function(adjacency, level = c("group", "obs"),
   level <- match.arg(level)
   parameterization <- match.arg(parameterization)
 
-  adjacency <- .validate_adjacency_arg(adjacency, "adjacency")
+  adjacency <- .validate_adjacency_arg(adjacency, "adjacency", field = "bym2")
 
   if (level == "group" && is.null(group_var)) {
     stop("`group_var` is required when level = 'group'", call. = FALSE)
@@ -358,9 +390,18 @@ spatial_bym2 <- function(adjacency, level = c("group", "obs"),
     )
   }
 
-  # Compute scale factor if not provided
+  # Compute scale factor if not provided. Per connected component, with the
+  # component-to-component remainder carried as `node_prec`
+  # (.bym2_component_scaling); a supplied scale_factor is the caller's single
+  # scale for the whole graph and carries none.
+  node_prec <- NULL
   if (is.null(scale_factor)) {
-    scale_factor <- compute_bym2_scale(adjacency)
+    sc <- .bym2_component_scaling(adjacency)
+    scale_factor <- sc$scale_factor
+    node_prec <- sc$node_prec
+  } else if (!is.numeric(scale_factor) || length(scale_factor) != 1L ||
+             !is.finite(scale_factor) || scale_factor <= 0) {
+    stop("`scale_factor` must be a single positive number.", call. = FALSE)
   }
 
   if (isFALSE(shared)) .warn_nonshared("spatial effects")
@@ -374,7 +415,8 @@ spatial_bym2 <- function(adjacency, level = c("group", "obs"),
       shared = shared,
       parameterization = parameterization,
       n_spatial = nrow(adjacency),
-      scale_factor = scale_factor
+      scale_factor = scale_factor,
+      node_prec = node_prec
     ),
     class = c("tulpa_spatial", "list")
   )
@@ -384,37 +426,65 @@ spatial_bym2 <- function(adjacency, level = c("group", "obs"),
 #'
 #' @description
 #' Compute the scaling factor for BYM2 following Riebler et al. (2016).
-#' This makes the spatial fraction parameter interpretable.
+#' This makes the spatial fraction parameter interpretable. On a disconnected
+#' graph each connected component is scaled separately and an isolated node
+#' (an island) gets unit variance (Freni-Sterrantino et al. 2018); the value
+#' returned is then the reference scale of the largest component, and
+#' `.bym2_component_scaling()` carries the per-node remainder.
 #'
 #' @param adjacency Adjacency matrix
 #'
 #' @return Scaling factor (scalar)
-#' @keywords internal
+#' @noRd
 compute_bym2_scale <- function(adjacency) {
-  # Build precision matrix Q for ICAR
-  n <- nrow(adjacency)
+  .bym2_component_scaling(adjacency)$scale_factor
+}
+
+# Per-component BYM2 scaling (Freni-Sterrantino, Ventrucci & Rue 2018, the
+# INLA `scale.model` convention for a disconnected graph; gcol33/tulpa#902).
+#
+# Riebler et al. (2016) scale the structured field so its generalised variance
+# -- the geometric mean of the marginal variances diag(Q^+) -- is one. Over a
+# whole disconnected graph that mean mixes pieces of different geometry, and on
+# an isolated node diag(Q^+) is 0, so log(0) made the scale infinite and every
+# backend then failed its own way (NA coefficients, a frozen sampler). Scaled
+# per component instead: component c of size >= 2 gets
+# s_c = 1 / sqrt(gv_c), gv_c the geometric mean of diag(L_c^+) over its own
+# nodes, and an island gets s_c = 1, i.e. unit variance on its structured part.
+#
+# The engine's BYM2 enters the linear predictor through ONE scalar,
+# sigma * sqrt(rho) * scale_factor * phi, with phi's own ICAR prior at unit
+# precision. So the scalar is the reference scale s_ref (the largest component's,
+# which is the whole-graph value on a connected map) and each component's
+# remaining factor rides on phi's prior as a precision multiplier,
+# node_prec_i = (s_ref / s_c)^2 for node i of component c: s_ref * phi then has
+# precision L_c / s_c^2 on component c and variance 1 on an island. `node_prec`
+# is NULL when every multiplier is 1 (a connected graph), which keeps every
+# kernel on its unweighted path.
+#' @keywords internal
+.bym2_component_scaling <- function(adjacency) {
   adj <- as.matrix(adjacency)
   diag(adj) <- 0
-
-  # ICAR precision matrix: Q_ii = n_neighbors[i], Q_ij = -1 if neighbors
-  Q <- diag(rowSums(adj)) - adj
-
-  # Moore-Penrose generalized inverse of the rank-deficient ICAR precision,
-  # Q^+ = V diag(1/lambda) V' over the non-null eigenpairs.
-  eig <- eigen(Q, symmetric = TRUE)
-  nz  <- abs(eig$values) > 1e-10
-  V   <- eig$vectors[, nz, drop = FALSE]
-  lam <- eig$values[nz]
-  Qinv <- V %*% (t(V) / lam)
-
-  # Riebler et al. (2016) / Sorbye-Rue generalized variance: the geometric mean
-  # of the marginal variances diag(Q^+). The BYM2 field enters the linear
-  # predictor as scale_factor * phi (phi ~ ICAR with these marginal variances),
-  # so returning 1 / sqrt(generalized variance) makes scale_factor * phi carry
-  # unit generalized marginal variance -- the rescaling that keeps the spatial
-  # fraction `rho` interpretable and sigma_total comparable across graphs.
-  gen_var <- exp(mean(log(diag(Qinv))))
-  1 / sqrt(gen_var)
+  n <- nrow(adj)
+  comps <- .graph_components(adj)
+  s_c <- vapply(comps, function(cc) {
+    if (length(cc) < 2L) return(1)
+    Wc <- adj[cc, cc, drop = FALSE]
+    Lc <- diag(rowSums(Wc), length(cc)) - Wc
+    # L^+ = (L + 11'/m)^{-1} - 11'/m on a connected component of size m.
+    m  <- length(cc)
+    gv_diag <- diag(chol2inv(chol(Lc + 1 / m))) - 1 / m
+    1 / sqrt(exp(mean(log(gv_diag))))
+  }, numeric(1))
+  sizes <- lengths(comps)
+  s_ref <- if (any(sizes >= 2L)) s_c[which.max(sizes)] else 1
+  node_prec <- numeric(n)
+  for (k in seq_along(comps)) node_prec[comps[[k]]] <- (s_ref / s_c[k])^2
+  if (isTRUE(all.equal(node_prec, rep(1, n), tolerance = 1e-12))) {
+    node_prec <- NULL
+  }
+  list(scale_factor = s_ref, node_prec = node_prec, component_scale = s_c,
+       components = comps)
 }
 
 #' Print method for tulpa_spatial
@@ -425,6 +495,7 @@ compute_bym2_scale <- function(adjacency) {
 #' @return The input `x`, returned invisibly. Called for the side effect of
 #'   printing the spatial specification to the console.
 #'
+#' @noRd
 #' @export
 print.tulpa_spatial <- function(x, ...) {
   # SPDE specs carry a different field set (Matern mesh) and print separately.
@@ -475,6 +546,12 @@ print.tulpa_spatial <- function(x, ...) {
 
   if (x$type == "bym2") {
     cat("Scale factor:", round(x$scale_factor, 4), "\n")
+    if (!is.null(x$node_prec)) {
+      cat("  (per connected component: ",
+          length(unique(round(x$node_prec, 10))), " distinct scale(s) over ",
+          .graph_n_components(x$adjacency), " components; islands at unit ",
+          "variance)\n", sep = "")
+    }
   }
 
   invisible(x)
@@ -489,7 +566,7 @@ print.tulpa_spatial <- function(x, ...) {
 #' @param adjacency Adjacency matrix
 #'
 #' @return Logical; TRUE if connected
-#' @keywords internal
+#' @noRd
 is_connected <- function(adjacency) {
   n <- nrow(adjacency)
   if (n == 0) return(TRUE)

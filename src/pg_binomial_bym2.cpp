@@ -2,6 +2,7 @@
 // BYM2 spatial Gibbs sampler for Pólya-Gamma binomial models
 
 #include "bym2_mixing.h"
+#include "laplace_spatial_priors.h"   // read_node_prec / node_prec_ptr
 #include "pg_shared.h"
 #include "pg_spatial.h"
 #include "pg_rng.h"
@@ -44,7 +45,8 @@ Rcpp::List cpp_pg_binomial_gibbs_bym2(
     double prior_rho_beta = 0.5,
     bool store_eta = false,
     bool verbose = true,
-    int n_threads = 1
+    int n_threads = 1,
+    Rcpp::Nullable<Rcpp::NumericVector> node_prec_nullable = R_NilValue
 ) {
   const int n_save = tulpa::pg_n_save(n_iter, n_warmup, thin);
   tulpa::PgGibbsCommon C(y, n, X, re_group, n_re_groups, n_save,
@@ -56,6 +58,10 @@ Rcpp::List cpp_pg_binomial_gibbs_bym2(
   tulpa::pg_check_index(spatial_group, N, n_spatial_units, "spatial_group");
   const tulpa::PgAdjacency adj =
       tulpa::pg_build_adjacency(adj_list, n_neighbors, n_spatial_units);
+  // Per-component BYM2 scaling beyond scale_factor (#902); empty: none.
+  const std::vector<double> node_prec = tulpa::read_node_prec(
+      node_prec_nullable, n_spatial_units, "cpp_pg_binomial_gibbs_bym2");
+  const tulpa::PgIcarPrior icar(adj, tulpa::node_prec_ptr(node_prec));
 
   // Per-variant storage
   Rcpp::NumericMatrix phi_scaled_draws(n_save, n_spatial_units);
@@ -91,7 +97,7 @@ Rcpp::List cpp_pg_binomial_gibbs_bym2(
       C.offset[i] = C.X_beta[i] + C.re_contrib[i];
     });
     double bym2_removed = 0.0;
-    tulpa::update_spatial_bym2(C.kappa, C.omega, C.offset, spatial_group, adj,
+    tulpa::update_spatial_bym2(C.kappa, C.omega, C.offset, spatial_group, icar,
                                phi_scaled, theta, sigma_spatial, rho,
                                scale_factor, C.beta[0], prior_beta_sd, u,
                                bym2_removed);
@@ -138,7 +144,7 @@ Rcpp::List cpp_pg_binomial_gibbs_bym2(
 
     // Save draws
     if (iter >= n_warmup && (iter - n_warmup) % thin == 0) {
-      C.save(save_idx);
+      C.save(save_idx, spatial_contrib.begin());
       for (int s = 0; s < n_spatial_units; s++) {
         phi_scaled_draws(save_idx, s) = phi_scaled[s];
         theta_draws(save_idx, s) = theta[s];
@@ -149,8 +155,7 @@ Rcpp::List cpp_pg_binomial_gibbs_bym2(
       C.log_prob_draws[save_idx] =
           C.log_joint_common(y, n, spatial_contrib.begin(), prior_beta_sd,
                              prior_sigma_re_scale) +
-          tulpa::pg_log_icar(phi_scaled.begin(), adj, 1.0,
-                             tulpa::PG_ICAR_ISOLATED_PREC) +
+          tulpa::pg_log_icar(phi_scaled.begin(), icar, 1.0) +
           tulpa::pg_log_normal_iid(theta.begin(), n_spatial_units, 1.0) +
           (prior_sigma_spatial_scale > 0.0
                ? tulpa::pg_log_halfnormal(sigma_spatial, prior_sigma_spatial_scale)

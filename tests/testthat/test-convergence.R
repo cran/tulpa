@@ -29,7 +29,192 @@ pool_chain_major <- function(arr) {
 }
 
 
+test_that("constant parameters yield NA diagnostics, not errors", {
+  arr <- make_draws_array(niter = 200L, nchain = 2L, npar = 2L)
+  arr[, , 2L] <- 3.5                                   # constant parameter
+  fit <- structure(list(draws = arr), class = "tulpa_fit")
+  diag <- diagnostics(fit)
+  const_row <- diag[diag$parameter == "theta2", ]
+  expect_true(is.na(const_row$rhat))
+  expect_true(is.na(const_row$ess_bulk))
+})
+
+
+test_that("multi-chain rhat sees between-chain offset that one chain misses", {
+  # Build chains with a large between-chain mean shift: pooled multi-chain
+  # Rhat must flag it; a single chain (split only) should not.
+  arr <- make_draws_array(niter = 500L, nchain = 4L, npar = 1L, phi = 0.3)
+  for (m in seq_len(4L)) arr[, m, 1L] <- arr[, m, 1L] + (m - 1) * 2.0
+  pooled <- pool_chain_major(arr)
+
+  diag_mc <- diagnostics(
+    structure(list(draws = pooled, n_chains = 4L), class = "tulpa_fit"))
+  diag_1c <- diagnostics(
+    structure(list(draws = arr[, 1L, , drop = FALSE]), class = "tulpa_fit"))
+
+  expect_gt(diag_mc$rhat, 1.5)            # offset chains: clearly unconverged
+  expect_lt(diag_1c$rhat, 1.1)            # one well-mixed chain: fine
+})
+
+
+test_that("select_main_params drops bracketed-index entries", {
+  pn <- c("sigma", "phi", "u[10]", "w[3]", "(Intercept)")
+  expect_identical(select_main_params(pn), c("sigma", "phi", "(Intercept)"))
+  # falls back to the full vector if everything is an indexed entry
+  expect_identical(select_main_params(c("u[1]", "u[2]")), c("u[1]", "u[2]"))
+})
+
+skip_on_cran_budget()
+
+
+test_that("rhat takes the max of bulk and folded split-Rhat", {
+  skip_on_cran_budget()
+  skip_if_not_installed("posterior")
+  arr <- make_draws_array()
+  fit <- structure(list(draws = arr), class = "tulpa_fit")
+  diag <- diagnostics(fit, measures = c("rhat", "rhat_bulk", "rhat_fold"))
+
+  # headline rhat is never below either component, and equals their max
+  expect_true(all(diag$rhat >= diag$rhat_bulk - 1e-8))
+  expect_true(all(diag$rhat >= diag$rhat_fold - 1e-8))
+  expect_equal(diag$rhat, pmax(diag$rhat_bulk, diag$rhat_fold), tolerance = 1e-10)
+
+  for (p in seq_len(dim(arr)[3L])) {
+    nm <- dimnames(arr)[[3L]][p]
+    expect_equal(diag$rhat[diag$parameter == nm],
+                 posterior::rhat(arr[, , p]), tolerance = 1e-12)
+  }
+})
+
+
+test_that("default diagnostics() columns are stable", {
+  skip_on_cran_budget()
+  arr <- make_draws_array(niter = 200L, nchain = 2L, npar = 2L)
+  fit <- structure(list(draws = arr), class = "tulpa_fit")
+  diag <- diagnostics(fit)
+  expect_identical(names(diag), c("parameter", "rhat", "ess_bulk", "ess_tail"))
+})
+
+
+test_that("tulpa_draws_array recognises all chain layouts", {
+  skip_on_cran_budget()
+  arr <- make_draws_array(niter = 100L, nchain = 3L, npar = 2L)
+
+  # (a) already a 3D array
+  a3 <- tulpa_draws_array(structure(list(draws = arr), class = "tulpa_fit"))
+  expect_equal(dim(a3), c(100L, 3L, 2L))
+  expect_identical(dimnames(a3)[[3L]], c("theta1", "theta2"))
+
+  # (b) pooled chain-major matrix + n_chains
+  pooled <- pool_chain_major(arr)
+  a_nc <- tulpa_draws_array(
+    structure(list(draws = pooled, n_chains = 3L), class = "tulpa_fit"))
+  expect_equal(dim(a_nc), c(100L, 3L, 2L))
+  expect_equal(a_nc[, 1L, "theta1"], arr[, 1L, "theta1"], tolerance = 1e-12)
+
+  # (c) pooled matrix + chain_id row map
+  cid <- rep(seq_len(3L), each = 100L)
+  a_cid <- tulpa_draws_array(
+    structure(list(draws = pooled, chain_id = cid), class = "tulpa_fit"))
+  expect_equal(dim(a_cid), c(100L, 3L, 2L))
+
+  # (d) single pooled chain
+  a1 <- tulpa_draws_array(
+    structure(list(draws = arr[, 1L, ]), class = "tulpa_fit"))
+  expect_equal(dim(a1), c(100L, 1L, 2L))
+
+  expect_null(tulpa_draws_array(structure(list(), class = "tulpa_fit")))
+})
+
+# gcol33/tulpa#875 / #878: a chain with bulk-ESS in single digits printed clean
+# intervals, and only an opt-in diagnostic said otherwise. The front door now
+# checks every chain fit against a floor and warns, and print() repeats it.
+test_that("an unmixed chain warns at fit time and says so when printed", {
+  skip_on_cran_budget()
+  set.seed(7L)
+  # A random walk: every draw carries the last one, so bulk-ESS is tiny.
+  rw <- cbind(a = cumsum(rnorm(1000L)), b = rnorm(1000L))
+  fit <- structure(list(draws = rw, backend = "mala", N = 10L),
+                   class = "tulpa_fit")
+  expect_warning(out <- .tulpa_check_fit_convergence(fit),
+                 "has not converged.*a: Rhat")
+  expect_false(out$convergence$ok)
+  expect_identical(out$convergence$parameters, "a")
+  expect_output(print(out), "chain not converged")
+
+  ok <- structure(list(draws = cbind(a = rnorm(1000L), b = rnorm(1000L)),
+                       backend = "mala", N = 10L), class = "tulpa_fit")
+  expect_no_warning(ok <- .tulpa_check_fit_convergence(ok))
+  expect_true(ok$convergence$ok)
+
+  # i.i.d. draws are not a chain: Rhat / ESS say nothing about them.
+  iid <- structure(list(draws = rw, backend = "smc"), class = "tulpa_fit")
+  expect_no_warning(iid2 <- .tulpa_check_fit_convergence(iid))
+  expect_null(iid2$convergence)
+})
+
+test_that("every backend declares a draws-provenance (emits) class", {
+  skip_on_cran_budget()
+  emits <- vapply(BACKEND_REGISTRY, function(e) e$emits %||% NA_character_,
+                  character(1))
+  expect_false(anyNA(emits))
+  expect_true(all(emits %in% c("chain", "iid", "point")))
+  # emits is orthogonal to tier: an Exact (Tier 1) SMC sampler emits i.i.d.
+  # particles, while a Structured (Tier 2) nested-Laplace fit also emits i.i.d.
+  expect_equal(BACKEND_REGISTRY$mala$emits, "chain")
+  expect_equal(BACKEND_REGISTRY$smc$emits, "iid")
+  expect_equal(BACKEND_REGISTRY$nested_laplace$emits, "iid")
+})
+
+test_that("draws-kind resolves from tag, registry, or unknown-as-chain", {
+  skip_on_cran_budget()
+  expect_true(.tulpa_is_chain(
+    structure(list(backend = "mala"), class = "tulpa_fit")))
+  expect_false(.tulpa_is_chain(
+    structure(list(backend = "nested_laplace"), class = "tulpa_fit")))
+  expect_false(.tulpa_is_chain(
+    structure(list(draws_kind = "iid"), class = "tulpa_fit")))   # explicit tag wins
+  expect_true(.tulpa_is_chain(
+    structure(list(), class = "tulpa_fit")))                     # unknown -> chain
+})
+
+test_that("chain diagnostics are withheld on a non-chain (approximation) fit", {
+  skip_on_cran_budget()
+  set.seed(1)
+  draws <- matrix(rnorm(2000), 1000, 2, dimnames = list(NULL, c("a", "b")))
+  chain <- structure(list(draws = draws, backend = "mala", n_chains = 2L),
+                     class = "tulpa_fit")
+  iid   <- structure(list(draws = draws, backend = "nested_laplace"),
+                     class = "tulpa_fit")
+
+  # chain fit: a real chain Rhat / ESS table. i.i.d. fit: the PSIS reliability
+  # table (a `laplace_diagnostics`), NOT a chain table -- so a reader cannot
+  # mistake the vacuous Rhat ~ 1 / ESS ~ n of i.i.d. draws for a convergence
+  # pass; the headline there is the approximation k-hat, not chain mixing.
+  d_chain <- diagnostics(chain)
+  expect_s3_class(d_chain, "data.frame")
+  expect_false(inherits(d_chain, "laplace_diagnostics"))
+  expect_true(all(c("rhat", "ess_bulk") %in% names(d_chain)))
+  d_iid <- diagnostics(iid)
+  expect_s3_class(d_iid, "laplace_diagnostics")
+  expect_equal(nrow(d_iid), 2L)
+  expect_true("pareto_k" %in% names(attributes(d_iid)))
+
+  # check_diagnostics: a real verdict on the chain, NA ("not applicable") on iid.
+  expect_false(is.na(check_diagnostics(chain, quiet = TRUE)))
+  expect_true(is.na(suppressMessages(check_diagnostics(iid, quiet = TRUE))))
+
+  # typed accessors: summaries see any draws, the chain view is withheld for iid.
+  expect_false(is.null(posterior_sample(iid)))
+  expect_null(mcmc_draws(iid))
+  expect_false(is.null(mcmc_draws(chain)))
+})
+
+skip_on_cran()
+
+
 test_that("diagnostics() reproduces posterior rhat / ess / mcse", {
+  skip_on_cran()
   skip_if_not_installed("posterior")
   arr <- make_draws_array()
   fit <- structure(list(draws = arr), class = "tulpa_fit")
@@ -68,100 +253,8 @@ test_that("diagnostics() reproduces posterior rhat / ess / mcse", {
 })
 
 
-test_that("rhat takes the max of bulk and folded split-Rhat", {
-  skip_if_not_installed("posterior")
-  arr <- make_draws_array()
-  fit <- structure(list(draws = arr), class = "tulpa_fit")
-  diag <- diagnostics(fit, measures = c("rhat", "rhat_bulk", "rhat_fold"))
-
-  # headline rhat is never below either component, and equals their max
-  expect_true(all(diag$rhat >= diag$rhat_bulk - 1e-8))
-  expect_true(all(diag$rhat >= diag$rhat_fold - 1e-8))
-  expect_equal(diag$rhat, pmax(diag$rhat_bulk, diag$rhat_fold), tolerance = 1e-10)
-
-  for (p in seq_len(dim(arr)[3L])) {
-    nm <- dimnames(arr)[[3L]][p]
-    expect_equal(diag$rhat[diag$parameter == nm],
-                 posterior::rhat(arr[, , p]), tolerance = 1e-12)
-  }
-})
-
-
-test_that("default diagnostics() columns are stable", {
-  arr <- make_draws_array(niter = 200L, nchain = 2L, npar = 2L)
-  fit <- structure(list(draws = arr), class = "tulpa_fit")
-  diag <- diagnostics(fit)
-  expect_identical(names(diag), c("parameter", "rhat", "ess_bulk", "ess_tail"))
-})
-
-
-test_that("constant parameters yield NA diagnostics, not errors", {
-  arr <- make_draws_array(niter = 200L, nchain = 2L, npar = 2L)
-  arr[, , 2L] <- 3.5                                   # constant parameter
-  fit <- structure(list(draws = arr), class = "tulpa_fit")
-  diag <- diagnostics(fit)
-  const_row <- diag[diag$parameter == "theta2", ]
-  expect_true(is.na(const_row$rhat))
-  expect_true(is.na(const_row$ess_bulk))
-})
-
-
-test_that("tulpa_draws_array recognises all chain layouts", {
-  arr <- make_draws_array(niter = 100L, nchain = 3L, npar = 2L)
-
-  # (a) already a 3D array
-  a3 <- tulpa_draws_array(structure(list(draws = arr), class = "tulpa_fit"))
-  expect_equal(dim(a3), c(100L, 3L, 2L))
-  expect_identical(dimnames(a3)[[3L]], c("theta1", "theta2"))
-
-  # (b) pooled chain-major matrix + n_chains
-  pooled <- pool_chain_major(arr)
-  a_nc <- tulpa_draws_array(
-    structure(list(draws = pooled, n_chains = 3L), class = "tulpa_fit"))
-  expect_equal(dim(a_nc), c(100L, 3L, 2L))
-  expect_equal(a_nc[, 1L, "theta1"], arr[, 1L, "theta1"], tolerance = 1e-12)
-
-  # (c) pooled matrix + chain_id row map
-  cid <- rep(seq_len(3L), each = 100L)
-  a_cid <- tulpa_draws_array(
-    structure(list(draws = pooled, chain_id = cid), class = "tulpa_fit"))
-  expect_equal(dim(a_cid), c(100L, 3L, 2L))
-
-  # (d) single pooled chain
-  a1 <- tulpa_draws_array(
-    structure(list(draws = arr[, 1L, ]), class = "tulpa_fit"))
-  expect_equal(dim(a1), c(100L, 1L, 2L))
-
-  expect_null(tulpa_draws_array(structure(list(), class = "tulpa_fit")))
-})
-
-
-test_that("multi-chain rhat sees between-chain offset that one chain misses", {
-  # Build chains with a large between-chain mean shift: pooled multi-chain
-  # Rhat must flag it; a single chain (split only) should not.
-  arr <- make_draws_array(niter = 500L, nchain = 4L, npar = 1L, phi = 0.3)
-  for (m in seq_len(4L)) arr[, m, 1L] <- arr[, m, 1L] + (m - 1) * 2.0
-  pooled <- pool_chain_major(arr)
-
-  diag_mc <- diagnostics(
-    structure(list(draws = pooled, n_chains = 4L), class = "tulpa_fit"))
-  diag_1c <- diagnostics(
-    structure(list(draws = arr[, 1L, , drop = FALSE]), class = "tulpa_fit"))
-
-  expect_gt(diag_mc$rhat, 1.5)            # offset chains: clearly unconverged
-  expect_lt(diag_1c$rhat, 1.1)            # one well-mixed chain: fine
-})
-
-
-test_that("select_main_params drops bracketed-index entries", {
-  pn <- c("sigma", "phi", "u[10]", "w[3]", "(Intercept)")
-  expect_identical(select_main_params(pn), c("sigma", "phi", "(Intercept)"))
-  # falls back to the full vector if everything is an indexed entry
-  expect_identical(select_main_params(c("u[1]", "u[2]")), c("u[1]", "u[2]"))
-})
-
-
 test_that("plotting and summary layer runs end-to-end on a multi-chain fit", {
+  skip_on_cran()
   arr <- make_draws_array(niter = 400L, nchain = 4L, npar = 3L)
   pooled <- pool_chain_major(arr)
   n_total <- nrow(pooled)
@@ -219,58 +312,4 @@ test_that("plotting and summary layer runs end-to-end on a multi-chain fit", {
   # bayesplot-dependent pairs plot must not crash on the divergence path
   skip_if_not_installed("bayesplot")
   expect_no_error(plot_pairs(fit, pars = c("theta1", "theta2")))
-})
-
-test_that("every backend declares a draws-provenance (emits) class", {
-  emits <- vapply(BACKEND_REGISTRY, function(e) e$emits %||% NA_character_,
-                  character(1))
-  expect_false(anyNA(emits))
-  expect_true(all(emits %in% c("chain", "iid", "point")))
-  # emits is orthogonal to tier: an Exact (Tier 1) SMC sampler emits i.i.d.
-  # particles, while a Structured (Tier 2) nested-Laplace fit also emits i.i.d.
-  expect_equal(BACKEND_REGISTRY$mala$emits, "chain")
-  expect_equal(BACKEND_REGISTRY$smc$emits, "iid")
-  expect_equal(BACKEND_REGISTRY$nested_laplace$emits, "iid")
-})
-
-test_that("draws-kind resolves from tag, registry, or unknown-as-chain", {
-  expect_true(.tulpa_is_chain(
-    structure(list(backend = "mala"), class = "tulpa_fit")))
-  expect_false(.tulpa_is_chain(
-    structure(list(backend = "nested_laplace"), class = "tulpa_fit")))
-  expect_false(.tulpa_is_chain(
-    structure(list(draws_kind = "iid"), class = "tulpa_fit")))   # explicit tag wins
-  expect_true(.tulpa_is_chain(
-    structure(list(), class = "tulpa_fit")))                     # unknown -> chain
-})
-
-test_that("chain diagnostics are withheld on a non-chain (approximation) fit", {
-  set.seed(1)
-  draws <- matrix(rnorm(2000), 1000, 2, dimnames = list(NULL, c("a", "b")))
-  chain <- structure(list(draws = draws, backend = "mala", n_chains = 2L),
-                     class = "tulpa_fit")
-  iid   <- structure(list(draws = draws, backend = "nested_laplace"),
-                     class = "tulpa_fit")
-
-  # chain fit: a real chain Rhat / ESS table. i.i.d. fit: the PSIS reliability
-  # table (a `laplace_diagnostics`), NOT a chain table -- so a reader cannot
-  # mistake the vacuous Rhat ~ 1 / ESS ~ n of i.i.d. draws for a convergence
-  # pass; the headline there is the approximation k-hat, not chain mixing.
-  d_chain <- diagnostics(chain)
-  expect_s3_class(d_chain, "data.frame")
-  expect_false(inherits(d_chain, "laplace_diagnostics"))
-  expect_true(all(c("rhat", "ess_bulk") %in% names(d_chain)))
-  d_iid <- diagnostics(iid)
-  expect_s3_class(d_iid, "laplace_diagnostics")
-  expect_equal(nrow(d_iid), 2L)
-  expect_true("pareto_k" %in% names(attributes(d_iid)))
-
-  # check_diagnostics: a real verdict on the chain, NA ("not applicable") on iid.
-  expect_false(is.na(check_diagnostics(chain, quiet = TRUE)))
-  expect_true(is.na(suppressMessages(check_diagnostics(iid, quiet = TRUE))))
-
-  # typed accessors: summaries see any draws, the chain view is withheld for iid.
-  expect_false(is.null(posterior_sample(iid)))
-  expect_null(mcmc_draws(iid))
-  expect_false(is.null(mcmc_draws(chain)))
 })

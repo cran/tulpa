@@ -34,11 +34,14 @@
                          control = list(diagnose_k = FALSE))
 }
 
+skip_on_cran_budget()
+
 # --------------------------------------------------------------------------- #
 # The formatter                                                                #
 # --------------------------------------------------------------------------- #
 
 test_that("the note names the field, the block, the path and the axis used", {
+    skip_on_cran_budget()
     rec <- data.frame(block = 2L, type = "icar", field = "sigma_grid",
                       path = "registry", integrates = "tau_grid",
                       reason = "default_axis_not_read_by_this_path",
@@ -67,6 +70,7 @@ test_that("the note names the field, the block, the path and the axis used", {
 })
 
 test_that("the reader unwraps a model package's nested fit", {
+    skip_on_cran_budget()
     rec <- data.frame(block = NA_integer_, type = "icar", field = "sigma_grid",
                       path = "registry", integrates = "tau_grid",
                       reason = "default_axis_not_read_by_this_path",
@@ -78,6 +82,8 @@ test_that("the reader unwraps a model package's nested fit", {
     empty <- structure(list(axis_fields_dropped = rec[0L, ]), class = "tulpa_fit")
     expect_null(tulpa:::.tulpa_axis_dropped(empty))
 })
+
+skip_on_cran()
 
 # --------------------------------------------------------------------------- #
 # The three readers, on a fit that actually dropped an axis                    #
@@ -98,12 +104,12 @@ test_that("a dropped axis surfaces through diagnostic_summary, print and summary
     # And the printed summary carries it, not just the returned list.
     expect_output(print(ds), "sigma_grid")
 
-    out <- paste(utils::capture.output(print(fit)), collapse = "\n")
+    out <- paste(utils::capture.output(print(summary(fit))), collapse = "\n")
     expect_match(out, "unused axis fields", fixed = TRUE)
     expect_match(out, "sigma_grid", fixed = TRUE)
     expect_match(out, "diagnostic_summary", fixed = TRUE)
 
-    expect_identical(attr(summary(fit), "axis_fields_dropped"), rec)
+    expect_identical(summary(fit)$axis_fields_dropped, rec)
 })
 
 test_that("an auto_grid()-marked drop surfaces the same way", {
@@ -129,8 +135,8 @@ test_that("a fit with nothing dropped says nothing anywhere", {
     expect_null(ds$axis_fields_dropped)
     expect_false(any(grepl("was not used", ds$recommendations, fixed = TRUE)))
 
-    out <- paste(utils::capture.output(print(fit)), collapse = "\n")
+    out <- paste(utils::capture.output(print(summary(fit))), collapse = "\n")
     expect_false(grepl("unused axis fields", out, fixed = TRUE))
 
-    expect_null(attr(summary(fit), "axis_fields_dropped"))
+    expect_null(summary(fit)$axis_fields_dropped)
 })

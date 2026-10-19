@@ -46,40 +46,6 @@ test_that("the acceptance predicate reads the registry, not a restated list", {
   expect_false(tulpa:::.auto_backend_ok("gibbs", fb, list(n_re_terms = 2L)))
 })
 
-test_that("auto fits an RE model whose call the Gibbs debias cannot take", {
-  skip_on_cran()
-  # Each of these used to select re_cov_gibbs and then be refused by it.
-  f1 <- tulpa(yp ~ x + offset(off) + (1 | g), data = d, family = "poisson",
-              mode = "auto")
-  expect_s3_class(f1, "tulpa_fit")
-  expect_false(identical(f1$backend, "re_cov_gibbs"))
-
-  f2 <- tulpa(yn ~ x + (1 | g), data = d, family = "gaussian", weights = d$w,
-              mode = "auto")
-  expect_s3_class(f2, "tulpa_fit")
-
-  # The plain case still takes the exact debias, which is the designed default.
-  f3 <- tulpa(yp ~ x + (1 | g), data = d, family = "poisson", mode = "auto")
-  expect_identical(f3$backend, "re_cov_gibbs")
-})
-
-test_that("auto does not send a two-RE binomial areal model to the PG sweep", {
-  skip_on_cran()
-  fit <- tulpa(yb ~ x + (1 | g) + (1 | h) + spatial(s), data = d,
-               family = "binomial",
-               spatial = list(type = "icar", adjacency = W), mode = "auto")
-  expect_s3_class(fit, "tulpa_fit")
-  expect_false(identical(fit$backend, "gibbs"))
-
-  # One RE term alongside the field is what the sweep supports, and auto still
-  # picks it there.
-  sel <- tulpa:::select_inference_mode(
-    "auto", family = list(name = "binomial", distribution = "binomial"),
-    n_obs = n, has_spatial = TRUE, spatial_type = "icar", has_re = TRUE,
-    feat = list(n_re_terms = 1L))
-  expect_identical(sel$backend, "gibbs")
-})
-
 test_that("auto routes a temporal GP to the sampler that fits it", {
   sel <- tulpa:::select_inference_mode(
     "auto", family = list(name = "binomial", distribution = "binomial"),
@@ -115,18 +81,25 @@ test_that("auto's default arm routes ziformula off MALA instead of erroring", {
   expect_identical(sel2$backend, "mala")
 })
 
-test_that("auto fits a ziformula model that used to error at the front door", {
-  skip_on_cran()
-  set.seed(2)
-  n2 <- 160
-  dq <- data.frame(x = rnorm(n2)); dq$y <- rpois(n2, exp(0.5 + 0.5 * dq$x))
-  dq$y[runif(n2) < .3] <- 0
-  f <- tulpa(y ~ x, data = dq, family = "poisson", ziformula = ~ 1,
-             control = list(n_iter = 100L, warmup = 50L, seed = 1L))
-  expect_identical(f$backend, "hmc")
+test_that("auto adds a temporal arm that sees ziformula before picking a backend", {
+  fam <- list(name = "poisson", distribution = "poisson")
+  sel <- tulpa:::select_inference_mode(
+    "auto", family = fam, n_obs = n, has_temporal = TRUE,
+    temporal = list(type = "rw1"), feat = list(ziformula = TRUE))
+  expect_identical(sel$backend, "hmc")
+
+  # Unaffected: no zi, still nested Laplace (matches the pre-existing
+  # downstream-redirect outcome, reached one step earlier now).
+  sel2 <- tulpa:::select_inference_mode(
+    "auto", family = fam, n_obs = n, has_temporal = TRUE,
+    temporal = list(type = "rw1"))
+  expect_identical(sel2$backend, "nested_laplace")
 })
 
+skip_on_cran_budget()
+
 test_that("auto's spatial-nested arm falls back to hmc when nested_laplace refuses the call", {
+  skip_on_cran_budget()
   fam <- list(name = "poisson", distribution = "poisson")
   sel <- tulpa:::select_inference_mode(
     "auto", family = fam, n_obs = n, has_spatial = TRUE, spatial_type = "icar",
@@ -147,19 +120,51 @@ test_that("auto's spatial-nested arm falls back to hmc when nested_laplace refus
   expect_identical(sel3$backend, "nested_laplace")
 })
 
-test_that("auto adds a temporal arm that sees ziformula before picking a backend", {
-  fam <- list(name = "poisson", distribution = "poisson")
-  sel <- tulpa:::select_inference_mode(
-    "auto", family = fam, n_obs = n, has_temporal = TRUE,
-    temporal = list(type = "rw1"), feat = list(ziformula = TRUE))
-  expect_identical(sel$backend, "hmc")
+skip_on_cran()
 
-  # Unaffected: no zi, still nested Laplace (matches the pre-existing
-  # downstream-redirect outcome, reached one step earlier now).
-  sel2 <- tulpa:::select_inference_mode(
-    "auto", family = fam, n_obs = n, has_temporal = TRUE,
-    temporal = list(type = "rw1"))
-  expect_identical(sel2$backend, "nested_laplace")
+test_that("auto fits an RE model whose call the Gibbs debias cannot take", {
+  skip_on_cran()
+  # Each of these used to select re_cov_gibbs and then be refused by it.
+  f1 <- tulpa(yp ~ x + offset(off) + (1 | g), data = d, family = "poisson",
+              mode = "auto")
+  expect_s3_class(f1, "tulpa_fit")
+  expect_false(identical(f1$backend, "re_cov_gibbs"))
+
+  f2 <- tulpa(yn ~ x + (1 | g), data = d, family = "gaussian", weights = d$w,
+              mode = "auto")
+  expect_s3_class(f2, "tulpa_fit")
+
+  # The plain case still takes the exact debias, which is the designed default.
+  f3 <- tulpa(yp ~ x + (1 | g), data = d, family = "poisson", mode = "auto")
+  expect_identical(f3$backend, "re_cov_gibbs")
+})
+
+test_that("auto does not send a two-RE binomial areal model to the PG sweep", {
+  skip_on_cran()
+  fit <- tulpa(yb ~ x + (1 | g) + (1 | h) + spatial(s), data = d,
+               family = "binomial",
+               spatial = list(type = "icar", adjacency = W), mode = "auto")
+  expect_s3_class(fit, "tulpa_fit")
+  expect_false(identical(fit$backend, "gibbs"))
+
+  # One RE term alongside the field is what the sweep supports, and auto still
+  # picks it there.
+  sel <- tulpa:::select_inference_mode(
+    "auto", family = list(name = "binomial", distribution = "binomial"),
+    n_obs = n, has_spatial = TRUE, spatial_type = "icar", has_re = TRUE,
+    feat = list(n_re_terms = 1L))
+  expect_identical(sel$backend, "gibbs")
+})
+
+test_that("auto fits a ziformula model that used to error at the front door", {
+  skip_on_cran()
+  set.seed(2)
+  n2 <- 160
+  dq <- data.frame(x = rnorm(n2)); dq$y <- rpois(n2, exp(0.5 + 0.5 * dq$x))
+  dq$y[runif(n2) < .3] <- 0
+  f <- tulpa(y ~ x, data = dq, family = "poisson", ziformula = ~ 1,
+             control = list(n_iter = 100L, warmup = 50L, seed = 1L))
+  expect_identical(f$backend, "hmc")
 })
 
 test_that("the slope redirect re-checks features instead of blindly redirecting", {
@@ -168,11 +173,23 @@ test_that("the slope redirect re-checks features instead of blindly redirecting"
   dg <- data.frame(x = rnorm(n), g = factor(sample(1:12, n, TRUE)))
   dg$y <- 1 + 0.5 * dg$x + rnorm(12)[dg$g] + rnorm(n)
   w <- rep(1:2, n / 2)
-  # Neither re_cov_gibbs nor re_cov_nested carries weights, so there is no
-  # backend that can integrate this slope's covariance under this call --
-  # this now refuses with a message naming the feature, instead of blindly
-  # redirecting to re_cov_gibbs and surfacing ITS unrelated refusal.
+  # re_cov_gibbs does not carry weights, so this used to be redirected to it
+  # blindly and surface ITS refusal. re_cov_nested carries them
+  # (gcol33/tulpa#874), so the slope's covariance is integrated there instead.
+  fit <- tulpa(y ~ x + (1 + x | g), data = dg, weights = w, phi = 1)
+  expect_identical(fit$backend, "re_cov_nested")
+})
+
+test_that("auto honours a named control$re_cov integrator", {
+  skip_on_cran()
+  # auto's RE arm picks the integrator itself, so the redirect that reads
+  # control$re_cov never ran there: re_cov = "nested" still gave re_cov_gibbs.
+  f1 <- tulpa(yp ~ x + (1 | g), data = d, family = "poisson", mode = "auto",
+              control = list(re_cov = "nested"))
+  expect_identical(f1$backend, "re_cov_nested")
+  # ... and naming the integrator auto would refuse for this call errors.
   expect_error(
-    tulpa(y ~ x + (1 + x | g), data = dg, weights = w),
-    "weights")
+    tulpa(yp ~ x + offset(off) + (1 | g), data = d, family = "poisson",
+          mode = "auto", control = list(re_cov = "gibbs")),
+    "does not carry")
 })

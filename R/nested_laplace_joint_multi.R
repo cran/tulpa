@@ -226,13 +226,16 @@
 # NULL only from contexts where no such block can appear.
 .joint_block_spec_for_cpp <- function(p, n_arms, block_index, arms = NULL) {
     type <- tolower(p$type)
-    .nl_check_block_fields(p, c("axis", "joint"), block_index)
+    projected <- .nl_block_is_projected(p)
+    .nl_check_block_fields(
+        p, c("axis", if (projected) "projected" else "joint"), block_index)
     arm_n_obs <- if (is.null(arms)) NULL
                  else vapply(arms, function(a) length(a$y), integer(1))
-    if (type %in% c("icar", "bym2", "car_proper")) {
-        spatial_idx <- .multi_block_per_arm_idx(p$spatial_idx, n_arms,
-                                                  block_index, "spatial_idx",
-                                                  arm_n_obs, p$n_spatial_units)
+    if (type %in% .NL_PROJECTABLE_AREAL) {
+        spatial_idx <- if (!projected)
+            .multi_block_per_arm_idx(p$spatial_idx, n_arms, block_index,
+                                     "spatial_idx", arm_n_obs,
+                                     p$n_spatial_units)
         out <- list(
             type            = type,
             spatial_idx     = spatial_idx,
@@ -241,8 +244,13 @@
             adj_col_idx     = as.integer(p$adj_col_idx),
             n_neighbors     = as.integer(p$n_neighbors)
         )
+        if (projected) {
+            out$projector <- .nl_block_projector(p, n_arms, block_index,
+                                                 arm_n_obs)
+        }
         if (type == "bym2") {
             out$scale_factor <- as.numeric(p$scale_factor %||% 1.0)
+            if (!is.null(p$node_prec)) out$node_prec <- as.numeric(p$node_prec)
         }
         # Optional per-arm per-row design weight (areal SVC). When set, the
         # field's contribution to arm k row i is row-scaled by svc_weight[[k]][i]:
@@ -401,9 +409,24 @@
             logdet_Q_per_grid          = as.numeric(p$logdet_Q_per_grid),
             log_prior_theta_per_grid   = as.numeric(p$log_prior_theta_per_grid)
         )
+    } else if (type == "nngp") {
+        spatial_idx <- if (!projected)
+            .multi_block_per_arm_idx(p$spatial_idx, n_arms, block_index,
+                                     "spatial_idx", arm_n_obs, p$n_spatial)
+        out <- c(list(type = "nngp", spatial_idx = spatial_idx),
+                 .nl_nngp_field_args(p))
+        if (projected) {
+            out$projector <- .nl_block_projector(p, n_arms, block_index,
+                                                 arm_n_obs)
+        }
+        if (!is.null(p$svc_weight)) {
+            out$svc_weight <- .multi_block_svc_weight(
+                p$svc_weight, spatial_idx, n_arms, block_index)
+        }
+        out
     } else if (type == "hsgp") {
         # HSGP block: shared eigenvalues + per-arm Phi basis matrices.
-        # Axes are (log_sigma2, log_lengthscale).
+        # Axes are (sigma2, lengthscale).
         #
         # Optional `svc_column`: 1-based index into each arm's `X`. When
         # set, the block becomes a spatially-varying coefficient:
@@ -959,10 +982,11 @@
 .joint_multi_measure_specs <- function(grid, folded_axes, joint_grid,
                                        axis_offsets, B, fn_sigma, fn_alpha,
                                        fn_phi, copy_slab, copy_atom_mass,
-                                       logchol) {
+                                       logchol, axis_refine = NULL) {
     specs <- .joint_axis_specs_from_grid(grid, copy_slab = copy_slab,
                                          folded_axes = folded_axes,
-                                         logchol = logchol)
+                                         logchol = logchol,
+                                         axis_refine = axis_refine)
     specs <- lapply(specs, function(sp) {
         if (!is.null(sp$atom_mass)) sp$atom_mass <- copy_atom_mass
         sp
@@ -985,12 +1009,18 @@
 # `res$theta_grid` from the specs that record marks, and the integration
 # weights, with `dnode` the design weights of a CCD design (NULL on a tensor
 # grid). Returns the result and the specs its measure was built from.
+#
+# `refining` is the per-cell tag the refinement passes leave. The specs are read
+# off the grid's BASE cells: an axis's declared node set is what fixes a prior
+# read off it, and a node a refinement pass appended was not declared.
 .joint_multi_attach_integration <- function(res, joint_grid, axis_offsets, B,
                                             prepared, hp_families,
                                             fn_sigma, fn_alpha, fn_phi,
                                             copy_slab, copy_atom_mass,
                                             dnode = NULL,
-                                            hyperprior = "proper", hp_declared) {
+                                            hyperprior = "proper", hp_declared,
+                                            refining = NULL,
+                                            axis_refine = NULL) {
     hp <- .joint_multi_hyperprior(
         joint_grid, fn_sigma, fn_alpha, fn_phi, blocks = prepared,
         families = hp_families, copy_atom_mass = copy_atom_mass,
@@ -998,12 +1028,16 @@
     res$log_hyperprior          <- hp$lp
     res$log_hyperprior_axes     <- hp$axes
     res$log_hyperprior_declined <- hp$declined
+    base <- !nzchar(.hyper_slice_home(refining, nrow(res$theta_grid)))
     specs <- .joint_multi_measure_specs(
-        res$theta_grid, hp$axes, joint_grid, axis_offsets, B,
-        fn_sigma, fn_alpha, fn_phi, copy_slab, copy_atom_mass,
-        logchol = hp_declared$logchol)
-    res$log_quad     <- .hyper_log_quad_weights(res$theta_grid, specs)
-    res$axis_support <- .hyper_grid_supports(res$theta_grid, specs)
+        res$theta_grid[base, , drop = FALSE], hp$axes, joint_grid, axis_offsets,
+        B, fn_sigma, fn_alpha, fn_phi, copy_slab, copy_atom_mass,
+        logchol = hp_declared$logchol, axis_refine = axis_refine)
+    res$log_quad     <- .hyper_log_quad_weights(res$theta_grid, specs,
+                                                refining = refining)
+    res$axis_support <- .hyper_grid_supports(res$theta_grid, specs,
+                                             refining = refining)
+    res <- .nl_record_unconverged(res)
     res$weights      <- .joint_integration_weights(res$log_marginal, dnode,
                                                    log_quad = res$log_quad)
     list(res = res, specs = specs)
@@ -1165,7 +1199,10 @@
              cila             = NULL,
              # Per-cell log hyperprior + log cell measure a screened solve
              # ranks with, in `theta_mat` row order.
-             screen_log_offset = NULL) {
+             screen_log_offset = NULL,
+             # Return the screened surface without the full pass: a placement
+             # pilot's detecting grid only (`.nl_pilot_screen_only()`).
+             screen_only = FALSE) {
         .cpp_joint_multi(
             arms_list           = arms,
             copy_arms           = as.integer(cp$copy_arms_zero),
@@ -1198,16 +1235,48 @@
             debias              = debias,
             cila                = cila,
             inner_sparse_override = as.integer(inner_sparse_override),
-            screen_log_offset   = screen_log_offset)
+            screen_log_offset   = screen_log_offset,
+            screen_only         = isTRUE(screen_only))
+    }
+}
+
+# The `kernel_fn(new_cells, warm_start, store_extras)` closure the refinement
+# passes drive (`R/hyper_grid_refine.R`), over this driver's own kernel call: the
+# multi-block counterpart of `.joint_make_kernel_fn()`. A refinement cell is a row
+# of the assembled joint grid, so the per-arm dispersion columns it carries go
+# through the same `phi_grid_per_arm` extraction the grid solve uses. The per-cell
+# side data leaves only inside `extras`, so a call that asks for none requests
+# neither the precision nor the fixed-effect block.
+.joint_multi_make_kernel_fn <- function(call_kernel, arm_names, x_init_default,
+                                        store_Q = FALSE, screen_tol = 0,
+                                        screen_hp = NULL) {
+    function(new_cells, warm_start = NULL, store_extras = FALSE,
+             x_init_per_cell = NULL, screen = NULL) {
+        x_init <- if (!is.null(warm_start) && !is.null(warm_start$mode))
+                      as.numeric(warm_start$mode) else x_init_default
+        scr <- .nl_refine_screen_offset(new_cells, screen, screen_tol, screen_hp)
+        res_x <- call_kernel(
+            new_cells, x_init = x_init,
+            store_Q = isTRUE(store_Q) && isTRUE(store_extras),
+            fixed_block = isTRUE(store_extras),
+            phi_grid_per_arm = .joint_multi_phi_per_arm(new_cells, arm_names),
+            x_init_per_cell = .joint_warm_start_per_cell(warm_start,
+                                                         x_init_per_cell,
+                                                         nrow(new_cells)),
+            prune_tol = if (is.null(scr)) 0 else screen_tol,
+            screen_log_offset = scr)
+        list(log_marginal = res_x$log_marginal,
+             extras = if (isTRUE(store_extras))
+                          .joint_extras_from_res(res_x, nrow(new_cells)),
+             modes = res_x$modes)
     }
 }
 
 # Multi-block counterpart of `.joint_attach_pareto_k_single()`
 # (`R/nested_laplace_joint_pareto_k.R`). Same `diagnose_k = FALSE` behaviour:
-# `pareto_k` / `pareto_k_is_ess` stay NA, but `pareto_k_mode_u` / `cov_u` /
-# `axis_tags` / `axis_names` are still populated on a collapsed-edge grid via
-# the diagnose_k-independent placement path, so the
-# auto-recenter rescue engages regardless of `diagnose_k`.
+# `pareto_k` / `pareto_k_is_ess` stay NA, and the placement mode the
+# auto-recenter rescues read (`outer_mode_*`, `.joint_attach_placement()`) is
+# attached either way.
 .joint_attach_pareto_k_multi <- function(res, call_kernel,
                                          axis_offsets, B, arm_names,
                                          fn_sigma, fn_alpha, fn_phi = NULL,
@@ -1267,15 +1336,33 @@
                             hyperprior = hyperprior, declared = k_declared)
     }
 
+    # The placement mode-find at the fit's own inner settings (see
+    # `.joint_attach_pareto_k_single()`).
+    place_warm <- warm_mode
+    place_fn <- function(theta_mat) {
+        r <- .joint_with_quiet_opts(call_kernel(
+            theta_mat,
+            x_init           = place_warm,
+            phi_grid_per_arm = .joint_multi_phi_per_arm(theta_mat, arm_names),
+            n_threads_outer  = n_to,
+            x_init_per_cell  = .joint_rows_of(place_warm, nrow(theta_mat))))
+        lp <- .joint_multi_add_hp(r$log_marginal, theta_mat, axis_offsets, B,
+                                  fn_sigma, fn_alpha, fn_phi,
+                                  blocks = hp_blocks, families = hp_families,
+                                  copy_atom_mass = copy_atom_mass,
+                                  hyperprior = hyperprior, declared = k_declared)
+        if (is.matrix(r$modes)) attr(lp, "modes") <- r$modes
+        lp
+    }
+    place_set_warm <- function(mode) {
+        mode <- as.numeric(mode)
+        if (length(mode) && all(is.finite(mode))) place_warm <<- mode
+    }
+
     if (!isTRUE(diagnose_k)) {
-        # Placement-only recenter curvature: cheap (one
-        # batched FD-stencil solve, only when the grid actually collapsed on a
-        # boundary) even though the full diagnostic below never runs. `proposal`
-        # (the CCD mode-Hessian, when the CCD grid path built one) is threaded
-        # through here too -- it is available independent of `diagnose_k`.
         res <- .k_attach_declined(res, .k_decline("not_requested"))
-        return(.joint_attach_pareto_k_placement(res, solve_fn, proposal = proposal,
-                                                extra_axes = placement_axes))
+        return(.joint_attach_placement(res, place_fn, place_set_warm,
+                                       extra_axes = placement_axes))
     }
 
     # Per-cell warm start (nearest grid mode, serial + parallel) when modes are
@@ -1297,7 +1384,8 @@
     res <- .joint_attach_pareto_k_regime(res, kd)
     res <- .joint_attach_pareto_k_uncertainty(res, kd)
     res <- .joint_attach_by_arm_k(res, kd)
-    res
+    .joint_attach_placement(res, place_fn, place_set_warm,
+                            extra_axes = placement_axes)
 }
 
 # Inner-Laplace skewness diagnostic for the multi-block
@@ -1392,7 +1480,7 @@
                                   cila = NULL,
                                   inner_refresh = 1L,
                                   integration = "auto",
-                                  within_cell = .NL_WITHIN_CELL,
+                                  within_cell = NULL,
                                   local_ccd = NULL,
                                   adaptive_cutoff = 10,
                                   adaptive_stride = 2L,
@@ -1402,11 +1490,18 @@
                                   copy_slab = "exponential",
                                   placement_axes = character(0),
                                   hyperprior = "proper",
+                                  adaptive_grid = FALSE,
+                                  adaptive_grid_edge_thresh = 0.02,
+                                  adaptive_grid_max_passes = 1L,
+                                  var_of_means_consistency = TRUE,
+                                  axis_refine = NULL,
+                                  grid_auto = list(),
+                                  phi_auto = NULL,
                                   timer = NULL) {
     tm <- timer %||% .tulpa_timer()
     integration <- match.arg(integration, c("auto", "ccd", "grid",
                                              "grid_adaptive"))
-    within_cell <- match.arg(within_cell)
+    within_cell <- .nl_within_cell_mode(within_cell)
     n_arms <- length(responses)
     arms <- lapply(seq_along(responses), function(k) {
         a <- responses[[k]]
@@ -1507,6 +1602,23 @@
                 any(vapply(phi_axes, length, integer(1)) > 0L)
     hp_declared  <- .joint_multi_declared_axes(block_grids, axis_names, phi_axes)
 
+    # How far each axis may be refined follows from where its nodes came from,
+    # the rule the single-block driver applies (`.joint_axis_refine_modes_by()`):
+    # nodes the caller stated are integrated more finely over exactly that range,
+    # nodes the engine placed may be followed out past their ends.
+    # `control$axis_refine` overrides either, per axis, and is resolved before
+    # the first kernel call so a mis-named axis is refused rather than reported
+    # after the grid has been solved.
+    refine_axes <- c(as.character(axis_names),
+                     if (has_phi) paste0("phi_", names(phi_axes)[
+                         vapply(phi_axes, length, integer(1)) > 0L]))
+    axis_refine_modes <- .joint_axis_refine_modes_by(
+        refine_axes,
+        function(a) .joint_multi_axis_is_stated(
+            a, prior_list, grid_auto, copy, as.integer(cp$copy_blocks_zero) + 1L,
+            phi_grid, arm_names, phi_auto),
+        user = .joint_check_axis_refine(axis_refine, refine_axes))
+
     # Node placement for the LATENT axes. CCD integrates on a
     # central composite design around the joint hyperparameter mode; it declines
     # (-> tensor grid) for too few axes, an unguessable axis (CAR_proper rho_car
@@ -1523,6 +1635,7 @@
     integration_used      <- "grid"
     joint_grid            <- NULL
     use_adaptive          <- FALSE
+    adaptive_declined     <- FALSE
     adaptive_info         <- NULL
     # Mode-Hessian outer proposal. Set only when the CCD
     # integrator engages: its Gaussian (centre `u_hat`, scale `L_scale` from the
@@ -1552,6 +1665,7 @@
     # post-solve timing check reports does not apply to them).
     n_cells <- NA_integer_
     grid_warn_remedy <- NULL
+    grid_layout <- ""
     if (use_ccd) {
         axis_values <- latent_axis_values
 
@@ -1705,7 +1819,10 @@
                                    max_frac  = adaptive_max_frac,
                                    min_dense = adaptive_min_cells,
                                    verbose   = verbose)
-        if (!is.null(ad)) {
+        adaptive_declined <- !is.null(ad$declined)
+        if (adaptive_declined) {
+            integration_declined <- ad$declined
+        } else {
             joint_grid            <- ad$grid
             integration_used      <- "grid_adaptive"
             use_adaptive          <- TRUE
@@ -1718,22 +1835,48 @@
 
     if (!use_ccd && !use_adaptive) {
         # Cartesian product of per-block axis grids.
+        # The product over zero blocks is one cell with no latent axis, so a
+        # model whose only hyperparameters are dispersions is solved once per
+        # dispersion cell crossed on top.
         row_counts <- vapply(block_grids, nrow, integer(1))
-        idx <- do.call(expand.grid, lapply(row_counts, seq_len))
-        n_cells <- nrow(idx)
-        # The CCD is only a remedy for the cell count while it is still
-        # available. Once this fit has already declined one, advising the caller
-        # to set the option they set is noise, so the advice
-        # names the decline instead.
-        grid_warn_remedy <- if (is.na(integration_declined))
-            "Reduce per-block grid sizes or set control$integration = \"ccd\"." else
-            sprintf("Reduce per-block grid sizes; CCD integration declined (%s).",
+        idx <- if (B > 0L) do.call(expand.grid, lapply(row_counts, seq_len))
+               else data.frame(row.names = 1L)
+        # Every latent cell is solved once per dispersion cell crossed on top
+        # below, so the count the timing warning reads is the crossed one: that
+        # is the number of inner solves the fit pays.
+        phi_active <- if (has_phi) phi_axes[lengths(phi_axes) > 0L]
+        n_cells <- nrow(idx) * prod(lengths(phi_active))
+        # The CCD and the adaptive lattice are remedies for the cell count only
+        # while they are still available. Once this fit has already declined
+        # one, advising the caller to set the option they set is noise, so the
+        # advice names the decline instead. The adaptive lattice is named first:
+        # it integrates the same lattice, where the CCD is a different design.
+        alt <- c(
+            if (!adaptive_declined)
+                "\"grid_adaptive\" (the same lattice, solved where the posterior mass sits)",
+            if (adaptive_declined || is.na(integration_declined)) "\"ccd\"")
+        declined <- if (!is.na(integration_declined))
+            sprintf(if (adaptive_declined)
+                        "the adaptive lattice declined to the dense tensor (%s)"
+                    else "CCD integration declined (%s)",
                     integration_declined)
-        .nl_check_grid_cap(n_cells, .nl_max_grid_cells(), grid_warn_remedy)
+        grid_warn_remedy <- paste0(
+            if (length(phi_active)) "Reduce per-block or phi grid sizes"
+            else "Reduce per-block grid sizes",
+            if (length(alt))
+                paste0(" or set control$integration = ",
+                       paste(alt, collapse = " or ")),
+            if (length(declined))
+                paste0("; ", paste(declined, collapse = "; ")),
+            ".")
+        grid_layout <- .nl_grid_crossing(block_grids, phi_active)
+        .nl_check_grid_cap(n_cells, .nl_max_grid_cells(), grid_warn_remedy,
+                           grid_layout)
+        .nl_dense_grid_warn(n_cells, grid_warn_remedy, grid_layout)
 
-        joint_grid <- do.call(cbind, lapply(seq_along(block_grids), function(b) {
-            block_grids[[b]][idx[[b]], , drop = FALSE]
-        }))
+        joint_grid <- if (B > 0L) do.call(cbind, lapply(seq_along(block_grids),
+            function(b) block_grids[[b]][idx[[b]], , drop = FALSE]))
+            else matrix(numeric(0), nrow = 1L, ncol = 0L)
         if (ncol(joint_grid) > 0L) colnames(joint_grid) <- axis_names
     }
 
@@ -1769,7 +1912,9 @@
         .joint_announce_integration(
             integration_used, d_axes, n_latent_cells, n_phi_cells,
             nrow(joint_grid),
-            declined = ccd_requested && !identical(integration_used, "ccd"))
+            declined = if (adaptive_declined) "adaptive lattice"
+                       else if (ccd_requested && !identical(integration_used, "ccd"))
+                           "CCD")
     }
 
     # Tile partition for the three-tier warm-start.
@@ -1812,6 +1957,9 @@
                                   copy_slab, copy_atom_mass,
                                   logchol = hp_declared$logchol))
 
+    # A placement pilot's detecting grid is read off the screen alone
+    # (`.nl_pilot_control()`); the full-grid fallback below never is.
+    pilot_screen <- isTRUE(getOption("tulpa.nl_pilot_screen", FALSE))
     call_kernel_with_tol <- function(tol_prune) {
         call_kernel(
             joint_grid,
@@ -1823,7 +1971,8 @@
             tile_ids         = tile_partition$tile_ids,
             tile_pilot_cells = tile_partition$tile_pilot_cells,
             prune_tol        = tol_prune,
-            screen_log_offset = if (tol_prune > 0) screen_offset)
+            screen_log_offset = if (tol_prune > 0) screen_offset,
+            screen_only      = pilot_screen && tol_prune > 0)
     }
     tm$mark("setup")
     grid_solve_start <- proc.time()[["elapsed"]]
@@ -1837,7 +1986,7 @@
     }
     if (!is.null(grid_warn_remedy)) {
         .nl_multi_grid_warn(proc.time()[["elapsed"]] - grid_solve_start,
-                            n_cells, grid_warn_remedy)
+                            n_cells, grid_warn_remedy, grid_layout)
     }
     tm$mark("grid")
 
@@ -1928,6 +2077,67 @@
         tm$mark("grid")
     }
 
+    # Outer-grid refinement on the tensor grid, the passes the single-block
+    # driver runs (`.joint_refine_outer_grid()`): an axis whose marginal has
+    # collapsed onto too few nodes to carry a spread is bisected in the modal
+    # cell's row until it resolves, and the boundary / interior pass follows the
+    # posterior past an engine-placed axis's ends when asked for. A CCD design,
+    # the adaptive lattice and a locally refined grid are not lattices a node can
+    # be inserted into, so they keep the nodes they were laid on.
+    joint_grid_init <- joint_grid
+    refining_axis   <- NULL
+    refine_on <- !use_ccd && !use_adaptive && is.null(local_ccd_info) &&
+        (isTRUE(adaptive_grid) || isTRUE(var_of_means_consistency))
+    refine_hp_record <- function(cells)
+        .joint_multi_hyperprior(
+            cells, fn_sigma, fn_alpha, fn_phi, blocks = prepared,
+            families = hp_families, copy_atom_mass = copy_atom_mass,
+            hyperprior = hyperprior, declared = hp_declared)
+    refine_hp <- function(cells) refine_hp_record(cells)$lp
+    refine_kernel <- .joint_multi_make_kernel_fn(call_kernel, arm_names, x_init,
+                                                 store_Q,
+                                                 screen_tol = as.numeric(prune_tol),
+                                                 screen_hp = refine_hp_record)
+    grid_lm     <- res$log_marginal
+    grid_extras <- .joint_init_extras_from_res(res)
+    n_added <- 0L
+    if (refine_on) {
+        refine_specs <- .joint_multi_measure_specs(
+            joint_grid, hp_base$axes, joint_grid, axis_offsets, B,
+            fn_sigma, fn_alpha, fn_phi, copy_slab, copy_atom_mass,
+            logchol = hp_declared$logchol, axis_refine = axis_refine_modes)
+        ref <- .joint_refine_outer_grid(
+            joint_grid, grid_lm, grid_extras, refine_specs, refine_kernel,
+            refine_hp,
+            adaptive_grid = adaptive_grid,
+            edge_thresh   = adaptive_grid_edge_thresh,
+            max_passes    = adaptive_grid_max_passes,
+            consistency   = var_of_means_consistency,
+            axis_modes    = .nl_outer_mode_axes(
+                getOption("tulpa.nl_outer_mode")))
+        refining_axis <- ref$refining_axis
+        joint_grid    <- ref$theta_grid
+        grid_lm       <- ref$log_marginal
+        grid_extras   <- ref$extras
+        n_added       <- ref$n_added
+        adaptive_info <- ref$adaptive_info
+        if (isTRUE(var_of_means_consistency)) {
+            res$var_of_means_consistency_info <- ref$consistency_info
+        }
+    }
+    # A cell whose inner Newton stopped short of a mode, on any node set this
+    # driver lays, is solved again from its nearest converged neighbour's mode
+    # before the grid is read.
+    rs <- .joint_resolve_unconverged(joint_grid, grid_lm, grid_extras,
+                                     refine_kernel, refine_hp)
+    if (n_added > 0L || rs$info$n_resolved > 0L) {
+        res <- .joint_glue_extras_to_res(res, joint_grid, rs$log_marginal,
+                                          rs$extras, refining_axis)
+    }
+    res$refining_axis <- refining_axis
+    res$nonconverged_resolve <- rs$info
+    tm$mark("grid")
+
     res$theta_grid   <- joint_grid
     res$theta_names  <- colnames(joint_grid)
     res$axis_offsets <- axis_offsets
@@ -1955,9 +2165,15 @@
     integ <- .joint_multi_attach_integration(
         res, joint_grid, axis_offsets, B, prepared, hp_families,
         fn_sigma, fn_alpha, fn_phi, copy_slab, copy_atom_mass, dnode = dnode,
-        hyperprior = hyperprior, hp_declared = hp_declared)
-    res         <- integ$res
+        hyperprior = hyperprior, hp_declared = hp_declared,
+        refining = refining_axis,
+        axis_refine = if (refine_on) axis_refine_modes)
+    res         <- .nl_prune_merged_record(integ$res)
     multi_specs <- integ$specs
+    if (refine_on) {
+        res$axis_span <- .joint_axis_span(joint_grid_init, res$theta_grid,
+                                          multi_specs, refining = refining_axis)
+    }
     # The outer design weight each cell carries, kept beside the integration
     # weight it was folded into: absent on a tensor base (uniform cell weight),
     # the CCD design weights on a global CCD, the partition-of-unity shares of
@@ -2049,6 +2265,16 @@
     res$cell_coupling <- cell_coupling
     res$local_ccd_info <- local_ccd_info
     res$adaptive_grid_info <- adaptive_info
+    # Every axis's declared nodes, whatever subset of the lattice the adaptive
+    # flood, a pilot thinning or the prune screen kept: the placement mode-find
+    # searches an axis over these (`.nl_placement_mode()`).
+    phi_declared <- if (has_phi)
+        phi_axes[vapply(phi_axes, length, integer(1)) > 0L] else list()
+    res$outer_axis_nodes <- stats::setNames(
+        c(latent_axis_values,
+          lapply(phi_declared, function(v) sort(unique(as.numeric(v))))),
+        c(axis_names, if (length(phi_declared))
+            paste0("phi_", names(phi_declared))))
     tm$mark("postproc")
     # Outer Pareto-k-hat: re-evaluate the inner joint marginal at sampled
     # hyperparameters via the shared cpp-grid / phi / hyperprior helpers and
@@ -2265,9 +2491,9 @@
                                             joint_grid, cp,
                                             int_weights = NULL,
                                             support = .NL_SUPPORT_KINDS,
-                                            within = .NL_WITHIN_CELL) {
+                                            within = NULL) {
     support <- match.arg(support)
-    within  <- match.arg(within)
+    within  <- .nl_within_cell_mode(within)
     w <- res$weights
     # Joint moments across every column of joint_grid (including phi
     # columns appended for per-arm dispersion overrides).
@@ -2309,9 +2535,11 @@
         )
     }
     res$block_moments <- per_block_moments
+    # Each axis's SD from the estimator its own resolution calls for, the rule
+    # `.nl_posterior_moments()` applies on every other nested path.
+    res <- .nl_attach_axis_sd(res)
 
-    # Weighted-quantile median + 2.5/97.5 CI per axis. Generic helper
-    # filters foreign-axis slice cells per axis name. After the (sigma,
+    # Weighted-quantile median + 2.5/97.5 CI per axis. After the (sigma,
     # alpha) reparameterization, alpha is a column of joint_grid like
     # any other axis; this attaches the calibrated summary for every
     # axis, not just alpha.
@@ -2323,8 +2551,9 @@
                                      blocks = prepared))
     qs <- .nl_axis_quantiles(joint_grid, res$log_marginal,
                               res$refining_axis, weights = int_weights,
+                              log_quad = if (is.null(int_weights)) res$log_quad,
                               support = support, domains = geo$domain,
-                              within = within, atoms = geo$atom)
+                              within = within, atoms = geo$atom, sd = TRUE)
     res$theta_median <- qs$median
     res$theta_ci_lo  <- qs$ci_lo
     res$theta_ci_hi  <- qs$ci_hi

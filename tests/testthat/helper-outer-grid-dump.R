@@ -414,6 +414,16 @@ outer_grid_read_diff <- function(a, b) {
   if (!any(is.finite(ws)) || sum(ws, na.rm = TRUE) <= 0) {
     return(rep(NA_real_, length(dump$probs)))
   }
+  # The uncoarsened read takes what the engine's does: the declared levels that
+  # fix the outer edges, each cell's row and its node density. A coarsened one
+  # merges atoms across rows and has none of them.
+  dcl <- rid <- lmd <- NULL
+  if (stride == 1L) {
+    dcl <- tulpa:::.nl_axis_declared_levels(dump$joint_grid, j,
+                                            dump$refining_axis)
+    rid <- tulpa:::.nl_axis_row_id(dump$joint_grid, j)[use]
+    lmd <- as.numeric(dump$log_marginal)[use]
+  }
   ws[!is.finite(ws)] <- 0
   ws <- ws / sum(ws)
   if (stride > 1L) {
@@ -432,7 +442,7 @@ outer_grid_read_diff <- function(a, b) {
   at <- if (length(dump$axis_atoms) < j) NA_real_ else dump$axis_atoms[[j]]
   tulpa:::.nl_summary_quantile(v, ws, dump$probs, dm, dump$support,
                                dump$within %||% tulpa:::.nl_within_cell_mode(NULL),
-                               at)
+                               at, dcl, rid, lmd)
 }
 
 # Every axis at one coarsening, in the shape `outer_grid_rebuild()` returns.
@@ -549,9 +559,11 @@ ogd_fixture_sim <- function(sd_true, seed = 4242L, G = 30L, N = 600L,
 # re-targets what the recorded numbers measure when that default changes. The
 # defaults here are the engine's own, so the rules are scored against what a
 # user gets; a file whose experiment is about another read or another prior
-# passes it and says so.
+# passes it and says so. The grid is solved in full (`prune = FALSE`): a dump
+# rebuilds weight rules off every cell's log-marginal, and a screened cell has
+# none (gcol33/tulpa#925 turned the screen on by default).
 ogd_fixture_fit <- function(sim, levels, spread = 3,
-                            within_cell = "box_uniform",
+                            within_cell = "log_quadratic",
                             hyperprior = "proper") {
   prior <- lapply(seq_along(sim$grp), function(k) {
     s <- sim$sd_true[k]
@@ -566,9 +578,11 @@ ogd_fixture_fit <- function(sim, levels, spread = 3,
                               phi = sim$phi)),
     prior = prior,
     hyperprior = hyperprior,
+    # The grid is the one the caller wrote down, so a weight rule is scored on
+    # the same cells whichever hyperprior or construction it is read under.
     control = list(n_threads = 1L, diagnose_k = FALSE, max_iter = 100L,
-                   tol = 1e-8, integration = "grid",
-                   within_cell = within_cell)))
+                   tol = 1e-8, integration = "grid", prune = FALSE,
+                   within_cell = within_cell, axis_refine = "none")))
 }
 
 for (.nm in c("OGD_PROBS", "OGD_PARTS", "outer_grid_dump", "outer_grid_load",

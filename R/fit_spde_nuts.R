@@ -1,7 +1,7 @@
 #' Sample an SPDE GLM via NUTS, optionally jointly over Matern hypers
 #'
 #' @description
-#' Bayesian counterpart to [fit_spde()] / [laplace_spde_at()]. Routes the
+#' Bayesian counterpart to [fit_spde()] / `laplace_spde_at()`. Routes the
 #' SPDE-augmented GLM through tulpa's full NUTS backend via the generic
 #' `LikelihoodSpec` interface. Two modes:
 #'
@@ -80,10 +80,22 @@
 #'   path over (range, sigma).
 #'
 #' @examples
-#' \dontrun{
-#' # SPDE-field NUTS. `spatial` is an SPDE spec built from a mesh, e.g.
-#' # spatial_spde(~ x + y, df). See fit_spde() for the Laplace analogue.
-#' fit <- tulpa_nuts_spde(y, X, spatial = spatial_spde(~ x + y, df))
+#' \donttest{
+#' # Gaussian response with a smooth spatial trend, sampled at fixed
+#' # (range, sigma) on a coarse mesh.
+#' set.seed(1)
+#' n <- 60L
+#' coords <- cbind(runif(n), runif(n))
+#' x <- runif(n, -1, 1)
+#' y <- 0.5 - 0.8 * x + 0.4 * sin(3 * coords[, 1]) + rnorm(n, 0, 0.3)
+#' spec <- spatial_spde(coords, max_edge = c(0.3, 0.6), cutoff = 0.1,
+#'                      prior_range = c(0.5, 0.5), prior_sigma = c(1, 0.5))
+#' fit <- tulpa_nuts_spde(y, cbind(1, x), spatial = spec, family = "gaussian",
+#'                        range = 0.4, sigma = 0.5, log_phi_init = log(0.3),
+#'                        control = list(n_iter = 300L, n_warmup = 150L,
+#'                                       seed = 1L))
+#' colMeans(fit$draws[, c("beta[1]", "beta[2]")])
+#' fit$phi_summary
 #' }
 #' @export
 tulpa_nuts_spde <- function(y, X, spatial,
@@ -112,9 +124,8 @@ tulpa_nuts_spde <- function(y, X, spatial,
                              c("auto", "diag", "dense", "block_diag"))
   n_iter        <- as.integer(control$n_iter %||% 2000L)
   n_warmup      <- as.integer(control$n_warmup %||% 1000L)
-  if (n_iter < 2L || n_warmup < 0L || n_warmup >= n_iter) {
-    stop("Need 0 <= n_warmup < n_iter and n_iter >= 2.", call. = FALSE)
-  }
+  .check_run_length(n_iter, n_warmup, "tulpa_nuts_spde",
+                    warmup_name = "n_warmup")
   max_treedepth <- as.integer(control$max_treedepth %||% 10L)
   adapt_delta   <- control$adapt_delta %||% 0.8
   seed          <- control$seed
@@ -148,6 +159,7 @@ tulpa_nuts_spde <- function(y, X, spatial,
   if (nrow(X) != N) {
     stop("nrow(X) must equal length(y).", call. = FALSE)
   }
+  .check_spde_rows(spatial, N, "tulpa_nuts_spde()")
 
   joint <- isTRUE(joint)
 
@@ -173,18 +185,7 @@ tulpa_nuts_spde <- function(y, X, spatial,
     # from the spec. Each must be a length-2 c(value, alpha) pair.
     if (is.null(prior_range)) prior_range <- spatial$prior_range
     if (is.null(prior_sigma)) prior_sigma <- spatial$prior_sigma
-    if (!is.numeric(prior_range) || length(prior_range) != 2L ||
-        any(!is.finite(prior_range)) || prior_range[1] <= 0 ||
-        prior_range[2] <= 0 || prior_range[2] >= 1) {
-      stop("`prior_range` must be a length-2 numeric c(value, alpha) with ",
-           "value > 0 and alpha in (0, 1).", call. = FALSE)
-    }
-    if (!is.numeric(prior_sigma) || length(prior_sigma) != 2L ||
-        any(!is.finite(prior_sigma)) || prior_sigma[1] <= 0 ||
-        prior_sigma[2] <= 0 || prior_sigma[2] >= 1) {
-      stop("`prior_sigma` must be a length-2 numeric c(value, alpha) with ",
-           "value > 0 and alpha in (0, 1).", call. = FALSE)
-    }
+    .check_spde_prior_args(prior_range, prior_sigma, "tulpa_nuts_spde()")
     prior_range_0     <- prior_range[1]
     prior_range_alpha <- prior_range[2]
     prior_sigma_0     <- prior_sigma[1]

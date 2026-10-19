@@ -9,7 +9,7 @@
 # same boxes with the knots moved half a cell, which is a whole order of
 # convergence (measured 1.04 against 2.00, `dev_notes/issue353/RESULTS.md` 2.3).
 #
-# What is pinned here: that the default did not move; that the construction is
+# What is pinned here: that one setting holds the default; that the construction is
 # selectable through `control` and reported back per axis; that its boxes tile
 # the axis in the axis's OWN coordinate so a bounded axis cannot leave its
 # support; that every decline is a recorded reason and a fall back to the chord
@@ -18,81 +18,12 @@
 
 PROBS_WC <- c(0.005, 0.025, 0.1, 0.25, 0.5, 0.75, 0.9, 0.975, 0.995)
 
-# --------------------------------------------------------- the default is fixed
-
-test_that("the default construction is box-uniform, and one setting decides it", {
-  # RE-PINNED at 0.0.188 (gcol33/tulpa#357). This asserted that the default read
-  # was `chord`; the default moved on the measurement recorded in
-  # `R/settings.R`, so the assertion moves with it. What it has to keep saying is
-  # that there is ONE default and every place that names one agrees with it --
-  # `.NL_DIAG$within_cell`, the `match.arg` vocabulary and the kind's admitted
-  # set -- since three disagreeing defaults is what makes a read depend on which
-  # door it came through.
-  v <- exp(seq(log(0.2), log(1.5), length.out = 5))
-  w <- c(0.30, 0.25, 0.20, 0.15, 0.10)
-  dflt <- .nl_diag("within_cell")
-  expect_identical(dflt, "box_uniform")
-  expect_identical(.nl_within_cell_mode(NULL), dflt)
-  expect_identical(.NL_WITHIN_CELL[1L], dflt)
-  expect_true(dflt %in% .NL_SUPPORT[["density"]]$within)
-  for (sup in .NL_SUPPORT_KINDS) {
-    for (dm in c("positive", NA_character_)) {
-      # An unnamed call takes the default, and a kind that does not admit it
-      # falls back to the chord read -- which is the same number either way.
-      want <- if (dflt %in% .NL_SUPPORT[[sup]]$within) dflt else "chord"
-      expect_identical(.nl_summary_quantile(v, w, PROBS_WC, dm, sup),
-                       .nl_summary_quantile(v, w, PROBS_WC, dm, sup, want))
-    }
-  }
-  # `.nl_summary_quantile()` is `.nl_summary_quantile_read()`'s `$q` -- one
-  # dispatcher, so the vector caller and the provenance caller cannot drift.
-  r <- .nl_summary_quantile_read(v, w, PROBS_WC, "positive", "density")
-  expect_identical(r$q, .nl_summary_quantile(v, w, PROBS_WC, "positive",
-                                             "density"))
-  expect_identical(r$within, "box_uniform")
-  expect_true(is.na(r$declined))
-  # The paired assertion the flip needs: the default moved the read on the ONE
-  # kind that admits box-uniform and on nothing else, and `"chord"` is still
-  # reachable and still different there.
-  for (sup in .NL_SUPPORT_KINDS) {
-    for (dm in c("positive", NA_character_)) {
-      d <- .nl_summary_quantile(v, w, PROBS_WC, dm, sup)
-      c0 <- .nl_summary_quantile(v, w, PROBS_WC, dm, sup, "chord")
-      if (identical(sup, "density")) expect_false(isTRUE(all.equal(d, c0)))
-      else expect_identical(d, c0)
-    }
-  }
-})
-
-test_that("`.nl_cell_edges()` is unchanged by the partition extraction", {
-  # `.nl_cell_partition()` is what the box read needs: the coordinate the outer
-  # edges were mirrored in is not recoverable from the edges, because the guard
-  # falls back when a mapped edge leaves the support. `.nl_cell_edges()` is now
-  # its `$edges` and must be the same function it was.
-  cases <- list(exp(seq(log(0.2), log(1.5), length.out = 5)),
-                c(-2, 0, 2), c(0.05, 0.3, 0.6, 0.9, 0.9962, 0.99972),
-                c(-0.9, -0.2, 0.3, 0.8), c(0.5, 1.5, 2.5), 3)
-  for (v in cases) {
-    for (dm in c(NA_character_, "positive", "unit", "correlation",
-                 "unbounded")) {
-      p <- .nl_cell_partition(sort(v), dm)
-      expect_identical(.nl_cell_edges(sort(v), dm), p$edges)
-      # The reported coordinate really is the one the edges came out of.
-      if (length(v) > 1L) {
-        expect_equal(p$tr$to(p$edges),
-                     local({
-                       u <- p$tr$to(sort(v)); n <- length(u)
-                       c(u[1L] - 0.5 * (u[2L] - u[1L]),
-                         u[n] + 0.5 * (u[n] - u[n - 1L]))
-                     }))
-      }
-    }
-  }
-})
+skip_on_cran_budget()
 
 # --------------------------------------------------------------- the boxes tile
 
 test_that("the boxes tile the axis and carry the shipped masses exactly", {
+  skip_on_cran_budget()
   v <- exp(seq(log(0.2), log(1.5), length.out = 6))
   w <- c(0.05, 0.15, 0.3, 0.25, 0.15, 0.10)
   e <- .nl_box_edges(v, "positive")
@@ -114,6 +45,7 @@ test_that("the boxes tile the axis and carry the shipped masses exactly", {
 })
 
 test_that("a cumulative mass that rounds past 1 does not break the inversion", {
+  skip_on_cran_budget()
   # gcol33/tulpa#388. `cumsum(m)` can round ABOVE 1, and a grid whose trailing
   # cells hold no mass carries that same value from the last positive cell
   # onward, so forcing the LAST entry of the CDF to 1 made the vector DECREASE
@@ -152,6 +84,7 @@ test_that("a cumulative mass that rounds past 1 does not break the inversion", {
 })
 
 test_that("the partition comes from the grid, the masses from the weights", {
+  skip_on_cran_budget()
   # gcol33/tulpa#337's own rule is "keep the masses, tile the axis", and the two
   # halves come from different places. A cell whose integration weight underflows
   # to exactly 0 still SITS on the axis, and its coordinate is what fixes its
@@ -191,6 +124,7 @@ test_that("the partition comes from the grid, the masses from the weights", {
 })
 
 test_that("a bounded axis's boxes stay inside its support", {
+  skip_on_cran_budget()
   # gcol33/tulpa#361 extended `bym2_rho` to six nodes including 0.999, so a
   # `unit` axis with a node that close to its boundary is live. Mirroring or
   # bisecting such an axis in `log` -- which is what a coordinate guessed from
@@ -208,6 +142,142 @@ test_that("a bounded axis's boxes stay inside its support", {
   expect_gt(.nl_box_edges(v, NA_character_)[length(v) + 1L], 1)
   r <- c(-0.9, -0.2, 0.3, 0.8)
   expect_true(all(abs(.nl_box_edges(r, "correlation")) < 1))
+})
+
+# ------------------------------------------------------ the per-axis provenance
+
+test_that("the axis read says which construction produced each interval", {
+  skip_on_cran_budget()
+  v1 <- exp(seq(log(0.2), log(1.5), length.out = 4))
+  v2 <- c(0.5, 1.5)
+  tg <- as.matrix(expand.grid(sigma = v1, tau = v2))
+  lm <- c(0, -0.4, -3, -6, -0.2, -0.6, -3.2, -6.2)
+  qc <- .nl_axis_quantiles(tg, lm, within = "chord")
+  expect_identical(unname(qc$within), c("chord", "chord"))
+  expect_true(all(is.na(qc$within_declined)))
+  qb <- .nl_axis_quantiles(tg, lm, within = "box_uniform")
+  expect_identical(unname(qb$within), c("box_uniform", "box_uniform"))
+  expect_false(isTRUE(all.equal(unname(qb$ci_lo), unname(qc$ci_lo))))
+  # An unnamed read takes the engine default, whichever that is.
+  q0 <- .nl_axis_quantiles(tg, lm)
+  expect_identical(q0, .nl_axis_quantiles(tg, lm,
+                                          within = .nl_diag("within_cell")))
+  # A single-node axis falls back on its OWN, without taking the fit with it.
+  tg1 <- cbind(sigma = tg[, "sigma"], fixed = rep(2, nrow(tg)))
+  q1 <- .nl_axis_quantiles(tg1, lm, within = "box_uniform")
+  expect_identical(unname(q1$within), c("box_uniform", "chord"))
+  expect_identical(unname(q1$within_declined), c(NA_character_, "single_node"))
+})
+
+test_that("the per-axis resolution is reported in the axis's own coordinate", {
+  skip_on_cran_budget()
+  # `h / sd` is the regime variable for the position sensitivity a within-cell
+  # reconstruction has, so a fit reports it rather than leaving the reader with
+  # no way to tell a resolved axis from an unresolved one.
+  v <- exp(seq(log(0.2), log(1.5), length.out = 9))
+  u <- log(v)
+  # A discretized Gaussian in u, so the answer is known.
+  sd_true <- 0.35
+  lm <- -0.5 * ((u - mean(u)) / sd_true)^2
+  tg <- matrix(v, ncol = 1L, dimnames = list(NULL, "sigma"))
+  rs <- .nl_axis_resolution(tg, lm, domains = list("positive"))
+  expect_equal(unname(rs$h[["sigma"]]), diff(u)[1L])
+  expect_equal(unname(rs$sd[["sigma"]]), sd_true, tolerance = 1e-8)
+  expect_equal(unname(rs$h_over_sd[["sigma"]]), diff(u)[1L] / sd_true,
+               tolerance = 1e-8)
+  # The SD is the one `.nl_laplace_at_mode_sd_axis()` reports in that same
+  # coordinate; on a positive axis the linear-scale value is the delta map of
+  # it, and the ratio would be a different (and meaningless) number.
+  expect_false(isTRUE(all.equal(
+    unname(rs$sd[["sigma"]]),
+    .nl_laplace_at_mode_sd_axis(v, lm))))
+  # An axis whose mode sits on its own boundary has no 3-point parabola, so the
+  # ratio is withheld rather than guessed.
+  lm_rail <- seq(0, 5, length.out = 9)
+  expect_true(is.na(.nl_axis_resolution(tg, lm_rail,
+                                        domains = list("positive"))$sd[[1L]]))
+})
+
+skip_on_cran()
+
+# --------------------------------------------------------- the default is fixed
+
+test_that("the default construction is log-quadratic, and one setting decides it", {
+  skip_on_cran()
+  # The default moved on the measurements recorded in `R/settings.R`: chord to
+  # box-uniform at 0.0.188 (gcol33/tulpa#357), box-uniform to log-quadratic at
+  # gcol33/tulpa#932. What this has to keep saying is that there is ONE default
+  # and every place that could name one defers to it -- the readers' `within`
+  # arguments default to NULL and resolve through `.nl_within_cell_mode()` --
+  # since disagreeing defaults are what make a read depend on which door it
+  # came through.
+  v <- exp(seq(log(0.2), log(1.5), length.out = 5))
+  w <- c(0.30, 0.25, 0.20, 0.15, 0.10)
+  dflt <- .nl_diag("within_cell")
+  expect_identical(dflt, "log_quadratic")
+  expect_identical(.nl_within_cell_mode(NULL), dflt)
+  for (fn in list(.nl_posterior_moments, .nl_summary_quantile,
+                  .nl_summary_quantile_read, .nl_read_sd, .nl_axis_quantiles,
+                  .nl_posterior_moments_multi, .joint_posterior_moments_multi)) {
+    expect_null(formals(fn)$within)
+  }
+  expect_true(dflt %in% .NL_SUPPORT[["density"]]$within)
+  for (sup in .NL_SUPPORT_KINDS) {
+    for (dm in c("positive", NA_character_)) {
+      # An unnamed call takes the default, and a kind that does not admit it
+      # falls back to the chord read -- which is the same number either way.
+      want <- if (dflt %in% .NL_SUPPORT[[sup]]$within) dflt else "chord"
+      expect_identical(.nl_summary_quantile(v, w, PROBS_WC, dm, sup),
+                       .nl_summary_quantile(v, w, PROBS_WC, dm, sup, want))
+    }
+  }
+  # `.nl_summary_quantile()` is `.nl_summary_quantile_read()`'s `$q` -- one
+  # dispatcher, so the vector caller and the provenance caller cannot drift.
+  r <- .nl_summary_quantile_read(v, w, PROBS_WC, "positive", "density")
+  expect_identical(r$q, .nl_summary_quantile(v, w, PROBS_WC, "positive",
+                                             "density"))
+  # A quantity read without its grid rows has none to reconstruct, so the
+  # log-quadratic read declines to the boxes and says why.
+  expect_identical(r$within, "box_uniform")
+  expect_identical(r$declined, "not_a_grid_axis")
+  # The paired assertion the flip needs: the default moved the read on the ONE
+  # kind that admits box-uniform and on nothing else, and `"chord"` is still
+  # reachable and still different there.
+  for (sup in .NL_SUPPORT_KINDS) {
+    for (dm in c("positive", NA_character_)) {
+      d <- .nl_summary_quantile(v, w, PROBS_WC, dm, sup)
+      c0 <- .nl_summary_quantile(v, w, PROBS_WC, dm, sup, "chord")
+      if (identical(sup, "density")) expect_false(isTRUE(all.equal(d, c0)))
+      else expect_identical(d, c0)
+    }
+  }
+})
+
+test_that("`.nl_cell_edges()` is unchanged by the partition extraction", {
+  skip_on_cran()
+  # `.nl_cell_partition()` is what the box read needs: the coordinate the outer
+  # edges were mirrored in is not recoverable from the edges, because the guard
+  # falls back when a mapped edge leaves the support. `.nl_cell_edges()` is now
+  # its `$edges` and must be the same function it was.
+  cases <- list(exp(seq(log(0.2), log(1.5), length.out = 5)),
+                c(-2, 0, 2), c(0.05, 0.3, 0.6, 0.9, 0.9962, 0.99972),
+                c(-0.9, -0.2, 0.3, 0.8), c(0.5, 1.5, 2.5), 3)
+  for (v in cases) {
+    for (dm in c(NA_character_, "positive", "unit", "correlation",
+                 "unbounded")) {
+      p <- .nl_cell_partition(sort(v), dm)
+      expect_identical(.nl_cell_edges(sort(v), dm), p$edges)
+      # The reported coordinate really is the one the edges came out of.
+      if (length(v) > 1L) {
+        expect_equal(p$tr$to(p$edges),
+                     local({
+                       u <- p$tr$to(sort(v)); n <- length(u)
+                       c(u[1L] - 0.5 * (u[2L] - u[1L]),
+                         u[n] + 0.5 * (u[n] - u[n - 1L]))
+                     }))
+      }
+    }
+  }
 })
 
 test_that("the interior bisector is byte-identical to the sum form it replaced", {
@@ -255,6 +325,7 @@ test_that("the interior bisector is byte-identical to the sum form it replaced",
 # ------------------------------------------------------ declines, never errors
 
 test_that("every decline records a reason and falls back to the chord read", {
+  skip_on_cran()
   v <- exp(seq(log(0.2), log(1.5), length.out = 5))
   w <- c(0.30, 0.25, 0.20, 0.15, 0.10)
   # A support whose node set is not a tiling partition declines by NAME, so a
@@ -348,58 +419,6 @@ test_that("every decline records a reason and falls back to the chord read", {
   expect_error(.nl_within_cell_mode("uniform"))
 })
 
-# ------------------------------------------------------ the per-axis provenance
-
-test_that("the axis read says which construction produced each interval", {
-  v1 <- exp(seq(log(0.2), log(1.5), length.out = 4))
-  v2 <- c(0.5, 1.5)
-  tg <- as.matrix(expand.grid(sigma = v1, tau = v2))
-  lm <- c(0, -0.4, -3, -6, -0.2, -0.6, -3.2, -6.2)
-  qc <- .nl_axis_quantiles(tg, lm, within = "chord")
-  expect_identical(unname(qc$within), c("chord", "chord"))
-  expect_true(all(is.na(qc$within_declined)))
-  qb <- .nl_axis_quantiles(tg, lm, within = "box_uniform")
-  expect_identical(unname(qb$within), c("box_uniform", "box_uniform"))
-  expect_false(isTRUE(all.equal(unname(qb$ci_lo), unname(qc$ci_lo))))
-  # An unnamed read takes the engine default, whichever that is.
-  q0 <- .nl_axis_quantiles(tg, lm)
-  expect_identical(unname(q0$within),
-                   rep(.nl_diag("within_cell"), 2L))
-  # A single-node axis falls back on its OWN, without taking the fit with it.
-  tg1 <- cbind(sigma = tg[, "sigma"], fixed = rep(2, nrow(tg)))
-  q1 <- .nl_axis_quantiles(tg1, lm, within = "box_uniform")
-  expect_identical(unname(q1$within), c("box_uniform", "chord"))
-  expect_identical(unname(q1$within_declined), c(NA_character_, "single_node"))
-})
-
-test_that("the per-axis resolution is reported in the axis's own coordinate", {
-  # `h / sd` is the regime variable for the position sensitivity a within-cell
-  # reconstruction has, so a fit reports it rather than leaving the reader with
-  # no way to tell a resolved axis from an unresolved one.
-  v <- exp(seq(log(0.2), log(1.5), length.out = 9))
-  u <- log(v)
-  # A discretized Gaussian in u, so the answer is known.
-  sd_true <- 0.35
-  lm <- -0.5 * ((u - mean(u)) / sd_true)^2
-  tg <- matrix(v, ncol = 1L, dimnames = list(NULL, "sigma"))
-  rs <- .nl_axis_resolution(tg, lm, domains = list("positive"))
-  expect_equal(unname(rs$h[["sigma"]]), diff(u)[1L])
-  expect_equal(unname(rs$sd[["sigma"]]), sd_true, tolerance = 1e-8)
-  expect_equal(unname(rs$h_over_sd[["sigma"]]), diff(u)[1L] / sd_true,
-               tolerance = 1e-8)
-  # The SD is the one `.nl_laplace_at_mode_sd_axis()` reports in that same
-  # coordinate; on a positive axis the linear-scale value is the delta map of
-  # it, and the ratio would be a different (and meaningless) number.
-  expect_false(isTRUE(all.equal(
-    unname(rs$sd[["sigma"]]),
-    .nl_laplace_at_mode_sd_axis(v, lm))))
-  # An axis whose mode sits on its own boundary has no 3-point parabola, so the
-  # ratio is withheld rather than guessed.
-  lm_rail <- seq(0, 5, length.out = 9)
-  expect_true(is.na(.nl_axis_resolution(tg, lm_rail,
-                                        domains = list("positive"))$sd[[1L]]))
-})
-
 # ----------------------------------------------------------- through a real fit
 
 test_that("a fit selects the construction, reports it, and stays byte-identical by default", {
@@ -412,9 +431,11 @@ test_that("a fit selects the construction, reports it, and stays byte-identical 
   y <- as.numeric(X %*% c(-0.2, 0.7)) + rnorm(G, 0, 0.7)[g] +
        rnorm(N, 0, sqrt(0.5))
   sg <- exp(seq(log(0.2), log(1.5), length.out = 9L))
+  # The read is rebuilt below from the nine nodes written down, so no node is
+  # added to the axis.
   ctrl <- list(max_iter = 100L, tol = 1e-8, n_threads = 1L, diagnose_k = FALSE,
                diagnose_skew = FALSE, integration = "grid", local_ccd = NULL,
-               auto_recenter = FALSE)
+               auto_recenter = FALSE, axis_refine = "none")
   fit <- function(wc) suppressWarnings(tulpa_nested_laplace_joint(
     responses = list(a = list(y = y, n_trials = rep(1L, N), X = X,
                               family = "gaussian", phi = 0.5)),
@@ -425,21 +446,21 @@ test_that("a fit selects the construction, reports it, and stays byte-identical 
   f0 <- fit(NULL)
   fc <- fit("chord")
   fb <- fit("box_uniform")
+  fl <- fit("log_quadratic")
 
-  # Asking for the default explicitly changes nothing. RE-PINNED at 0.0.188:
-  # the default is `box_uniform` (gcol33/tulpa#357), so the arm `f0` matches is
-  # `fb`, and `fc` is the alternative that must still be reachable and still
-  # differ.
-  expect_identical(f0$theta_median, fb$theta_median)
-  expect_identical(f0$theta_ci_lo, fb$theta_ci_lo)
-  expect_identical(f0$theta_ci_hi, fb$theta_ci_hi)
-  expect_false(isTRUE(all.equal(unname(f0$theta_ci_lo),
+  # Asking for the default explicitly changes nothing. The default is
+  # `log_quadratic` (gcol33/tulpa#932), so the arm `f0` matches is `fl`; `fb`
+  # and `fc` are the alternatives that must still be reachable.
+  expect_identical(f0$theta_median, fl$theta_median)
+  expect_identical(f0$theta_ci_lo, fl$theta_ci_lo)
+  expect_identical(f0$theta_ci_hi, fl$theta_ci_hi)
+  expect_false(isTRUE(all.equal(unname(fb$theta_ci_lo),
                                 unname(fc$theta_ci_lo))))
   # The construction is reported, and every path stamps the node-set kind now,
   # not only the multi-block driver (gcol33/tulpa#357).
-  expect_identical(f0$within_cell_requested, "box_uniform")
+  expect_identical(f0$within_cell_requested, "log_quadratic")
   expect_identical(fc$within_cell_requested, "chord")
-  expect_identical(unname(f0$theta_within_cell), "box_uniform")
+  expect_identical(f0$theta_within_cell, fl$theta_within_cell)
   expect_identical(unname(fb$theta_within_cell), "box_uniform")
   expect_identical(unname(fc$theta_within_cell), "chord")
   expect_identical(f0$theta_interval_read, "density")
@@ -470,13 +491,12 @@ test_that("a fit selects the construction, reports it, and stays byte-identical 
                ref, tolerance = 1e-12)
 
   # `diagnostics()` reads the construction back and says what it means. The
-  # note fires on a read that is NOT the engine default, so at 0.0.188 it is the
-  # `chord` fit that carries one and the `box_uniform` fit that does not
-  # (gcol33/tulpa#357) -- naming the default as a literal in the note is what
-  # made it say "rather than the default 'chord'" on a fit read with the
-  # default.
-  d <- diagnostics(fb)
-  expect_identical(attr(d, "within_cell_requested"), "box_uniform")
+  # note fires on a read that is NOT the engine default, so it is the `chord`
+  # fit that carries one and the default fit that does not (gcol33/tulpa#357)
+  # -- naming the default as a literal in the note is what made it say "rather
+  # than the default 'chord'" on a fit read with the default.
+  d <- diagnostics(f0)
+  expect_identical(attr(d, "within_cell_requested"), "log_quadratic")
   expect_identical(attr(d, "interval_read"), "density")
   expect_false(any(grepl("within-cell", attr(d, "interval_read_note"))))
   dc <- diagnostics(fc)

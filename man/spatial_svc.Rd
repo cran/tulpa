@@ -2,6 +2,7 @@
 % Please edit documentation in R/spatial_svc.R
 \name{spatial_svc}
 \alias{spatial_svc}
+\alias{print.tulpa_svc}
 \title{Spatially varying coefficient structure}
 \usage{
 spatial_svc(
@@ -16,6 +17,8 @@ spatial_svc(
   c_boundary = 1.5,
   parameterization = c("noncentered", "centered")
 )
+
+\method{print}{tulpa_svc}(x, ...)
 }
 \arguments{
 \item{coords}{A formula (\code{~ lon + lat}) or character vector of length 2
@@ -35,7 +38,8 @@ multi-process model. \code{NULL} (default) shares it; \code{FALSE} fits
 process-specific effects and emits a warning.}
 
 \item{scale_coords}{Logical. Standardize coordinates before fitting
-(default \code{TRUE}).}
+(default \code{TRUE}), by one common factor as in \code{\link[=spatial_gp]{spatial_gp()}}. Ranges and
+the coordinates \code{\link[=svc]{svc()}} reports are in the original units either way.}
 
 \item{approx}{Spatial approximation. \code{"nngp"} (nearest-neighbour GP) or
 \code{"hsgp"} (Hilbert-space GP).}
@@ -55,6 +59,10 @@ amplitude when it is weakly identified. \code{"centered"} places the NNGP
 density on each term's field directly; it is marginally cheaper on a
 well-identified response, but on a weakly identified one it recovers only
 about a third of the field's spread.}
+
+\item{x}{A \code{tulpa_svc} specification.}
+
+\item{...}{Ignored.}
 }
 \value{
 A \code{tulpa_svc} object (also of class \code{tulpa_spatial}).

@@ -88,7 +88,7 @@ pp_check.tulpa_fit <- function(object, type = c("dens_overlay", "scatter", "inte
 
 #' Single component pp_check
 #'
-#' @keywords internal
+#' @noRd
 pp_check_single <- function(y, yrep, type, stat, ndraws, title_suffix, ...) {
 
   # Subsample draws for visualization
@@ -175,9 +175,11 @@ prior_predict <- function(formula, family, data,
   process_names <- family$process_names
   n_processes <- length(process_names)
   formulas <- normalize_formulas(formula, process_names)
+  data <- .fill_absent_response(formulas, data)
 
   parsed <- lapply(formulas, tulpa_parse_formula)
   built  <- lapply(parsed, tulpa_build_model_data, data = data)
+  for (b in built) .assert_complete_groups(b$re_terms, where = "prior_predict")
   n_obs <- built[[1]]$n_obs
 
   y_list      <- vector("list", n_draws)
@@ -208,12 +210,8 @@ prior_predict <- function(formula, family, data,
 }
 
 
-#' Print method for tulpa_prior_predict
-#'
-#' @param x A tulpa_prior_predict object
-#' @param ... Ignored
-#' @return The input `x`, returned invisibly. Called for the side effect of
-#'   printing a summary of the prior predictive draws to the console.
+#' @rdname prior_predict
+#' @param x A `tulpa_prior_predict` object.
 #' @export
 print.tulpa_prior_predict <- function(x, ...) {
   .print_draws_summary(x, "tulpa prior predictive draws", "Draws:     ", x$n_draws)

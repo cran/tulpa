@@ -91,15 +91,15 @@
 # format tulpa_nested_laplace_joint() consumes: one block per design column,
 # carrying the per-arm temporal_idx and (for non-intercept columns) the per-arm
 # svc_weight (the temporally varying slope). The time-index column is mapped to
-# 1..n_times by its sorted unique levels, matching the TVC convention.
+# 1..n_times in time order by `.resolve_time_index()`, the resolver the TVC and
+# `temporal =` doors share.
 .temporal_field_blocks <- function(spec, data) {
   tvals <- data[[spec$group_var]]
   if (is.null(tvals)) {
     stop("temporal() time-index column '", spec$group_var,
          "' was not found in the data.", call. = FALSE)
   }
-  levels_t <- sort(unique(tvals))
-  tfac <- factor(tvals, levels = levels_t)
+  tfac <- .resolve_time_index(tvals, spec$group_var)
   idx <- as.integer(tfac)
   n_times <- nlevels(tfac)
   struct <- spec$structure
@@ -135,12 +135,7 @@
 .tulpa_fit_temporal_field <- function(parsed, bundle, data, family, mode, phi,
                                       sigma_re, n_trials, control, formula,
                                       call = NULL) {
-  mode_lc <- tolower(mode %||% "auto")
-  if (!mode_lc %in% c("auto", "laplace", "nested_laplace")) {
-    stop("Inline temporal() varying-coefficient fields are fit by nested ",
-         "Laplace; `mode` must be 'auto' or 'laplace' (got '", mode, "').",
-         call. = FALSE)
-  }
+  .bar_field_check_mode(mode, "temporal")
   if (!is.null(parsed$temporal_var)) {
     stop("Cannot combine an inline temporal(formula = ) field with a ",
          "temporal(col) term. Use one or the other.", call. = FALSE)
@@ -179,6 +174,7 @@
 }
 
 
+#' @rdname temporal
 #' @export
 print.tulpa_temporal_field_fit <- function(x, ...) {
   cat("tulpa fit: inline temporal() varying-coefficient field(s)\n")
@@ -204,6 +200,9 @@ print.tulpa_temporal_field_fit <- function(x, ...) {
 }
 
 
+#' @rdname temporal
+#' @param x A `temporal()` field specification, the fit `tulpa()` returns for
+#'   one, a `tulpa_temporal_posterior` or a `tulpa_temporal_summary`.
 #' @export
 print.tulpa_temporal_field <- function(x, ...) {
   cat("tulpa temporal varying-coefficient field\n")

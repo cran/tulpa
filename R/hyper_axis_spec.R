@@ -119,6 +119,12 @@
 #'
 #' @seealso [tulpa_hyper_grid()].
 #' @keywords internal
+#' @examples
+#' hyper_axis_spec("sigma", grid = c(0.5, 1, 2), log_scale = TRUE,
+#'                 bounds = c(0, Inf))
+#' # A zero level on a log-scale axis is a point mass with a declared share:
+#' hyper_axis_spec("alpha", grid = c(0, 0.5, 1), log_scale = TRUE,
+#'                 bounds = c(0, Inf), atom_mass = 0.5)
 #' @export
 hyper_axis_spec <- function(name, grid, log_prior = NULL,
                             log_scale = FALSE, bounds = NULL,
@@ -170,6 +176,14 @@ hyper_axis_spec <- function(name, grid, log_prior = NULL,
       stop(sprintf("Axis '%s': `atom_mass` must be a single value in [0, 1).",
                    name), call. = FALSE)
     }
+  } else if (log_scale && any(grid == 0)) {
+    # The zero level is a point mass whose prior share has to be declared; left
+    # undeclared the spec was accepted here and refused only when an integrator
+    # first weighed the axis (#896).
+    stop(sprintf(paste0(
+      "Axis '%s': `grid` carries a zero level on a `log_scale` axis, which is ",
+      "a point mass rather than part of the log continuum; declare its prior ",
+      "probability with `atom_mass`."), name), call. = FALSE)
   }
   if (!is.null(slab_bounds)) {
     slab_bounds <- as.numeric(slab_bounds)
@@ -193,6 +207,33 @@ hyper_axis_spec <- function(name, grid, log_prior = NULL,
   )
   class(out) <- c("tulpa_hyper_axis_spec", "list")
   out
+}
+
+#' @rdname hyper_axis_spec
+#' @param x A `tulpa_hyper_axis_spec`.
+#' @param ... Ignored.
+#' @export
+print.tulpa_hyper_axis_spec <- function(x, ...) {
+  g <- x$grid
+  cat("Hyperparameter axis '", x$name, "': ", length(g),
+      if (length(g) == 1L) " level" else " levels", sep = "")
+  if (length(g)) {
+    cat(" in [", format(min(g), digits = 4), ", ", format(max(g), digits = 4),
+        "]", sep = "")
+  }
+  cat(if (isTRUE(x$log_scale)) ", log scale\n" else ", linear scale\n")
+  if (!is.null(x$atom_mass)) {
+    cat("  point mass at 0: ", format(x$atom_mass, digits = 3), "\n", sep = "")
+  }
+  if (!is.null(x$bounds)) {
+    cat("  support: (", format(x$bounds[1L], digits = 4), ", ",
+        format(x$bounds[2L], digits = 4), ")\n", sep = "")
+  }
+  cat("  prior: ", if (is.null(x$log_prior)) "flat" else
+    paste0("supplied, density on the ", x$log_prior_coord, " coordinate"),
+    "\n", sep = "")
+  if (isTRUE(x$refinable)) cat("  refinable\n")
+  invisible(x)
 }
 
 # Normalise a list of axis specs to a list-of-tulpa_hyper_axis_spec.

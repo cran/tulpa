@@ -22,6 +22,23 @@
        n_neighbors = as.integer(nn))
 }
 
+skip_on_cran_budget()
+
+test_that("fit_spde accepts the screening knobs its entry can now reach", {
+  skip_on_cran_budget()
+  keys <- tulpa:::.CONTROL_KEYS$spde
+  for (k in c("prune", "prune_tol", "prune_log_gap", "screen_iters",
+              "fitted_var", "subspace_debias", "cila")) {
+    expect_true(k %in% keys, info = k)
+  }
+  # And they are resolved the way tulpa_nested_laplace() resolves them, not
+  # re-invented: an out-of-range tolerance is refused at the door.
+  expect_error(tulpa:::.nl_check_prune_tol(1.5))
+  expect_error(tulpa:::.nl_check_screen_iters(0L))
+})
+
+skip_on_cran()
+
 test_that("the spec and joint entry families agree on log_marginal", {
   skip_on_cran()
   set.seed(11)
@@ -59,7 +76,7 @@ test_that("the spec and joint entry families agree on log_marginal", {
     hyperprior = "flat",
     control = list(diagnose_k = FALSE, diagnose_skew = FALSE))
 
-  expect_true(all(is.finite(spec$log_marginal)))
+  expect_cells_solved(spec)
   # Exactly, cell for cell: the joint path used to be offset by the density and
   # normalizer of the weak default beta prior at its own mode.
   expect_equal(joint$log_marginal, spec$log_marginal, tolerance = 1e-10)
@@ -87,16 +104,4 @@ test_that("every nested-Laplace grid entry takes the shared control knobs", {
       expect_true(k %in% fm, info = paste(e, "is missing", k))
     }
   }
-})
-
-test_that("fit_spde accepts the screening knobs its entry can now reach", {
-  keys <- tulpa:::.CONTROL_KEYS$spde
-  for (k in c("prune", "prune_tol", "prune_log_gap", "screen_iters",
-              "fitted_var", "subspace_debias", "cila")) {
-    expect_true(k %in% keys, info = k)
-  }
-  # And they are resolved the way tulpa_nested_laplace() resolves them, not
-  # re-invented: an out-of-range tolerance is refused at the door.
-  expect_error(tulpa:::.nl_check_prune_tol(1.5))
-  expect_error(tulpa:::.nl_check_screen_iters(0L))
 })

@@ -1,29 +1,3 @@
-# What the estimation-level accessors read, and in which layout they report it:
-# interval column labels (gcol33/tulpa#756), one posterior read per fit
-# (gcol33/tulpa#752), a declined logLik() never an unexplained NA
-# (gcol33/tulpa#750), and a named `means` on every producer (gcol33/tulpa#758).
-
-test_that("interval columns are labelled as stats::confint.default labels them", {
-  for (level in c(0.95, 0.90, 0.80, 0.5, 0.99, 0.999)) {
-    ref <- colnames(stats::confint(stats::lm(dist ~ speed, data = cars),
-                                   level = level))
-    expect_identical(tulpa:::.interval_colnames(level), ref, info = level)
-  }
-})
-
-test_that("confint() and summary() carry those labels on a fit", {
-  skip_on_cran()
-  set.seed(1)
-  d <- data.frame(x = rnorm(120))
-  d$y <- rpois(120, exp(0.3 + 0.4 * d$x))
-  fit <- tulpa(y ~ x, data = d, family = "poisson", mode = "laplace")
-  expect_identical(colnames(confint(fit)), c("2.5 %", "97.5 %"))
-  expect_identical(names(summary(fit))[3:4], c("2.5 %", "97.5 %"))
-  expect_identical(colnames(confint(fit, level = 0.9)), c("5 %", "95 %"))
-  expect_identical(names(summary(fit, level = 0.9))[3:4], c("5 %", "95 %"))
-  expect_equal(unname(as.matrix(summary(fit)[, 3:4])), unname(confint(fit)),
-               tolerance = 0)
-})
 
 # A fit reporting a closed-form Gaussian: every coefficient accessor reads that
 # Gaussian, and none of them reads the draws sampled from it.
@@ -35,7 +9,7 @@ expect_gaussian_read <- function(fit, level = 0.9) {
   expect_identical(fit$reported_posterior, "gaussian")
   expect_equal(coef(fit), m, tolerance = 0)
   expect_equal(vcov(fit), V, tolerance = 0)
-  s <- summary(fit, level = level)
+  s <- coef(summary(fit, level = level))
   expect_equal(s$estimate, unname(m), tolerance = 0)
   expect_equal(s$std.error, unname(se), tolerance = 1e-12)
   ci <- confint(fit, level = level)
@@ -49,6 +23,69 @@ expect_gaussian_read <- function(fit, level = 0.9) {
   expect_false(isTRUE(all.equal(unname(colMeans(fit$draws)), unname(m),
                                 tolerance = 0)))
 }
+
+test_that("naming leaves a named or differently sized means as it is", {
+  named <- list(param_names = c("a", "b"), means = c(u = 1, v = 2))
+  expect_identical(names(tulpa:::.name_means_by_parameter(named)$means),
+                   c("u", "v"))
+  short <- list(param_names = c("a", "b", "c"), means = c(1, 2))
+  expect_null(names(tulpa:::.name_means_by_parameter(short)$means))
+  bare <- list(param_names = c("a", "b"), means = c(1, 2))
+  expect_identical(names(tulpa:::.name_means_by_parameter(bare)$means),
+                   c("a", "b"))
+})
+
+skip_on_cran_budget()
+# What the estimation-level accessors read, and in which layout they report it:
+# interval column labels (gcol33/tulpa#756), one posterior read per fit
+# (gcol33/tulpa#752), a declined logLik() never an unexplained NA
+# (gcol33/tulpa#750), and a named `means` on every producer (gcol33/tulpa#758).
+
+test_that("interval columns are labelled as stats::confint.default labels them", {
+  skip_on_cran_budget()
+  for (level in c(0.95, 0.90, 0.80, 0.5, 0.99, 0.999)) {
+    ref <- colnames(stats::confint(stats::lm(dist ~ speed, data = cars),
+                                   level = level))
+    expect_identical(tulpa:::.interval_colnames(level), ref, info = level)
+  }
+})
+
+test_that("a draw-based fit with no per-draw log posterior declines by name", {
+  skip_on_cran_budget()
+  fit <- structure(list(draws = matrix(rnorm(40), 20, 2), n_fixed = 2L,
+                        N = 50L, backend = "ess"),
+                   class = "tulpa_fit")
+  ll <- logLik(fit)
+  expect_true(is.na(ll))
+  expect_identical(attr(ll, "quantity"), "log_posterior_mean")
+  expect_identical(attr(ll, "declined"), "no_log_posterior_recorded")
+  expect_error(stats::AIC(fit), "is a log posterior mean")
+
+  bare <- structure(list(N = 50L), class = "tulpa_fit")
+  lb <- logLik(bare)
+  expect_true(is.na(lb))
+  expect_identical(attr(lb, "declined"), "no_goodness_quantity_recorded")
+  expect_error(stats::AIC(bare), "reports no quantity \\(declined: no_goodness_quantity_recorded\\)")
+  expect_no_match(tryCatch(stats::AIC(bare), error = conditionMessage), "\\bNA\\b")
+
+  expect_error(tulpa:::.loglik_decline("not_a_reason"))
+})
+
+skip_on_cran()
+
+test_that("confint() and summary() carry those labels on a fit", {
+  skip_on_cran()
+  set.seed(1)
+  d <- data.frame(x = rnorm(120))
+  d$y <- rpois(120, exp(0.3 + 0.4 * d$x))
+  fit <- tulpa(y ~ x, data = d, family = "poisson", mode = "laplace")
+  expect_identical(colnames(confint(fit)), c("2.5 %", "97.5 %"))
+  expect_identical(names(coef(summary(fit)))[3:4], c("2.5 %", "97.5 %"))
+  expect_identical(colnames(confint(fit, level = 0.9)), c("5 %", "95 %"))
+  expect_identical(names(coef(summary(fit, level = 0.9)))[3:4], c("5 %", "95 %"))
+  expect_equal(unname(as.matrix(coef(summary(fit))[, 3:4])), unname(confint(fit)),
+               tolerance = 0)
+})
 
 test_that("an EP fit reports its EP Gaussian through every accessor", {
   skip_on_cran()
@@ -83,32 +120,12 @@ test_that("an ordinal fit reads its draws once: coef() is summary() less the cut
                       integer(1)))
   fit <- tulpa_ordinal(y ~ x, data = data.frame(y = y, x = x),
                        control = list(seed = 1L))
-  s <- summary(fit)
+  s <- coef(summary(fit))
   expect_identical(names(coef(fit)), "x")
   expect_equal(unname(coef(fit)), s["x", "estimate"], tolerance = 0)
   expect_identical(rownames(vcov(fit)), rownames(s))
   expect_equal(s$std.error, unname(sqrt(diag(vcov(fit)))), tolerance = 1e-12)
   expect_equal(unname(coef(fit)), unname(colMeans(fit$draws)[1]), tolerance = 0)
-})
-
-test_that("a draw-based fit with no per-draw log posterior declines by name", {
-  fit <- structure(list(draws = matrix(rnorm(40), 20, 2), n_fixed = 2L,
-                        N = 50L, backend = "ess"),
-                   class = "tulpa_fit")
-  ll <- logLik(fit)
-  expect_true(is.na(ll))
-  expect_identical(attr(ll, "quantity"), "log_posterior_mean")
-  expect_identical(attr(ll, "declined"), "no_log_posterior_recorded")
-  expect_error(stats::AIC(fit), "is a log posterior mean")
-
-  bare <- structure(list(N = 50L), class = "tulpa_fit")
-  lb <- logLik(bare)
-  expect_true(is.na(lb))
-  expect_identical(attr(lb, "declined"), "no_goodness_quantity_recorded")
-  expect_error(stats::AIC(bare), "reports no quantity \\(declined: no_goodness_quantity_recorded\\)")
-  expect_no_match(tryCatch(stats::AIC(bare), error = conditionMessage), "\\bNA\\b")
-
-  expect_error(tulpa:::.loglik_decline("not_a_reason"))
 })
 
 test_that("the default poisson random-intercept route and the VI kernel report a log posterior mean", {
@@ -176,7 +193,7 @@ test_that("a sampler fit with random effects and zero inflation reads beta_zi wh
                unname(colMeans(fit$draws[, ct_cols, drop = FALSE])), tolerance = 0)
   fd <- fit$draws[, c(ct_cols, zi_cols), drop = FALSE]
   expect_equal(unname(vcov(fit)), unname(stats::cov(fd)), tolerance = 1e-12)
-  expect_equal(summary(fit)$std.error, unname(apply(fd, 2, stats::sd)),
+  expect_equal(coef(summary(fit))$std.error, unname(apply(fd, 2, stats::sd)),
                tolerance = 1e-12)
   expect_equal(tidy(fit)$estimate, unname(colMeans(fd)), tolerance = 0)
 
@@ -199,15 +216,4 @@ test_that("a sampler fit with random effects and zero inflation reads beta_zi wh
   ed <- tulpa:::.tulpa_eta_draws(fit, newdata = d)
   mu <- colMeans((1 - plogis(attr(ed, "logit_zi"))) * exp(ed))
   expect_lt(max(abs(fitted(fit) / mu - 1)), 0.1)
-})
-
-test_that("naming leaves a named or differently sized means as it is", {
-  named <- list(param_names = c("a", "b"), means = c(u = 1, v = 2))
-  expect_identical(names(tulpa:::.name_means_by_parameter(named)$means),
-                   c("u", "v"))
-  short <- list(param_names = c("a", "b", "c"), means = c(1, 2))
-  expect_null(names(tulpa:::.name_means_by_parameter(short)$means))
-  bare <- list(param_names = c("a", "b"), means = c(1, 2))
-  expect_identical(names(tulpa:::.name_means_by_parameter(bare)$means),
-                   c("a", "b"))
 })

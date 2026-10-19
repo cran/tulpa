@@ -34,6 +34,9 @@ struct LaplaceResult {
   double log_marginal = -std::numeric_limits<double>::infinity();
   int n_iter = 0;                   // Newton iterations used
   bool converged = false;           // Convergence flag
+  // Whether the factor left live for back-solves is the CHOLMOD one in the
+  // caller's solver (true) or the dense one in its scratch (false).
+  bool sparse_factor_live = false;
 
   // Achieved residual: max_j |d(log p(y|x,theta) + log p(x|theta))/dx_j| at the
   // reported mode. The solve's convergence flag says the STOPPING RULE was met;
@@ -47,6 +50,22 @@ struct LaplaceResult {
   // Every driver re-scatters grad at the returned mode for the log-determinant,
   // so this is read off that pass at no extra cost.
   double score_max = 0.0;
+
+  // Newton decrement at the returned point, g' H^-1 g on the matrix a Newton
+  // step there would solve with. Half of it is what one more step would add to
+  // the log joint to second order, so a solve stopped short of its mode reports
+  // how far short. The cheap-pass screen reads it: a truncated solve's
+  // log-marginal is lowest exactly where the inner mode moved most from its warm
+  // start, and ranking cells on that value alone pruned the outer mode of the
+  // full 25 km occu_cover fit, whose cells take ~250 inner iterations
+  // (gcol33/tulpa#919). NaN where the final pass had no PD factor to solve with.
+  double newton_decrement = std::numeric_limits<double>::quiet_NaN();
+
+  // The log-joint gain that step actually delivers (newton_step_gain). The
+  // screen credits a truncated solve with the smaller of this and half the
+  // decrement, since the quadratic prediction is unbounded away from the mode.
+  // NaN where no step was formed or its trial point is not finite.
+  double newton_step_gain = std::numeric_limits<double>::quiet_NaN();
 
   // Whether the Hessian at the returned point is the positive-definite matrix
   // the Laplace expansion needs. False where the final factorization had to
@@ -71,8 +90,8 @@ struct LaplaceResult {
   bool pd_conditioned = false;
 
   // The sum-to-zero log-determinant fell back. On that path the reported
-  // -0.5 log|B| is read from a direct factor of B = H + sum_k coef_k 1_k 1_k',
-  // the pinned matrix; where that factor cannot be formed both readers keep the
+  // -0.5 log|B| is read from the block-Schur factor of B = H + sum_k coef_k
+  // 1_k 1_k', the pinned matrix; where B is not PD both readers keep the
   // PD-enforced log-determinant instead, which is a real determinant of
   // H + lambda I after the LM escalation ladder and not of B. The escalation is
   // the normal case on this path rather than the exception, so the two are not
@@ -80,6 +99,13 @@ struct LaplaceResult {
   // back is reweighted against its neighbours. True where that happened, so the
   // count is reportable instead of the substitution being silent.
   bool s2z_log_det_fallback = false;
+
+  // The field block of the pinned matrix was not PD at the final pass, so the
+  // block-Schur factor read B through an LDL' factor of that block and its
+  // inertia. Where B itself is PD the value is exact either way; where it is
+  // not, s2z_log_det_fallback is set too. True where that happened, so the
+  // count is reportable.
+  bool s2z_field_indefinite = false;
 
   // The solve never started: the penalized objective was non-finite at the
   // supplied latent start and the feasibility sweep (make_start_feasible) found

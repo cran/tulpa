@@ -5,6 +5,8 @@
 # declined to pareto_k = NA even though an explicit-grid fit on the same axis
 # produced a real k-hat.
 
+skip_on_cran()
+
 rook_pk <- function(nr, nc) {
   n <- nr * nc; W <- matrix(0, n, n); id <- function(r, c) (c - 1) * nr + r
   for (r in seq_len(nr)) for (c in seq_len(nc)) {
@@ -23,7 +25,7 @@ test_that("default-grid single-block Pareto-k is computed, not declined (#203)",
   x <- rnorm(N); ntr <- rep(3L, N)
   y <- rbinom(N, ntr, plogis(-0.3 + 0.6 * x))
   X <- cbind(1, x)
-  idx <- tulpa:::.resolve_unit_index(factor(unit), "region", S)
+  idx <- tulpa:::.resolve_spatial_idx(factor(unit), S, W, "region")
   csr <- tulpa:::adjacency_to_csr_tulpa(W)
   base <- list(type = "icar", spatial_idx = idx, n_spatial_units = S,
                adj_row_ptr = csr$row_ptr, adj_col_idx = csr$col_idx,

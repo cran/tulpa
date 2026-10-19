@@ -23,12 +23,15 @@
 # NULL to DECLINE CCD when any axis has unguessable support (CAR_proper's
 # rho_car, a non-BYM2 rho) -- the caller then falls back to the tensor grid.
 # Does the CCD engage at this transformable-axis count for this integration
-# mode? "grid" never engages; "ccd" lowers the threshold to
-# >= 3 axes (explicit opt-in); "auto" (the default) engages only at >= 4 axes,
-# where the tensor product's k^d blow-up bites hardest, and keeps the cheaper,
-# more ridge-robust tensor grid at <= 3 axes.
+# mode? "ccd" lowers the threshold to >= 3 axes (explicit opt-in); "auto" (the
+# default) engages only at >= 4 axes, where the tensor product's k^d blow-up
+# bites hardest, and keeps the cheaper, more ridge-robust tensor grid at <= 3
+# axes. "grid" and "grid_adaptive" never engage: both name the tensor lattice,
+# the full one or its mass-carrying subset, and a CCD is a different design
+# (gcol33/tulpa#914).
 .joint_ccd_engage <- function(integration, d_axes) {
-    if (identical(integration, "grid")) return(FALSE)
+    integration <- integration %||% "auto"
+    if (!integration %in% c("auto", "ccd")) return(FALSE)
     min_axes <- if (identical(integration, "ccd")) 3L else 4L
     d_axes >= min_axes
 }
@@ -186,13 +189,17 @@
 # The running meter: one per `.joint_ccd_grid()` call, shared by every mixture
 # component, so the ceiling bounds the whole placement rather than each design
 # separately. It is also the heartbeat's state (elapsed, rounds, spend).
-.ccd_meter_new <- function(budget, progress = .ccd_progress_opts()) {
+# `label` names the search on the heartbeat line; the outer-grid placement
+# (`.joint_placement_mode()`) drives the same mode-find under its own.
+.ccd_meter_new <- function(budget, progress = .ccd_progress_opts(),
+                           label = "ccd mode-find") {
     e <- new.env(parent = emptyenv())
     e$evals    <- 0
     e$rounds   <- 0L
     e$budget   <- budget
     e$t0       <- .ccd_now()
     e$progress <- progress
+    e$label    <- label
     e
 }
 
@@ -246,8 +253,8 @@
     spent   <- if (is.finite(meter$budget))
         sprintf("%.0f/%.0f evals", meter$evals, meter$budget) else
         sprintf("%.0f evals", meter$evals)
-    line <- sprintf("[ccd mode-find] %s | %s%s | elapsed %s | %s/eval",
-                    phase, spent,
+    line <- sprintf("[%s] %s | %s%s | elapsed %s | %s/eval",
+                    meter$label %||% "ccd mode-find", phase, spent,
                     if (nzchar(detail)) paste0(" | ", detail) else "",
                     .ccd_format_secs(elapsed), .ccd_format_secs(per))
     cat(line, "\n", sep = "")
@@ -487,6 +494,14 @@
 # the current iterate solve in a few Newton steps instead of cold from the
 # centre).
 #
+# `ridge_check = FALSE` drops the first guard. A CCD starts from a point it
+# means to centre a design on, so a flat curvature there already answers the
+# question; an outer-grid PLACEMENT starts from the cell a railed grid piled its
+# weight on, which sits away from the mode by construction and whose curvature
+# can be indefinite for that reason alone. The step is still an ascent step --
+# the Hessian is regularised negative-definite and the step trust-clamped and
+# backtracked -- so the search runs from there.
+#
 # Returns list(par, hess, value, converged, status) with status in
 # {"ok", "ridge", "fail"}; only "ok" yields a usable CCD scale.
 .joint_ccd_modefind <- function(u0, eval1, lower, upper, h,
@@ -494,7 +509,9 @@
                                 tol = 1e-3,
                                 max_halve = .ccd_placement("max_halve"),
                                 trust = NULL,
-                                on_accept = NULL, meter = NULL) {
+                                on_accept = NULL, meter = NULL,
+                                ridge_check = TRUE,
+                                stop_sd = .ccd_placement("stop_sd")) {
     d <- length(u0)
     if (is.null(trust)) trust <- rep(Inf, d)
     fail <- function(u, H, f) {
@@ -511,6 +528,9 @@
     }
     H <- NULL
     converged <- FALSE
+    # TRUE once H is the stencil taken at the current `u`, so the closing
+    # stencil below would repeat it.
+    hess_at_u <- FALSE
     for (iter in seq_len(max_rounds)) {
         st <- tryCatch(.joint_ccd_fd_stencil(u, eval1, h),
                        error = .ccd_rethrow_budget)
@@ -520,7 +540,7 @@
         # Fast decline on a ridge / flat curvature: the centre Hessian already
         # tells us the Gaussian CCD scale is ill-defined, so bail BEFORE the
         # expensive backtracking line search.
-        if (iter == 1L && !.joint_ccd_outer_hess_ok(H)) {
+        if (ridge_check && iter == 1L && !.joint_ccd_outer_hess_ok(H)) {
             .ccd_meter_beat(meter, "declined",
                             "outer curvature flat / ridged")
             return(list(par = u, hess = H, value = f_u,
@@ -530,19 +550,43 @@
         step  <- tryCatch(as.numeric(-solve(H_reg, st$grad)),
                           error = function(e) NULL)
         if (is.null(step) || any(!is.finite(step))) return(fail(u, H, f_u))
+        # Newton decrement: the full step's length in outer posterior SDs. Below
+        # `stop_sd` the point is the mode to within that, and this round's
+        # stencil (at `u`) is the closing curvature.
+        lambda2 <- sum(st$grad * step)
+        if (is.finite(lambda2) && sqrt(max(lambda2, 0)) < stop_sd) {
+            .ccd_meter_round(meter)
+            .ccd_meter_beat(meter,
+                            sprintf("round %d/%d", iter, as.integer(max_rounds)),
+                            sprintf("Newton step %.3g sd | logpost %.7g",
+                                    sqrt(max(lambda2, 0)), f_u))
+            converged <- TRUE
+            hess_at_u <- TRUE
+            break
+        }
         # Trust-region clamp: bound each coordinate's step so a near-singular
         # Hessian cannot send a candidate to an extreme hyperparameter where the
-        # inner Newton needs many iterations.
-        step <- pmax(pmin(step, trust), -trust)
+        # inner Newton needs many iterations. The whole step is shortened by the
+        # one factor that brings its worst coordinate inside its radius, which
+        # keeps its direction: against a negative-definite curvature that
+        # direction is uphill (`grad . step = -grad' H^-1 grad > 0`), so some
+        # halving of it improves. Clipping coordinates one at a time does not
+        # keep it, and on a correlated outer posterior (a field SD against its
+        # copy scale) the clipped step can point downhill, so that every
+        # halving the line search tries is worse and the search stops away
+        # from the mode as if it had converged.
+        over <- max(abs(step) / trust)
+        if (is.finite(over) && over > 1) step <- step / over
         # Backtracking line search over `max_halve` halvings, all evaluated in ONE
         # batched call so the candidates fan out across the outer-grid threads:
         # a serial probe per halving does not parallelise, and on an expensive
         # inner solve (a full-field Laplace) the line search would otherwise
         # dominate the mode-find. Accept the largest step that improves -- the
         # same point a sequential backtrack would take.
+        # One candidate per row, at every `d` including a single axis.
         t_steps <- 0.5 ^ (seq_len(max_halve + 1L) - 1L)
-        cands   <- t(vapply(t_steps, function(ts)
-                       pmin(pmax(u + ts * step, lower), upper), numeric(d)))
+        cands   <- do.call(rbind, lapply(t_steps, function(ts)
+                       pmin(pmax(u + ts * step, lower), upper)))
         fce     <- eval1(cands)
         f_cands <- as.numeric(fce)
         u_try <- u; f_try <- f_u; mode_try <- NULL
@@ -561,14 +605,19 @@
                         sprintf("|step| %.3g | logpost %.7g", delta, f_u))
         if (delta < tol) {
             converged <- TRUE
+            # No step taken: this round's stencil is already at `u`.
+            hess_at_u <- delta == 0
             break
         }
     }
     # Clean Hessian at the final point for the CCD scale. Always the full
-    # stencil: this is the curvature the design is oriented by.
-    st_fin <- tryCatch(.joint_ccd_fd_stencil(u, eval1, h),
-                       error = .ccd_rethrow_budget)
-    if (!is.null(st_fin) && all(is.finite(st_fin$hess))) H <- st_fin$hess
+    # stencil: this is the curvature the design is oriented by. A round whose
+    # stencil was taken at the final point already measured it.
+    if (!hess_at_u) {
+        st_fin <- tryCatch(.joint_ccd_fd_stencil(u, eval1, h),
+                           error = .ccd_rethrow_budget)
+        if (!is.null(st_fin) && all(is.finite(st_fin$hess))) H <- st_fin$hess
+    }
     .ccd_meter_beat(meter, "mode-find done",
                     sprintf("logpost %.7g", f_u))
     list(par = u, hess = H, value = f_u, converged = converged, status = "ok")
@@ -590,8 +639,9 @@
 #   "modefind_boundary"   the outer mode pinned to the (wide) axis box.
 #   "modefind_degenerate" the outer Hessian is degenerate at the mode.
 #   "modefind_failed"     the mode-find did not converge.
-#   "hessian_singular"    the outer Hessian would not invert.
-#   "hessian_not_pd"      its inverse has no Cholesky factor.
+#   "hessian_not_pd"      the negated outer Hessian has no Cholesky factor.
+#   "hessian_singular"    its inverse has none either: the factor exists but
+#                         is numerically singular.
 #   "copy_atom_components" more copy atoms than the component cap: the mixture
 #                         below expands into 2^n designs, and past the cap the
 #                         tensor rule is the cheaper one.
@@ -724,7 +774,8 @@
         mf <- .joint_ccd_modefind(u_start, eval1, lower, upper, h_step,
                                   trust = trust, on_accept = on_accept,
                                   max_rounds = max_rounds, meter = meter,
-                                  max_halve = cfg$max_halve)
+                                  max_halve = cfg$max_halve,
+                                  stop_sd = cfg$stop_sd)
         if (is.null(mf) || !identical(mf$status, "ok"))
             return(list(reason = if (!is.null(mf) && identical(mf$status, "ridge"))
                                  "ridge" else "fail"))
@@ -779,10 +830,10 @@
     u_hat <- got$u_hat
     H     <- got$H
     neg_H <- -0.5 * (H + t(H))
-    post_cov <- tryCatch(solve(neg_H), error = function(e) NULL)
-    if (is.null(post_cov)) return(declined("hessian_singular"))
+    post_cov <- tryCatch(.spd_inverse(neg_H), error = function(e) NULL)
+    if (is.null(post_cov)) return(declined("hessian_not_pd"))
     L_scale <- tryCatch(t(chol(post_cov)), error = function(e) NULL)
-    if (is.null(L_scale)) return(declined("hessian_not_pd"))
+    if (is.null(L_scale)) return(declined("hessian_singular"))
 
     # CCD design: factorial corners at +/- 1.1 per whitened axis (INLA's f0),
     # with the matching corrected design weights (single source of truth with
@@ -969,8 +1020,10 @@
 # was kept, or (on a ridged posterior) the CCD declined back to the tensor --
 # rather than having to read `fit$...$integration` after the fact. `n_latent` is
 # the latent node / cell count, `n_phi` the crossed phi-tensor cell count,
-# `n_total` their product; `declined` flags a CCD that engaged by axis count but
-# fell back (the specific reason is messaged by .joint_ccd_grid just before).
+# `n_total` their product; `declined` names the integrator that was asked for
+# and fell back to the tensor ("CCD", "adaptive lattice"), NULL when none did
+# (the specific reason is messaged by the declining builder just before and
+# recorded on the fit as `integration_declined`).
 .joint_announce_integration <- function(integration_used, d_axes,
                                         n_latent, n_phi, n_total,
                                         declined) {
@@ -980,10 +1033,10 @@
         message(sprintf(
             "tulpa joint: outer integration: CCD (%d latent axes, %d nodes%s)",
             d_axes, n_latent, phi_part))
-    } else if (isTRUE(declined)) {
+    } else if (!is.null(declined)) {
         message(sprintf(
-            "tulpa joint: outer integration: CCD declined -> tensor grid (%d cells)",
-            n_total))
+            "tulpa joint: outer integration: %s declined -> tensor grid (%d cells)",
+            declined, n_total))
     } else {
         message(sprintf(
             "tulpa joint: outer integration: tensor grid (%d cells)", n_total))

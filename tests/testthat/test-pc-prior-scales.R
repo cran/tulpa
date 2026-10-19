@@ -30,25 +30,6 @@ pc_coord_of <- list(
   log_tau    = function(s) log(1 / s^2)
 )
 
-test_that("every PC-prior scale equals the base density plus a numerical Jacobian", {
-  U <- 1.0; alpha <- 0.01
-  lambda <- pc_lambda(U, alpha)
-
-  for (sigma in c(0.05, 0.3, 1.0, 2.5)) {
-    got <- cpp_pc_prior_scales(sigma, U, alpha)
-
-    for (scale in names(pc_sigma_of)) {
-      x <- pc_coord_of[[scale]](sigma)
-      # d(sigma)/d(x) by central difference on the sampled coordinate
-      h <- 1e-6 * max(1, abs(x))
-      dsig_dx <- (pc_sigma_of[[scale]](x + h) - pc_sigma_of[[scale]](x - h)) / (2 * h)
-      expected <- log(lambda) - lambda * sigma + log(abs(dsig_dx))
-      expect_equal(unname(got[[scale]]), expected, tolerance = 1e-6,
-                   info = paste("scale:", scale, "sigma:", sigma))
-    }
-  }
-})
-
 # Integration range per sampled coordinate. The linear coordinates run to +Inf,
 # where integrate()'s tail transformation handles the decay. The log coordinates
 # are bounded, because THIS HARNESS -- not the density -- breaks out there: it
@@ -66,7 +47,10 @@ pc_range_of <- list(
   log_tau    = c(-50, 50)
 )
 
+skip_on_cran_budget()
+
 test_that("each PC-prior scale integrates to one (a proper density)", {
+  skip_on_cran_budget()
   # A wrong Jacobian (the tvc/hsgp bugs) breaks normalization: the tvc form was
   # improper as tau -> Inf. Integrating on each coordinate catches that.
   U <- 1.0; alpha <- 0.01
@@ -85,7 +69,30 @@ test_that("each PC-prior scale integrates to one (a proper density)", {
   }
 })
 
+skip_on_cran()
+
+test_that("every PC-prior scale equals the base density plus a numerical Jacobian", {
+  skip_on_cran()
+  U <- 1.0; alpha <- 0.01
+  lambda <- pc_lambda(U, alpha)
+
+  for (sigma in c(0.05, 0.3, 1.0, 2.5)) {
+    got <- cpp_pc_prior_scales(sigma, U, alpha)
+
+    for (scale in names(pc_sigma_of)) {
+      x <- pc_coord_of[[scale]](sigma)
+      # d(sigma)/d(x) by central difference on the sampled coordinate
+      h <- 1e-6 * max(1, abs(x))
+      dsig_dx <- (pc_sigma_of[[scale]](x + h) - pc_sigma_of[[scale]](x - h)) / (2 * h)
+      expected <- log(lambda) - lambda * sigma + log(abs(dsig_dx))
+      expect_equal(unname(got[[scale]]), expected, tolerance = 1e-6,
+                   info = paste("scale:", scale, "sigma:", sigma))
+    }
+  }
+})
+
 test_that("the PC-prior rate is calibrated so P(sigma > U) = alpha", {
+  skip_on_cran()
   for (U in c(0.5, 1, 3)) {
     for (alpha in c(0.01, 0.05, 0.5)) {
       lambda <- pc_lambda(U, alpha)

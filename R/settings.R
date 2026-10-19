@@ -303,11 +303,8 @@ tulpa_grid_axis <- function(key, n = NULL) .nl_grid_axis(key, n)
              call. = FALSE)
     }
     if (!is.null(n)) {
-        n <- suppressWarnings(as.integer(n))
-        if (length(n) != 1L || is.na(n) || n < 1L) {
-            stop("Grid axis resolution `n` must be a single integer >= 1.",
-                 call. = FALSE)
-        }
+        # Refused rather than truncated: n = 2.5 was a 2-node axis (#896).
+        n <- .check_count(n, "n", min = 1L)
         if (!is.null(spec$nodes)) {
             stop("Default grid axis '", key, "' is declared as explicit nodes, ",
                  "so it has no resolution to raise.", call. = FALSE)
@@ -517,12 +514,22 @@ tulpa_grid_axis <- function(key, n = NULL) .nl_grid_axis(key, n)
     unique(c(fromtab, frompath))
 }
 
-# Fill in a prior block's absent default axes from the family binding. When any
-# of `fields` is missing, ALL of them are rebuilt and crossed as a Cartesian
-# product -- the registry's per-family convention: a family's axes are stored
-# pre-paired (one row of `theta_grid` per tuple), so a partially-supplied set
-# cannot be honoured by pairing a user axis of length 4 against a default of
-# length 5. `fields` defaults to every field the family binds, in table order.
+# Fill in a prior block's absent default axes from the family binding. A
+# family's axes are stored PRE-PAIRED -- one row of `theta_grid` per tuple, the
+# i-th entries of every field together -- so:
+#
+#   * every field supplied: the fields ARE the paired cells and are kept as
+#     given; they must have one length (`.nl_check_paired_axes()`). A tensor
+#     grid is written as expand.grid() columns.
+#   * some fields supplied: each supplied field is an AXIS (its distinct
+#     values) and is kept; only the missing ones take the family default, and
+#     the axes are crossed. Replacing the supplied axis by the default as well
+#     discarded it -- an ar1 `tau_grid` or a bym2 `sigma_grid` given alone was
+#     never integrated, and an invalid `rho_grid` given alone was thrown away
+#     rather than refused (gcol33/tulpa#884). car_proper already did this.
+#   * none supplied: the family default, crossed.
+#
+# `fields` defaults to every field the family binds, in table order.
 #
 # This is the materialisation half of `.NL_FAMILY_AXES`: with it, a registry
 # family that defaults a plain Cartesian grid is one line in its `defaults()`
@@ -532,12 +539,57 @@ tulpa_grid_axis <- function(key, n = NULL) .nl_grid_axis(key, n)
     fam <- .NL_FAMILY_AXES[[tolower(type %||% "")]]
     if (is.null(fam)) return(p)
     if (is.null(fields)) fields <- names(fam)
-    if (!any(vapply(fields, function(f) is.null(p[[f]]), logical(1)))) return(p)
-    axes <- lapply(fields, function(f) .nl_grid_axis(fam[[f]]))
+    given <- !vapply(fields, function(f) is.null(p[[f]]), logical(1))
+    if (all(given)) return(.nl_check_paired_axes(p, fields))
+    axes <- lapply(fields, function(f) {
+        if (is.null(p[[f]])) .nl_grid_axis(fam[[f]])
+        else sort(unique(as.numeric(p[[f]])))
+    })
     names(axes) <- fields
     gr <- expand.grid(axes, KEEP.OUT.ATTRS = FALSE)
     for (f in fields) p[[f]] <- as.numeric(gr[[f]])
     p
+}
+
+# Fully supplied pre-paired fields must line up cell for cell; unequal lengths
+# were recycled by the theta builder's cbind() with a warning before the kernel
+# refused them (gcol33/tulpa#884). A length-1 field is a value held fixed
+# across every cell and is broadcast; any other mismatch is refused.
+.nl_check_paired_axes <- function(p, fields) {
+    if (length(fields) < 2L) return(p)
+    lens <- vapply(fields, function(f) length(p[[f]]), integer(1))
+    n <- unique(lens[lens != 1L])
+    if (length(n) > 1L) {
+        stop(sprintf(paste0(
+            "%s are PAIRED outer-grid cells -- the i-th entries of each form ",
+            "one cell -- so they need one length (a length-1 field is held ",
+            "fixed); got %s. Supply one axis alone to cross it with the ",
+            "default of the other(s), or pass expand.grid() columns for a ",
+            "tensor grid."),
+            paste0("`", fields, "`", collapse = " and "),
+            paste(lens, collapse = " / ")), call. = FALSE)
+    }
+    if (length(n) == 1L) {
+        for (f in fields[lens == 1L]) p[[f]] <- rep(p[[f]], n)
+    }
+    p
+}
+
+# A supplied grid axis whose values must lie inside an open interval (an AR1
+# correlation in (-1, 1)). Checked on the block before it is filled, where the
+# message can name the field the user set; a kernel that is handed a value
+# outside it does not refuse it.
+.nl_check_axis_open_interval <- function(p, field, lo, hi, what) {
+    v <- p[[field]]
+    if (is.null(v)) return(invisible(TRUE))
+    bad <- which(!is.finite(v) | v <= lo | v >= hi)
+    if (length(bad)) {
+        stop(sprintf(paste0(
+            "`%s[%d]` is %s; %s must lie strictly inside (%s, %s)."),
+            field, bad[1L], format(v[bad[1L]]), what, format(lo), format(hi)),
+            call. = FALSE)
+    }
+    invisible(TRUE)
 }
 
 # The axis key a family defaults on a field, or NULL when it defaults none.
@@ -565,11 +617,10 @@ tulpa_grid_axis <- function(key, n = NULL) .nl_grid_axis(key, n)
     n_pts     = 5L,
     span      = 2.5,
 
-    # The mode SD is clamped into [min_sd_u, max_sd_u] on the log axis: a floor
-    # so a razor-sharp local curvature does not collapse the new grid to
-    # near-duplicate nodes (the point of recentring is to BRACKET the mode with
-    # real spread), a ceiling so a near-flat direction does not fling nodes to
-    # implausible extremes.
+    # The mode SD is clamped into [min_sd_u, max_sd_u] on the log axis: a
+    # ceiling so a near-flat direction does not fling nodes to implausible
+    # extremes, and a floor, 0 by default, that a caller can set to widen a
+    # placed axis past its measured spread.
     #
     # Both values were swept and both are KEPT. The ceiling
     # is close to inert: over 268 axis reads it binds on 2, on neither of the
@@ -610,9 +661,31 @@ tulpa_grid_axis <- function(key, n = NULL) .nl_grid_axis(key, n)
     # The earlier reading that the ceiling produces 95% widths in the hundreds
     # came from the one row that reaches it, `nngp_120`, whose fits are not
     # reproducible (72 of 120 differ between two passes of the
-    # same seeds in one process). The floor's own ladder is on
-    # `sd_floor_policy` below.
-    min_sd_u  = 0.15,
+    # same seeds in one process).
+    #
+    # The FLOOR is 0: every door lays an axis at the SD the mode-find measured,
+    # however sharp. A floor widens a placed axis past its posterior, which
+    # compensated the box read's narrowing at 1.25 SDs and which the
+    # log-quadratic read does not need: it is exact for a Gaussian at that
+    # spacing and continues the end quadratic past the outer node. Where a
+    # floor binds, the consistency pass lays the at-mode ladder between the
+    # floored nodes as new levels, so the grid ends resolved either way and the
+    # floor only costs cells (gcol33/tulpa#932). Measured on both doors:
+    #
+    #   * joint: on the two-arm ICAR fixture, where the field SD's log-SD is
+    #     0.037 and the copy scale's 0.024 at 24x24, a 0.05 floor bound on both
+    #     axes: 464 cells against 144 without it, at the same error against a
+    #     dense reference.
+    #   * registry: the six-configuration ladder at 200 fixed-truth seeds each
+    #     (`dev_notes/issue932/floor/floor932.R`), floors 0 / 0.05 / 0.15 /
+    #     0.30. Floors 0, 0.05 and 0.15 give the same 95% interval on all 1400
+    #     paired trials (none won or lost, width ratio 1.0000); summed
+    #     |coverage - nominal| over 95 / 80 / 50% is 0.0543 at 0 and 0.05,
+    #     0.0564 at 0.15 (binding on 21% of fits) and 0.0571 at 0.30, which
+    #     also adds cells.
+    #
+    # `sd_floor_policy` below says what a caller-set floor does when it binds.
+    min_sd_u  = 0,
     max_sd_u  = 3,
 
     # What the pass DOES when that ceiling binds.
@@ -656,9 +729,11 @@ tulpa_grid_axis <- function(key, n = NULL) .nl_grid_axis(key, n)
     # identical there and the table above is the only one that separates them.
     sd_clamp_policy = "decline",
 
-    # The floor is the OPPOSITE answer. Seven rows x 200 seeds under the proper
-    # default hyperpriors, "resolve" placement, paired 95%-level win/loss against
-    # 0.15:
+    # What a FLOOR does when it binds. The default floor is 0 (above), so this
+    # applies to a caller-set `min_sd_u`. Measured at gcol33/tulpa#387 under the
+    # box read, with 0.15 the floor then shipped: seven rows x 200 seeds under
+    # the proper default hyperpriors, "resolve" placement, paired 95%-level
+    # win/loss against 0.15:
     #
     #   floor            summed dev   won   lost
     #   0.02 / 0.05          0.7107     0    304
@@ -670,10 +745,11 @@ tulpa_grid_axis <- function(key, n = NULL) .nl_grid_axis(key, n)
     # A clamped floor WIDENS a too-narrow axis, which is the direction that
     # cannot rail, so substituting there is the right move: declining wins 10
     # trials against 3 at the 95% level and more than doubles the summed
-    # deviation, over-covering at 0.80 and 0.50. 0.15 is a minimum of the ladder
-    # in both directions -- dropping it to 0.05 loses 304 trials and wins none --
-    # and the floor is the bound that actually binds: it engages on 3 of 7 rows
-    # and on every fit of those rows.
+    # deviation, over-covering at 0.80 and 0.50. Under that read 0.15 was a
+    # minimum of the ladder in both directions. That ladder passed the gaussian
+    # `phi` as an SD where the engine reads a variance (1.41 times the simulated
+    # one) and read intervals with boxes; on the shipped read and a correctly
+    # specified fixture the floor is inert (`min_sd_u` above).
     sd_floor_policy = "clamp",
 
     # A recentred axis must survive the map back onto its own support with at
@@ -776,6 +852,7 @@ tulpa_grid_axis <- function(key, n = NULL) .nl_grid_axis(key, n)
     if (!is.null(ov)) return(ov)
     .NL_RECENTER[[par]]
 }
+
 
 # --- spatiotemporal driver grid ----------------------------------------------
 #
@@ -1120,7 +1197,7 @@ tulpa_grid_axis <- function(key, n = NULL) .nl_grid_axis(key, n)
 # exact tie, 0.9933 and 0.9067 both 0.0433 from nominal -- at 0.46 to 0.92x the
 # width (`dev_notes/issue357/RESULTS.md` sections 4 and 6.6).
 #
-# THE DEFAULT IS `box_uniform` (0.0.188), decided on
+# `box_uniform` WAS THE DEFAULT from 0.0.188 to gcol33/tulpa#932, decided on
 # FIXED-TRUTH coverage -- the pre-registered instrument for this choice -- at
 # the placement the engine ships, which is what changed. Before the placement
 # pass the default axes were laid without reference to the posterior, and every
@@ -1161,6 +1238,33 @@ tulpa_grid_axis <- function(key, n = NULL) .nl_grid_axis(key, n)
 # the one that fires almost always, which is the fixed rule.
 #
 # `control$within_cell = "chord"` restores the previous report per fit, exactly.
+#
+# THE DEFAULT IS `"log_quadratic"` (`R/within_cell_log_quadratic.R`,
+# gcol33/tulpa#932). `lq_max_h_over_sd` is the per-row gate it runs under. On a
+# prior-free ladder of exact gaussian-LMM posteriors (150 seeds x G 10 / 40 /
+# 160, grids at h / sd 0.25 to 4 laid on or off the mode,
+# `dev_notes/issue932/gate_ladder.R`) its mean endpoint error |F(lo) - 0.025| +
+# |F(hi) - 0.975| is 0.0002 to 0.008 against the box read's 0.007 to 0.028 up
+# to h / sd 2, 0.006 against 0.031 at 2 to 2.5, 0.012 against 0.068 at 3 to 4,
+# and 0.073 against 0.036 past 4. The gate sits at 2, inside the range where it
+# wins on every arrangement class, not at the crossover; a row past it is read
+# as boxes, so where the box read wins the box read is what runs.
+#
+# A placement lays an axis at h / sd 1.25, where the box read is narrow by
+# construction (95% width 0.952 of the true one in the limit of a fixed
+# extent), so the default had to wait on the grid: with refinement laying
+# levels rather than slices and no joint placement floor, the log-quadratic read
+# against dense references of the two-arm ICAR fixture (16 seeds each,
+# `dev_notes/issue932/dense932.R`), mean |F_ref(q) - p| over seven levels
+# summed over the field SD, copy scale and dispersion of the 16x16 and 24x24
+# fields, is 0.038, where the box read on the same grids is 0.110 and the
+# shipped grid before the change read 0.156 (box) and 0.151 (log-quadratic).
+# The 16x16 field SD's 95% width is 0.976 of the reference against the box
+# read's 0.932. `ENGINEERING_HISTORY.md` has the fixed-truth coverage.
+#
+# `lq_tail_nats` and `lq_tail_sd` bound how far a row's tail is tabulated past
+# its outer node, and `lq_grid_points` is the minimum size of the table the
+# rows' CDFs are read off; `R/within_cell_log_quadratic.R` gives the reasons.
 #
 # `grid_resolved = 1` is `h / sd`, both in the axis's own coordinate. It is not
 # a tuning cutoff: at `h / sd` below 1 the cell is narrower than the posterior
@@ -1266,11 +1370,45 @@ tulpa_grid_axis <- function(key, n = NULL) .nl_grid_axis(key, n)
 # parabola spans 0.080 to 0.642, which is the grid dependence gcol33/tulpa#621
 # reports as a factor of two on a copy axis.
 #
+# Where an axis is below `axis_sd_ess` AND the parabola declines (the mode on an
+# edge node, a curvature that is not negative), neither estimator above has a
+# spread to offer, and the weighted read's floor of zero sat beside an interval
+# read off the within-cell construction, which spreads the same node's mass over
+# its whole cell (gcol33/tulpa#919: `sd = 0` beside a 95% interval of
+# `[2.03, 4.52]`). The reported SD is then the SD of the distribution the
+# interval is read from (`.nl_align_unresolved_sd()`), so the two describe one
+# distribution. `read_sd_nodes` is the midpoint rule that SD is taken over, on
+# the read's own quantile function: on a uniform cell it returns
+# `W / sqrt(12) * sqrt(1 - 1 / K^2)`, a relative error of `1 / (2 K^2)`, 1.9e-06
+# at 512.
+#
 # `axis_refine_nodes` caps the nodes the consistency pass
 # (`.hyper_consistency_pass()`) adds to one axis while bisecting it towards
-# `axis_sd_ess`. It is a cost cap, one slice cell per node: 8 is one bisection
-# of every gap of a declared 9-node slab, the resolution the default outer axes
-# are declared at.
+# `axis_sd_ess`. It counts levels, each laid in the rows of the other axes: 8
+# is one bisection of every gap of a declared 9-node slab, the resolution the
+# default outer axes are declared at.
+# `at_mode_gap_var` is the share of an axis's posterior variance, about the
+# mode and in its SDs, that a node the consistency pass laid at the mode may
+# read into the gap beyond it, where the box rule hands it half the gap
+# (`.hyper_at_mode_reach()`, `.hyper_propose_edge_close()`). It bounds the
+# variance rather than the mass because a read that spreads a node over its box
+# carries that mass across the gap: 0.7% of the posterior read across a 100-SD
+# box quadrupled the Calluna fit's reported dispersion SD. It is 1%, the share
+# the cheap-pass screen may drop (`.NL_SCREEN$gate_mass`): both bound how much
+# of the posterior the outer grid may misplace.
+# `level_row_tail` is the share of the posterior mass a refinement pass may
+# leave out when it lays a new level (`.hyper_tensor_level_cells()`): the level
+# goes into the fewest rows of the other axes, heaviest first, that hold all but
+# this much, and a row left out keeps its cells without the level; once solved,
+# the level grows into the neighbours of every row holding more than this share
+# of it whose share grew against the axis's other levels
+# (`.hyper_level_frontier()`). Laid in every row, each pass's levels
+# become rows of the next pass's axis and the cells grow with their product: a
+# four-axis cover-hurdle fixture went from 580 cells to 2352, and tulpaObs's
+# joint tests ran 3.8 to 10 times slower than with one-row slices. Against the
+# dense references of gcol33/tulpa#932 (16 seeds per size), the summed
+# interval error is 0.03840 in every row and 0.03839 at 1e-3 (1e-2 without the
+# growth: 0.04407); 1e-3 takes that fixture to 1147 cells.
 # `edge_mass_lift` is how far above a FLAT marginal an outer axis's boundary
 # node has to sit before the axis is NAMED as holding boundary mass
 # (`.nl_axis_edge_mass()`, `$outer_grid_edge_mass_axes`). Same currency as the
@@ -1306,12 +1444,28 @@ tulpa_grid_axis <- function(key, n = NULL) .nl_grid_axis(key, n)
 # widths a node's own spacing gives it and drops only the domain closure of the
 # outermost cell, which is not a width the sweep could have seen
 # (gcol33/tulpa#660).
+#
+# `single_node_mass` is the share of an axis's marginal one node has to hold
+# before the axis is NAMED as integrated at a single node
+# (`.nl_single_node_axes()`, `$outer_grid_single_node_axes`) and the fit warns.
+# A Gaussian marginal read on nodes spaced `h` apart puts 0.99 on one node once
+# its SD falls under about `h / 5`, a fifth of the spacing the placement pass
+# lays (1.25 SDs), so an axis past it carries no spread across nodes for the
+# grid to report: its value is that node.
 .NL_DIAG <- list(
-    within_cell          = "box_uniform",
+    within_cell          = "log_quadratic",
+    lq_max_h_over_sd     = 2,
+    lq_tail_nats         = 36,
+    lq_tail_sd           = 10,
+    lq_grid_points       = 8193L,
     grid_resolved        = 1,
     axis_sd_ess          = 3,
+    read_sd_nodes        = 512L,
     axis_refine_nodes    = 8L,
+    at_mode_gap_var      = 0.01,
+    level_row_tail       = 1e-3,
     edge_mass_lift       = 1,
+    single_node_mass     = 0.99,
     k_usable             = 0.7,
     k_samples            = 500L,
     k_samples_ok         = 800L,
@@ -1370,10 +1524,30 @@ tulpa_grid_axis <- function(key, n = NULL) .nl_grid_axis(key, n)
 # The value is mirrored by `CHEAP_SCREEN_MIN_KEEP` in `src/nested_laplace_grid.h`
 # -- the driver applies it, and a C++ constant cannot read this registry -- and
 # the two are pinned together by test.
+#
+# `prune` is whether a fit screens at all when its caller does not say, per
+# door, in this one table. On for the two nested-Laplace doors: a grid placed
+# around its mode crosses axes the posterior does not fill -- a pinned axis
+# dozens of posterior SDs per node, the far corners of a placed tensor -- and
+# solving every one of those cells in full is most of a large fit's cost
+# (gcol33/tulpa#925). Their safety gate is what makes on the safe default
+# rather than a gamble on the ranking. Off for the SPDE fitter: its CCD
+# mode-find reads the log-marginal through the same screened entry as the grid,
+# and a screen there drops stencil points rather than cells, with no gate to
+# catch it.
+#
+# `gate_mass` is how much posterior mass the prune may, at worst, have dropped
+# before the gate refuses it and solves the full grid
+# (`.nl_prune_dropped_mass()`): one per cent, ten times the default tolerance
+# a single dropped cell may carry. A fit that wants the prune held tighter
+# lowers `prune_tol`: the cut widens, fewer cells are dropped, and less mass is
+# left for the gate to bound.
 .NL_SCREEN <- list(
+    prune     = c(joint = TRUE, registry = TRUE, spde = FALSE),
     prune_tol = 1e-3,
     iters     = 2L,
-    min_keep  = 5L
+    min_keep  = 5L,
+    gate_mass = 0.01
 )
 
 .nl_screen <- function(par) {
@@ -1569,6 +1743,15 @@ tulpa_grid_axis <- function(key, n = NULL) .nl_grid_axis(key, n)
 # the best inner log-marginal on the design fell by up to 7.5 nats at d = 3 and
 # 16.3 at d = 4. Do not reintroduce one without re-reading
 # `dev_notes/issue662/RESULTS662.md`.
+#
+# `stop_sd` ends the mode-find when the full Newton step the round's stencil
+# predicts is shorter than this many outer posterior SDs: the Newton decrement
+# sqrt(g' (-H)^-1 g), which is that step's length in the metric of the curvature
+# the design is then oriented by. Below it the centre is already within a small
+# fraction of a node spacing of the mode, and a further round only moves it
+# within the inner log-marginal's finite-difference noise. The round's stencil
+# was taken at the final point, so it doubles as the closing curvature and the
+# closing stencil is not re-run (gcol33/tulpa#922).
 .CCD_PLACEMENT <- list(
     evals_per_cell   = 1,
     budget_floor     = TRUE,
@@ -1576,7 +1759,8 @@ tulpa_grid_axis <- function(key, n = NULL) .nl_grid_axis(key, n)
     max_rounds       = 30L,
     calibrate_rounds = 4L,
     seed_max_pts     = 256L,
-    max_halve        = 6L
+    max_halve        = 6L,
+    stop_sd          = 0.05
 )
 
 .ccd_placement <- function(par) {

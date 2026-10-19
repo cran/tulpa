@@ -1,4 +1,4 @@
-#' Latent Factor Specification for Unmeasured Confounders
+#' Latent factor specification for unmeasured confounders
 #'
 #' @description
 #' Specify latent factors to capture shared unmeasured confounders between
@@ -170,14 +170,9 @@ latent_factor <- function(
 }
 
 
-#' Print method for tulpa_latent
-#'
-#' @param x A tulpa_latent object
-#' @param ... Ignored
-#'
-#' @return The input `x`, returned invisibly. Called for the side effect of
-#'   printing the latent factor specification to the console.
-#'
+#' @rdname latent_factor
+#' @param x A `tulpa_latent` specification.
+#' @param ... Ignored.
 #' @export
 print.tulpa_latent <- function(x, ...) {
   cat("Latent factor specification\n")
@@ -195,175 +190,51 @@ print.tulpa_latent <- function(x, ...) {
 }
 
 
-#' Validate latent factor specification against data
-#'
-#' @param latent A tulpa_latent object
-#' @param N Number of observations
-#'
-#' @return Validated latent specification with additional computed fields
-#' @keywords internal
-validate_latent <- function(latent, N) {
-
-  if (is.null(latent)) {
-    return(NULL)
-  }
-
-  if (!inherits(latent, "tulpa_latent")) {
-    stop("`latent` must be a tulpa_latent object from latent_factor()",
-         call. = FALSE)
-  }
-
-  # Check n_factors is reasonable for data size
-  if (latent$n_factors >= N) {
-    stop("Number of latent factors (", latent$n_factors,
-         ") must be less than number of observations (", N, ")",
-         call. = FALSE)
-  }
-
-  # Warn if many factors relative to data
-  if (latent$n_factors > sqrt(N)) {
-    warning("Number of latent factors (", latent$n_factors,
-            ") is large relative to data size. Consider using fewer factors.",
-            call. = FALSE)
-  }
-
-  # Add computed fields
-  latent$n_obs <- N
-  latent$n_params <- N * latent$n_factors + latent$n_factors  # factors + sigmas
-
-  latent
-}
-
-
-#' Prepare latent factor data for HMC
-#'
-#' @param latent A validated tulpa_latent object (or NULL)
-#' @param N Number of observations
-#'
-#' @return List with latent factor data for C++
-#' @keywords internal
-prepare_latent_for_hmc <- function(latent, N) {
-
-  if (is.null(latent)) {
-    return(list(
-      type = "none",
-      n_factors = 0L,
-      n_obs = as.integer(N),
-      shared = FALSE,
-      constraint = "sum_to_zero",
-      scale = TRUE,
-      sigma_prior_rate = 0.0  # Not used when type = "none"
-    ))
-  }
-
-  # Validate
-  latent <- validate_latent(latent, N)
-
-  # Extract prior rate for PC prior (exponential prior on sigma)
-  sigma_prior_rate <- if (latent$prior$distribution == "pc") {
-    latent$prior$rate
-  } else if (latent$prior$distribution == "exponential") {
-    latent$prior$rate
-  } else if (latent$prior$distribution == "half_normal") {
-    # Convert half-normal to approximate exponential rate
-    # E[X] = sd * sqrt(2/pi), so rate ~= sqrt(pi/2) / sd
-    sqrt(pi / 2) / latent$prior$sd
-  } else if (latent$prior$distribution == "half_cauchy") {
-    # Use scale as rough guide
-    1.0 / latent$prior$scale
-  } else {
-    # Default
-    -log(0.01) / 1.0  # PC prior default
-  }
-
-  list(
-    type = "latent",
-    n_factors = as.integer(latent$n_factors),
-    n_obs = as.integer(N),
-    shared = latent$shared,
-    constraint = latent$constraint,
-    scale = latent$scale,
-    sigma_prior_rate = sigma_prior_rate
-  )
-}
-
-
-#' Initialize latent factor parameters
-#'
-#' @param latent_info Latent factor info from prepare_latent_for_hmc
-#' @param seed Optional random seed
-#'
-#' @return Numeric vector of initial parameter values
-#' @keywords internal
-initialize_latent_params <- function(latent_info, seed = NULL) {
-
-  if (latent_info$type == "none" || latent_info$n_factors == 0) {
-    return(numeric(0))
-  }
-
-  .seed_scoped(seed)
-
-  n_factors <- latent_info$n_factors
-  n_obs <- latent_info$n_obs
-
-  # Initialize log_sigma_factor (log scale, small positive values)
-  log_sigma_init <- rep(-1.0, n_factors)  # sigma ~ 0.37
-
-  # Initialize factor scores (standardized, sum-to-zero enforced)
-  factor_init <- matrix(rnorm(n_obs * n_factors, 0, 0.1), nrow = n_obs)
-
-  # Apply constraint
-  if (latent_info$constraint == "sum_to_zero") {
-    for (k in seq_len(n_factors)) {
-      factor_init[, k] <- factor_init[, k] - mean(factor_init[, k])
-    }
-  } else if (latent_info$constraint == "first_zero") {
-    for (k in seq_len(n_factors)) {
-      factor_init[, k] <- factor_init[, k] - factor_init[1, k]
-    }
-  }
-
-  # Flatten: [log_sigma_1, ..., log_sigma_K, f_1, ..., f_N*K]
-  # But exclude one observation per factor for identifiability
-  # Simpler: just return all and let C++ handle constraint
-  c(log_sigma_init, as.vector(t(factor_init)))
-}
-
-
 #' Extract latent factor posteriors from fit
 #'
-#' @param fit A tulpa_fit object
+#' @param fit A fit sampled with latent factors: its draw matrix (`$draws` or
+#'   `$samples`) holds columns named `factor[observation,factor]` and
+#'   `$.internal$latent_info` records the layout. The default method reads any
+#'   fit, of any class, that stores them this way.
 #' @param summary Logical; if TRUE, return summary statistics. If FALSE,
 #'   return full posterior draws.
 #' @param probs Quantiles for summary. Default is c(0.025, 0.5, 0.975).
+#' @param ... Passed to methods.
 #'
 #' @return If `summary = TRUE`, a data frame with columns for observation,
 #'   factor, and summary statistics. If `summary = FALSE`, a matrix of
 #'   posterior draws.
 #'
 #' @examples
-#' \dontrun{
-#' # `fit` is a ratio / multi-arm model fitted with latent factors by a consumer
-#' # package (tulpaRatio owns the two-arm formula and the negbin/negbin ratio
-#' # family and reads the latent_factor() spec):
+#' # A fit sampled with latent factors comes from a model package (tulpaRatio
+#' # reads the latent_factor() spec). The accessor reads two things off it:
+#' # draw columns named factor[observation,factor] and the latent layout. Here
+#' # both are simulated for three observations on two factors.
+#' set.seed(1)
+#' cols <- sprintf("factor[%d,%d]", rep(1:3, 2), rep(1:2, each = 3))
+#' draws <- matrix(rnorm(200 * 6, mean = rep(c(-1, 0, 1), 2), sd = 0.3),
+#'                 200, 6, byrow = TRUE, dimnames = list(NULL, cols))
+#' fit <- structure(
+#'   list(draws = draws,
+#'        .internal = list(latent_info = list(type = "latent", n_factors = 2L,
+#'                                            n_obs = 3L))),
+#'   class = "tulpa_fit")
 #'
-#' # Get summary
-#' factors <- latent_factors(fit)
-#' head(factors)
-#'
-#' # Get full posterior draws
-#' factor_draws <- latent_factors(fit, summary = FALSE)
-#' }
+#' latent_factors(fit)
+#' dim(latent_factors(fit, summary = FALSE))
 #'
 #' @export
-latent_factors <- function(fit, summary = TRUE, probs = c(0.025, 0.5, 0.975)) {
+latent_factors <- function(fit, ...) {
+  UseMethod("latent_factors")
+}
 
-  if (!inherits(fit, "tulpa_fit")) {
-    stop("`fit` must be a tulpa_fit object", call. = FALSE)
-  }
+#' @rdname latent_factors
+#' @export
+latent_factors.default <- function(fit, summary = TRUE,
+                                   probs = c(0.025, 0.5, 0.975), ...) {
 
   # Check if model has latent factors
-  if (is.null(fit$.internal$latent_info) ||
+  if (!is.list(fit) || is.null(fit$.internal$latent_info) ||
       fit$.internal$latent_info$type == "none") {
     stop("Model was not fit with latent factors", call. = FALSE)
   }

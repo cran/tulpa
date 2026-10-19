@@ -63,10 +63,38 @@ mx_vr <- rbind(c(0.09, 0.04), c(0.12, 0.05), c(0.16, 0.07))
 mx_w  <- c(0.2, 0.5, 0.3)
 
 # --------------------------------------------------------------------------- #
+# (4) Symmetry is not Gaussianity                                             #
+# --------------------------------------------------------------------------- #
+
+test_that("a symmetric mixture stays symmetric and is free to differ in width", {
+  # 0.5 N(-2, 1) + 0.5 N(2, 1) is symmetric about 0 and is not a Gaussian.
+  # Matching its mean and variance gives sd = sqrt(5), so the collapsed read
+  # reports +/- 1.96 sqrt(5) = +/- 4.38 while the mixture's own 95% interval
+  # sits near +/- 3.64. Requiring equality on a merely SYMMETRIC fixture would
+  # be asserting the shape away again, so the gate here is symmetry plus a
+  # difference -- equality is required only of the Gaussian-equivalent
+  # fixtures above.
+  fit <- mx_fit(rbind(-2, 2), rbind(1, 1), c(0.5, 0.5))
+  ci  <- mx_q(fit)
+  expect_equal(ci[1, 1], -ci[1, 2], tolerance = 1e-9)
+
+  g <- unname(mx_gauss_ci(fit))
+  expect_equal(g[1, 2], stats::qnorm(0.975) * sqrt(5), tolerance = 1e-12)
+  expect_lt(ci[1, 2], g[1, 2] - 0.5)
+
+  cdf <- function(b) 0.5 * stats::pnorm(b, -2, 1) + 0.5 * stats::pnorm(b, 2, 1)
+  expect_equal(cdf(ci[1, 2]), 0.975, tolerance = 1e-10)
+  expect_equal(cdf(ci[1, 1]), 0.025, tolerance = 1e-10)
+})
+
+skip_on_cran_budget()
+
+# --------------------------------------------------------------------------- #
 # (1) The bounds ARE the mixture's own quantiles                               #
 # --------------------------------------------------------------------------- #
 
 test_that("the fixed-effect bounds invert the mixture CDF", {
+  skip_on_cran_budget()
   fit <- mx_fit(mx_mu, mx_vr, mx_w)
   ci  <- confint(fit)
   ref <- tulpa:::.nl_gauss_mixture_summary(mx_mu, mx_vr, mx_w,
@@ -86,6 +114,7 @@ test_that("the fixed-effect bounds invert the mixture CDF", {
 })
 
 test_that("the requested level reaches the mixture read", {
+  skip_on_cran_budget()
   fit <- mx_fit(mx_mu, mx_vr, mx_w)
   ci  <- confint(fit, level = 0.80)
   ref <- tulpa:::.nl_gauss_mixture_summary(mx_mu, mx_vr, mx_w,
@@ -99,11 +128,12 @@ test_that("the requested level reaches the mixture read", {
 # --------------------------------------------------------------------------- #
 
 test_that("the estimate, standard error and vcov are the same moments as before", {
+  skip_on_cran_budget()
   fit <- mx_fit(mx_mu, mx_vr, mx_w)
   mom <- tulpa:::.nested_fixed_moments(fit)
 
   expect_equal(unname(coef(fit)), mom$mean, tolerance = 1e-14)
-  expect_equal(summary(fit)$std.error, sqrt(diag(mom$cov)), tolerance = 1e-14)
+  expect_equal(coef(summary(fit))$std.error, sqrt(diag(mom$cov)), tolerance = 1e-14)
   expect_equal(unname(vcov(fit)), unname(mom$cov), tolerance = 1e-14)
 
   # The two moments are the law of total variance by hand, so the marginalizer
@@ -129,6 +159,7 @@ test_that("the estimate, standard error and vcov are the same moments as before"
 # --------------------------------------------------------------------------- #
 
 test_that("a Gaussian-equivalent mixture reproduces the collapsed-Gaussian interval", {
+  skip_on_cran_budget()
   # One cell.
   f1 <- mx_fit(rbind(c(0.3, -1.1)), rbind(c(0.25, 0.04)), 1)
   expect_equal(mx_q(f1), unname(mx_gauss_ci(f1)), tolerance = 1e-10)
@@ -152,29 +183,80 @@ test_that("a Gaussian-equivalent mixture reproduces the collapsed-Gaussian inter
 })
 
 # --------------------------------------------------------------------------- #
-# (4) Symmetry is not Gaussianity                                             #
+# (6) The #302 correction keeps its own read, and says why                     #
 # --------------------------------------------------------------------------- #
 
-test_that("a symmetric mixture stays symmetric and is free to differ in width", {
-  # 0.5 N(-2, 1) + 0.5 N(2, 1) is symmetric about 0 and is not a Gaussian.
-  # Matching its mean and variance gives sd = sqrt(5), so the collapsed read
-  # reports +/- 1.96 sqrt(5) = +/- 4.38 while the mixture's own 95% interval
-  # sits near +/- 3.64. Requiring equality on a merely SYMMETRIC fixture would
-  # be asserting the shape away again, so the gate here is symmetry plus a
-  # difference -- equality is required only of the Gaussian-equivalent
-  # fixtures above.
-  fit <- mx_fit(rbind(-2, 2), rbind(1, 1), c(0.5, 0.5))
-  ci  <- mx_q(fit)
-  expect_equal(ci[1, 1], -ci[1, 2], tolerance = 1e-9)
+test_that("an enabled skew correction reports the MAP-cell read it was measured on", {
+  skip_on_cran_budget()
+  g   <- c(0.35, -0.28)
+  g1  <- c(0.04, -0.06)
+  fit <- mx_fit(mx_mu, mx_vr, mx_w, gamma3 = g, gamma1 = g1)
+  ci  <- confint(fit)
 
-  g <- unname(mx_gauss_ci(fit))
-  expect_equal(g[1, 2], stats::qnorm(0.975) * sqrt(5), tolerance = 1e-12)
-  expect_lt(ci[1, 2], g[1, 2] - 0.5)
+  expect_identical(attr(ci, "interval_source"), "skew_map_cell")
+  expect_match(attr(ci, "interval_declined"), "MAP cell")
+  expect_true(all(attr(ci, "skew_applied")))
 
-  cdf <- function(b) 0.5 * stats::pnorm(b, -2, 1) + 0.5 * stats::pnorm(b, 2, 1)
-  expect_equal(cdf(ci[1, 2]), 0.975, tolerance = 1e-10)
-  expect_equal(cdf(ci[1, 1]), 0.025, tolerance = 1e-10)
+  mom <- tulpa:::.nested_fixed_moments(fit)
+  ref <- tulpa:::.nl_skew_marginal(mom$mean, sqrt(diag(mom$cov)), g, g1,
+                                   c(0.025, 0.975), enabled = TRUE)
+  expect_equal(mx_q(fit), unname(ref$q), tolerance = 1e-14)
+
+  # It is a different read from the mixture one, not the same numbers relabelled.
+  expect_false(isTRUE(all.equal(mx_q(fit), mx_q(mx_fit(mx_mu, mx_vr, mx_w)))))
 })
+
+test_that("a coefficient the correction declines keeps the mixture read", {
+  skip_on_cran_budget()
+  # gcol33/tulpa#386. The two corrections cannot be composed on a coefficient
+  # the #302 read applies to, which is why an applied row reports the MAP-cell
+  # read alone. A DECLINED row has no #302 read to preserve, so falling back
+  # past the mixture to the collapsed Gaussian would give up the across-cell
+  # shape for nothing. Coefficient 2's gamma_3 is not computable here, so the
+  # same fit carries one of each.
+  off <- mx_fit(mx_mu, mx_vr, mx_w)
+  fit <- mx_fit(mx_mu, mx_vr, mx_w, gamma3 = c(0.35, NaN), gamma1 = c(0.04, 0))
+  ci  <- confint(fit)
+
+  expect_identical(unname(attr(ci, "skew_applied")), c(TRUE, FALSE))
+  expect_identical(attr(ci, "interval_source"), "skew_map_cell/mixture_cdf")
+  # The declined row is the mixture row, to the bit; the applied row is not.
+  expect_equal(mx_q(fit)[2, ], mx_q(off)[2, ], tolerance = 1e-14)
+  expect_false(isTRUE(all.equal(mx_q(fit)[1, ], mx_q(off)[1, ])))
+  # And it is NOT the collapsed Gaussian, which is what it used to fall back to.
+  expect_false(isTRUE(all.equal(mx_q(fit)[2, ],
+                                unname(mx_gauss_ci(off)[2, ]))))
+})
+
+test_that("a fit the correction declines everywhere reports what it would have", {
+  skip_on_cran_budget()
+  # The case that makes the correction safe to default: a fit where NO
+  # coefficient is eligible -- a fully coupled one, whose gamma_1 is not
+  # reachable -- must report the same bounds enabled or not.
+  off <- mx_fit(mx_mu, mx_vr, mx_w)
+  non <- mx_fit(mx_mu, mx_vr, mx_w, gamma3 = c(0.3, 0.2),
+                gamma1 = c(NaN, NaN))
+  expect_identical(non$skew_correction$reason,
+                   rep("gamma1_not_computable", 2L))
+  expect_false(any(attr(confint(non), "skew_applied")))
+  expect_identical(attr(confint(non), "interval_source"), "mixture_cdf")
+  expect_identical(mx_q(non), mx_q(off))
+})
+
+test_that("a fit with no retained components declines with its own reason", {
+  skip_on_cran_budget()
+  fit <- mx_fit(mx_mu, mx_vr, mx_w)
+  mom <- tulpa:::.nested_fixed_moments(fit)
+  bare <- mom; bare$mu <- NULL; bare$var <- NULL
+  iv <- tulpa:::.nl_fixed_interval(
+    bare, 1:2, mom$mean, sqrt(diag(mom$cov)), c(0.025, 0.975),
+    list(enabled = FALSE, gamma3 = rep(NA_real_, 2)))
+  expect_identical(iv$source, "gaussian_moment")
+  expect_match(iv$declined, "no retained mixture components")
+  expect_equal(iv$q, unname(mx_gauss_ci(fit)), tolerance = 1e-14)
+})
+
+skip_on_cran()
 
 # --------------------------------------------------------------------------- #
 # (5) Against draws from the same mixture                                      #
@@ -198,68 +280,11 @@ test_that("the analytic quantiles are the ones draws from the same mixture carry
 })
 
 # --------------------------------------------------------------------------- #
-# (6) The #302 correction keeps its own read, and says why                     #
-# --------------------------------------------------------------------------- #
-
-test_that("an enabled skew correction reports the MAP-cell read it was measured on", {
-  g   <- c(0.35, -0.28)
-  g1  <- c(0.04, -0.06)
-  fit <- mx_fit(mx_mu, mx_vr, mx_w, gamma3 = g, gamma1 = g1)
-  ci  <- confint(fit)
-
-  expect_identical(attr(ci, "interval_source"), "skew_map_cell")
-  expect_match(attr(ci, "interval_declined"), "MAP cell")
-  expect_true(all(attr(ci, "skew_applied")))
-
-  mom <- tulpa:::.nested_fixed_moments(fit)
-  ref <- tulpa:::.nl_skew_marginal(mom$mean, sqrt(diag(mom$cov)), g, g1,
-                                   c(0.025, 0.975), enabled = TRUE)
-  expect_equal(mx_q(fit), unname(ref$q), tolerance = 1e-14)
-
-  # It is a different read from the mixture one, not the same numbers relabelled.
-  expect_false(isTRUE(all.equal(mx_q(fit), mx_q(mx_fit(mx_mu, mx_vr, mx_w)))))
-})
-
-test_that("a coefficient the correction declines keeps the mixture read", {
-  # gcol33/tulpa#386. The two corrections cannot be composed on a coefficient
-  # the #302 read applies to, which is why an applied row reports the MAP-cell
-  # read alone. A DECLINED row has no #302 read to preserve, so falling back
-  # past the mixture to the collapsed Gaussian would give up the across-cell
-  # shape for nothing. Coefficient 2's gamma_3 is not computable here, so the
-  # same fit carries one of each.
-  off <- mx_fit(mx_mu, mx_vr, mx_w)
-  fit <- mx_fit(mx_mu, mx_vr, mx_w, gamma3 = c(0.35, NaN), gamma1 = c(0.04, 0))
-  ci  <- confint(fit)
-
-  expect_identical(unname(attr(ci, "skew_applied")), c(TRUE, FALSE))
-  expect_identical(attr(ci, "interval_source"), "skew_map_cell/mixture_cdf")
-  # The declined row is the mixture row, to the bit; the applied row is not.
-  expect_equal(mx_q(fit)[2, ], mx_q(off)[2, ], tolerance = 1e-14)
-  expect_false(isTRUE(all.equal(mx_q(fit)[1, ], mx_q(off)[1, ])))
-  # And it is NOT the collapsed Gaussian, which is what it used to fall back to.
-  expect_false(isTRUE(all.equal(mx_q(fit)[2, ],
-                                unname(mx_gauss_ci(off)[2, ]))))
-})
-
-test_that("a fit the correction declines everywhere reports what it would have", {
-  # The case that makes the correction safe to default: a fit where NO
-  # coefficient is eligible -- a fully coupled one, whose gamma_1 is not
-  # reachable -- must report the same bounds enabled or not.
-  off <- mx_fit(mx_mu, mx_vr, mx_w)
-  non <- mx_fit(mx_mu, mx_vr, mx_w, gamma3 = c(0.3, 0.2),
-                gamma1 = c(NaN, NaN))
-  expect_identical(non$skew_correction$reason,
-                   rep("gamma1_not_computable", 2L))
-  expect_false(any(attr(confint(non), "skew_applied")))
-  expect_identical(attr(confint(non), "interval_source"), "mixture_cdf")
-  expect_identical(mx_q(non), mx_q(off))
-})
-
-# --------------------------------------------------------------------------- #
 # (7) An incomplete grid, and declines that name the gate they fell at         #
 # --------------------------------------------------------------------------- #
 
 test_that("a repaired grid reads as the posterior over the cells that remain", {
+  skip_on_cran()
   # A positive-weight cell that retained no block. The moments renormalize over
   # the cells that did, so the mixture carries the same weighting `estimate` and
   # `std.error` were formed under and the read runs (gcol33/tulpa#342). What it
@@ -294,20 +319,8 @@ test_that("a repaired grid reads as the posterior over the cells that remain", {
   expect_equal(attr(ci, "retained_mass"), sum(mx_w[c(1, 3)]) / sum(mx_w),
                tolerance = 1e-14)
   expect_equal(attr(ck, "retained_mass"), 1, tolerance = 1e-14)
-  expect_equal(attr(summary(fit), "retained_mass"),
+  expect_equal(attr(coef(summary(fit)), "retained_mass"),
                attr(ci, "retained_mass"), tolerance = 1e-14)
   expect_equal(tulpa:::.nested_fixed_moments(fit)$mass,
                sum(mx_w[c(1, 3)]) / sum(mx_w), tolerance = 1e-14)
-})
-
-test_that("a fit with no retained components declines with its own reason", {
-  fit <- mx_fit(mx_mu, mx_vr, mx_w)
-  mom <- tulpa:::.nested_fixed_moments(fit)
-  bare <- mom; bare$mu <- NULL; bare$var <- NULL
-  iv <- tulpa:::.nl_fixed_interval(
-    bare, 1:2, mom$mean, sqrt(diag(mom$cov)), c(0.025, 0.975),
-    list(enabled = FALSE, gamma3 = rep(NA_real_, 2)))
-  expect_identical(iv$source, "gaussian_moment")
-  expect_match(iv$declined, "no retained mixture components")
-  expect_equal(iv$q, unname(mx_gauss_ci(fit)), tolerance = 1e-14)
 })

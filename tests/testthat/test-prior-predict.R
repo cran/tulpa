@@ -54,15 +54,6 @@ test_that("prior_predict returns a tulpa_prior_predict with correct shapes", {
 })
 
 
-test_that("prior_predict is reproducible with seed", {
-  fam <- make_gaussian_family()
-  pp1 <- prior_predict(y ~ x, fam, df, n_draws = 5, seed = 123)
-  pp2 <- prior_predict(y ~ x, fam, df, n_draws = 5, seed = 123)
-  expect_identical(pp1$y, pp2$y)
-  expect_identical(pp1$theta, pp2$theta)
-})
-
-
 test_that("prior_predict draws differ across seeds", {
   fam <- make_gaussian_family()
   pp1 <- prior_predict(y ~ x, fam, df, n_draws = 5, seed = 1)
@@ -71,34 +62,25 @@ test_that("prior_predict draws differ across seeds", {
 })
 
 
-test_that("prior_predict handles random effect terms", {
-  fam <- make_gaussian_family()
-  pp <- prior_predict(y ~ x + (1 | g), fam, df, n_draws = 5, seed = 7)
-
-  expect_length(pp$theta[[1]]$u[[1]], 1L)  # one RE term -> one u block per process
-  re_block <- pp$theta[[1]]$u[[1]][[1]]
-  expect_equal(nrow(re_block), 5)  # 5 levels of g
-  expect_equal(ncol(re_block), 1)  # intercept-only
-})
-
-
-test_that("prior_predict samples extra_params from family priors", {
-  fam <- make_gaussian_family()
-  pp <- prior_predict(y ~ x, fam, df, n_draws = 50, seed = 4)
-
-  sig <- vapply(pp$theta, function(t) t$extras$sigma_y, numeric(1))
-  expect_true(all(sig > 0))               # half-normal positivity
-  expect_true(length(unique(sig)) > 1L)   # they vary across draws
-})
-
-
-test_that("prior_predict works without extra_params", {
+test_that("prior_predict and tulpa_simulate take data without the response (#898)", {
+  # The response is what is simulated, and the docs say the column may be
+  # absent; it was refused as "Response 'y' not found in data".
   fam <- make_poisson_family()
-  pp <- prior_predict(y ~ x, fam, df, n_draws = 5, seed = 9)
-  expect_length(pp$y, 5)
-  expect_true(all(vapply(pp$y, is.numeric, logical(1))))
+  no_y <- df[, setdiff(names(df), "y"), drop = FALSE]
+  pp <- prior_predict(y ~ x, fam, no_y, n_draws = 3, seed = 1)
+  expect_length(pp$y, 3)
+  expect_equal(pp$n_obs, nrow(df))
+  sim <- tulpa_simulate(y ~ x, fam, no_y, n_sims = 2, seed = 1)
+  expect_length(sim$y, 2)
 })
 
+test_that("priors_default() names what it takes and what tulpa() uses (#898)", {
+  expect_error(priors_default("poisson"),
+               "tulpa_family object .*built-in family name")
+  out <- capture.output(priors_default())
+  expect_true(any(grepl("prior_predict", out)))
+  expect_true(any(grepl("half-Cauchy\\(2.5\\)", out)))
+})
 
 test_that("prior_predict rejects bad inputs", {
   fam <- make_gaussian_family()
@@ -131,4 +113,48 @@ test_that("print method runs", {
   fam <- make_gaussian_family()
   pp <- prior_predict(y ~ x, fam, df, n_draws = 3, seed = 0)
   expect_output(print(pp), "tulpa prior predictive draws")
+})
+
+skip_on_cran_budget()
+
+
+test_that("prior_predict is reproducible with seed", {
+  skip_on_cran_budget()
+  fam <- make_gaussian_family()
+  pp1 <- prior_predict(y ~ x, fam, df, n_draws = 5, seed = 123)
+  pp2 <- prior_predict(y ~ x, fam, df, n_draws = 5, seed = 123)
+  expect_identical(pp1$y, pp2$y)
+  expect_identical(pp1$theta, pp2$theta)
+})
+
+
+test_that("prior_predict handles random effect terms", {
+  skip_on_cran_budget()
+  fam <- make_gaussian_family()
+  pp <- prior_predict(y ~ x + (1 | g), fam, df, n_draws = 5, seed = 7)
+
+  expect_length(pp$theta[[1]]$u[[1]], 1L)  # one RE term -> one u block per process
+  re_block <- pp$theta[[1]]$u[[1]][[1]]
+  expect_equal(nrow(re_block), 5)  # 5 levels of g
+  expect_equal(ncol(re_block), 1)  # intercept-only
+})
+
+
+test_that("prior_predict samples extra_params from family priors", {
+  skip_on_cran_budget()
+  fam <- make_gaussian_family()
+  pp <- prior_predict(y ~ x, fam, df, n_draws = 50, seed = 4)
+
+  sig <- vapply(pp$theta, function(t) t$extras$sigma_y, numeric(1))
+  expect_true(all(sig > 0))               # half-normal positivity
+  expect_true(length(unique(sig)) > 1L)   # they vary across draws
+})
+
+
+test_that("prior_predict works without extra_params", {
+  skip_on_cran_budget()
+  fam <- make_poisson_family()
+  pp <- prior_predict(y ~ x, fam, df, n_draws = 5, seed = 9)
+  expect_length(pp$y, 5)
+  expect_true(all(vapply(pp$y, is.numeric, logical(1))))
 })

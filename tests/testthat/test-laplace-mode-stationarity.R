@@ -86,7 +86,43 @@
 }
 
 
+test_that("the settled-mode gate passes a fit that does not report a residual", {
+  # Every kernel reports score_max, but the gate must not block a fit assembled
+  # without one (a hand-built list in a downstream package, an older cached fit).
+  d <- .stn_sim("poisson", 1)
+  f <- .stn_fit(d, 1)
+  f$score_max <- NULL
+  g <- .laplace_exact_re_grad(
+    fit = f, y = d$y, X = d$X, n_trials = d$n_trials, offset = NULL,
+    weights = NULL, re_list = d$re_list, layout = d$layout,
+    L_list = list(d$L0), family = d$fam, phi = 1)
+  expect_true(is.numeric(g))
+})
+
+
+test_that("the refusals are reported once per fit, not once per inner solve", {
+  # .with_unsettled_report collapses the per-solve signal the outer optimizers
+  # would otherwise emit at every trial theta.
+  expect_warning(
+    out <- .with_unsettled_report({
+      for (i in 1:3) {
+        warning(structure(class = c("tulpa_unsettled_mode", "warning", "condition"),
+                          list(call = NULL, message = paste("solve", i))))
+      }
+      "done"
+    }, "caller_fn"),
+    "declined at 3 inner solves")
+  expect_identical(out, "done")
+
+  # Nothing signalled, nothing reported.
+  expect_silent(.with_unsettled_report("quiet", "caller_fn"))
+})
+
+skip_on_cran_budget()
+
+
 test_that("score_max is the joint score at the mode the solve returned", {
+  skip_on_cran_budget()
   for (fam in c("poisson", "neg_binomial_2", "neg_binomial_1")) {
     d <- .stn_sim(fam, 1.5)
     f <- .stn_fit(d, 1.5)
@@ -101,6 +137,7 @@ test_that("score_max is the joint score at the mode the solve returned", {
 
 
 test_that("a slowly converging inner solve is run to stationarity, not stopped at it", {
+  skip_on_cran_budget()
   # neg_binomial_1's Newton weight is the quasi-likelihood mu / (1 + phi), which
   # sits far below the observed curvature at large phi. The solve then converges
   # linearly at a rate that crosses 0.707 between phi = 3 and phi = 4 -- exactly
@@ -116,6 +153,94 @@ test_that("a slowly converging inner solve is run to stationarity, not stopped a
     expect_lt(max(abs(.stn_joint_score(d, f$mode, phi))), 1e-8)
   }
 })
+
+
+test_that("the near-mode trust factor damps only a decrement that grew", {
+  skip_on_cran_budget()
+  # Away from the mode the scale is 1, so those solves take the trial sequence
+  # they always did; the gate is a decrement of 1e-6.
+  expect_equal(tulpa:::cpp_newton_trust_probe(c(1, 1e-2, 1e-5, 1e-6)),
+               rep(1, 4))
+
+  # Below the gate a FALLING decrement leaves the scale at 1: a solve that never
+  # overshoots is untouched, which is what keeps every converging fit unchanged.
+  expect_equal(tulpa:::cpp_newton_trust_probe(10^-c(7, 8, 9, 10, 11)),
+               rep(1, 5))
+
+  # A decrement that grows is the overshoot signature. The first reading below
+  # the gate only primes the state, so damping starts on the second.
+  expect_equal(tulpa:::cpp_newton_trust_probe(c(1e-7, 1e-7 * 2, 1e-7 * 4)),
+               c(1, 0.5, 0.25))
+
+  # Recovery is by 1.5 per iteration and capped at the full step.
+  expect_equal(
+    tulpa:::cpp_newton_trust_probe(c(1e-7, 2e-7, 4e-7, 1e-7, 1e-8, 1e-9, 1e-10)),
+    c(1, 0.5, 0.25, 0.375, 0.5625, 0.84375, 1))
+
+  # Crossing back above the gate resets both the scale and the memory, so a solve
+  # driven away from the mode and back does not carry stale damping.
+  expect_equal(tulpa:::cpp_newton_trust_probe(c(1e-7, 2e-7, 1e-3, 1e-7, 2e-7)),
+               c(1, 0.5, 1, 1, 0.5))
+
+  # The floor is 2^-20, reached only by a sustained run of growth. The sequence
+  # has to grow slowly enough to stay under the gate throughout -- crossing back
+  # above it resets, which is the case above.
+  probe <- tulpa:::cpp_newton_trust_probe(1e-30 * 1.1^(0:24))
+  expect_equal(probe[25], 2^-20)
+  expect_true(all(diff(probe[-1]) <= 0))
+})
+
+
+test_that("the exact gradient refuses a mode that stopped short of stationarity", {
+  skip_on_cran_budget()
+  d <- .stn_sim("neg_binomial_1", 0.5)
+  phi <- 6
+
+  starved <- .stn_fit(d, phi, max_iter = 20L)
+  expect_false(starved$converged)
+  expect_gt(starved$score_max, 1e-3)
+  expect_warning(
+    g <- .laplace_exact_re_grad(
+      fit = starved, y = d$y, X = d$X, n_trials = d$n_trials, offset = NULL,
+      weights = NULL, re_list = d$re_list, layout = d$layout,
+      L_list = list(d$L0), family = d$fam, phi = phi, want_phi = TRUE),
+    class = "tulpa_unsettled_mode")
+  expect_null(g)
+
+  # The same call on a settled fit returns the gradient with no warning, so the
+  # gate is reading the residual and not the family or the layout.
+  settled <- .stn_fit(d, phi, max_iter = 600L)
+  expect_true(settled$converged)
+  g_ok <- .laplace_exact_re_grad(
+    fit = settled, y = d$y, X = d$X, n_trials = d$n_trials, offset = NULL,
+    weights = NULL, re_list = d$re_list, layout = d$layout,
+    L_list = list(d$L0), family = d$fam, phi = phi, want_phi = TRUE)
+  expect_true(is.numeric(g_ok))
+  expect_length(g_ok, 2L)
+})
+
+
+test_that("the refusal count is readable while the wrapped expression runs", {
+  skip_on_cran_budget()
+  # This is what lets the gradient-driven outer optimizer notice it was walking
+  # blind and hand over to the derivative-free path. optim() receives a declined
+  # gradient as zeros and cannot tell that from a stationary point, so without
+  # the live count it can stop at theta0 and report the start as the estimate.
+  st <- .new_unsettled_state()
+  expect_identical(st$n, 0L)
+  seen <- NULL
+  expect_warning(
+    .with_unsettled_report({
+      warning(structure(class = c("tulpa_unsettled_mode", "warning", "condition"),
+                        list(call = NULL, message = "solve")))
+      seen <- st$n          # read DURING the expression
+      NULL
+    }, "caller_fn", st),
+    "fell back to the derivative-free optimizer")
+  expect_identical(seen, 1L)
+})
+
+skip_on_cran()
 
 
 test_that("the inner solve reaches stationarity at a large random-effect scale", {
@@ -151,41 +276,6 @@ test_that("the inner solve reaches stationarity at a large random-effect scale",
 })
 
 
-test_that("the near-mode trust factor damps only a decrement that grew", {
-  # Away from the mode the scale is 1, so those solves take the trial sequence
-  # they always did; the gate is a decrement of 1e-6.
-  expect_equal(tulpa:::cpp_newton_trust_probe(c(1, 1e-2, 1e-5, 1e-6)),
-               rep(1, 4))
-
-  # Below the gate a FALLING decrement leaves the scale at 1: a solve that never
-  # overshoots is untouched, which is what keeps every converging fit unchanged.
-  expect_equal(tulpa:::cpp_newton_trust_probe(10^-c(7, 8, 9, 10, 11)),
-               rep(1, 5))
-
-  # A decrement that grows is the overshoot signature. The first reading below
-  # the gate only primes the state, so damping starts on the second.
-  expect_equal(tulpa:::cpp_newton_trust_probe(c(1e-7, 1e-7 * 2, 1e-7 * 4)),
-               c(1, 0.5, 0.25))
-
-  # Recovery is by 1.5 per iteration and capped at the full step.
-  expect_equal(
-    tulpa:::cpp_newton_trust_probe(c(1e-7, 2e-7, 4e-7, 1e-7, 1e-8, 1e-9, 1e-10)),
-    c(1, 0.5, 0.25, 0.375, 0.5625, 0.84375, 1))
-
-  # Crossing back above the gate resets both the scale and the memory, so a solve
-  # driven away from the mode and back does not carry stale damping.
-  expect_equal(tulpa:::cpp_newton_trust_probe(c(1e-7, 2e-7, 1e-3, 1e-7, 2e-7)),
-               c(1, 0.5, 1, 1, 0.5))
-
-  # The floor is 2^-20, reached only by a sustained run of growth. The sequence
-  # has to grow slowly enough to stay under the gate throughout -- crossing back
-  # above it resets, which is the case above.
-  probe <- tulpa:::cpp_newton_trust_probe(1e-30 * 1.1^(0:24))
-  expect_equal(probe[25], 2^-20)
-  expect_true(all(diff(probe[-1]) <= 0))
-})
-
-
 test_that("the exact dispersion gradient holds at a large neg_binomial_1 phi", {
   skip_on_cran()
   # The regression the issue reports: at phi = 4 the assembled dm/dlog_phi was
@@ -201,82 +291,30 @@ test_that("the exact dispersion gradient holds at a large neg_binomial_1 phi", {
 })
 
 
-test_that("the exact gradient refuses a mode that stopped short of stationarity", {
-  d <- .stn_sim("neg_binomial_1", 0.5)
-  phi <- 6
+test_that("a refused gradient at a rejected line-search trial keeps the gradient-driven fit", {
+  # BFGS evaluates only the value at its line-search trials. On this binomial
+  # random intercept its third trial is sigma = 8.2e7, where every group with a
+  # one-sided response has its mode out near 30 and the inner solve reaches its
+  # iteration cap; that trial's log marginal is 5000 nats below the incumbent,
+  # so the line search rejects it and its gradient is never read. Its refusal
+  # therefore must not count against the fit.
+  skip_on_cran()
+  set.seed(1)
+  n <- 3000; G <- 300
+  g <- sample.int(G, n, replace = TRUE)
+  x <- rnorm(n)
+  u <- rnorm(G, 0, 0.8)
+  y <- rbinom(n, 1, plogis(-0.5 + 0.7 * x + u[g]))
+  d <- data.frame(y = y, x = x, g = factor(g))
 
-  starved <- .stn_fit(d, phi, max_iter = 20L)
-  expect_false(starved$converged)
-  expect_gt(starved$score_max, 1e-3)
-  expect_warning(
-    g <- .laplace_exact_re_grad(
-      fit = starved, y = d$y, X = d$X, n_trials = d$n_trials, offset = NULL,
-      weights = NULL, re_list = d$re_list, layout = d$layout,
-      L_list = list(d$L0), family = d$fam, phi = phi, want_phi = TRUE),
-    class = "tulpa_unsettled_mode")
-  expect_null(g)
-
-  # The same call on a settled fit returns the gradient with no warning, so the
-  # gate is reading the residual and not the family or the layout.
-  settled <- .stn_fit(d, phi, max_iter = 600L)
-  expect_true(settled$converged)
-  g_ok <- .laplace_exact_re_grad(
-    fit = settled, y = d$y, X = d$X, n_trials = d$n_trials, offset = NULL,
-    weights = NULL, re_list = d$re_list, layout = d$layout,
-    L_list = list(d$L0), family = d$fam, phi = phi, want_phi = TRUE)
-  expect_true(is.numeric(g_ok))
-  expect_length(g_ok, 2L)
-})
-
-
-test_that("the settled-mode gate passes a fit that does not report a residual", {
-  # Every kernel reports score_max, but the gate must not block a fit assembled
-  # without one (a hand-built list in a downstream package, an older cached fit).
-  d <- .stn_sim("poisson", 1)
-  f <- .stn_fit(d, 1)
-  f$score_max <- NULL
-  g <- .laplace_exact_re_grad(
-    fit = f, y = d$y, X = d$X, n_trials = d$n_trials, offset = NULL,
-    weights = NULL, re_list = d$re_list, layout = d$layout,
-    L_list = list(d$L0), family = d$fam, phi = 1)
-  expect_true(is.numeric(g))
-})
-
-
-test_that("the refusals are reported once per fit, not once per inner solve", {
-  # .with_unsettled_report collapses the per-solve signal the outer optimizers
-  # would otherwise emit at every trial theta.
-  expect_warning(
-    out <- .with_unsettled_report({
-      for (i in 1:3) {
-        warning(structure(class = c("tulpa_unsettled_mode", "warning", "condition"),
-                          list(call = NULL, message = paste("solve", i))))
-      }
-      "done"
-    }, "caller_fn"),
-    "declined at 3 inner solves")
-  expect_identical(out, "done")
-
-  # Nothing signalled, nothing reported.
-  expect_silent(.with_unsettled_report("quiet", "caller_fn"))
-})
-
-
-test_that("the refusal count is readable while the wrapped expression runs", {
-  # This is what lets the gradient-driven outer optimizer notice it was walking
-  # blind and hand over to the derivative-free path. optim() receives a declined
-  # gradient as zeros and cannot tell that from a stationary point, so without
-  # the live count it can stop at theta0 and report the start as the estimate.
-  st <- .new_unsettled_state()
-  expect_identical(st$n, 0L)
-  seen <- NULL
-  expect_warning(
-    .with_unsettled_report({
-      warning(structure(class = c("tulpa_unsettled_mode", "warning", "condition"),
-                        list(call = NULL, message = "solve")))
-      seen <- st$n          # read DURING the expression
-      NULL
-    }, "caller_fn", st),
-    "fell back to the derivative-free optimizer")
-  expect_identical(seen, 1L)
+  seen <- character()
+  fit <- withCallingHandlers(
+    tulpa(y ~ x + (1 | g), data = d, family = "binomial", mode = "structured",
+          control = list(n_threads = 1L)),
+    warning = function(w) {
+      seen <<- c(seen, conditionMessage(w))
+      invokeRestart("muffleWarning")
+    })
+  expect_false(any(grepl("derivative-free", seen)))
+  expect_equal(fit$theta_hat, -0.228, tolerance = 0.01)
 })

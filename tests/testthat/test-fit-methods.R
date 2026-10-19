@@ -17,6 +17,33 @@ make_re_data <- function(seed, n = 400L, b0 = 0.5, b1 = 1.2,
   )
 }
 
+
+# --- logLik() df resolution ---------------------------------------------------
+
+test_that("logLik() df falls through to means when n_fixed and mode are absent", {
+  # `length(NULL)` is 0, not NULL, so resolving df with a `%||%` chain over
+  # `length()` calls stopped at the first ABSENT candidate: a fit carrying
+  # neither `n_fixed` nor `mode` came back with df = 0.
+  fit <- structure(
+    list(log_prob = rep(-100, 5L), means = stats::setNames(rnorm(6L), letters[1:6]),
+         N = 50L),
+    class = c("tulpa_fit"))
+  ll <- stats::logLik(fit)
+  expect_equal(attr(ll, "df"), 6L)
+})
+
+test_that("logLik() df prefers n_fixed, then mode, over means", {
+  base <- list(log_prob = rep(-100, 5L), means = rnorm(6L), N = 50L)
+  with_nf <- structure(c(base, list(n_fixed = 4L, mode = rnorm(5L))),
+                       class = "tulpa_fit")
+  expect_equal(attr(stats::logLik(with_nf), "df"), 4L)
+
+  with_mode <- structure(c(base, list(mode = rnorm(5L))), class = "tulpa_fit")
+  expect_equal(attr(stats::logLik(with_mode), "df"), 5L)
+})
+
+skip_on_cran()
+
 test_that("Laplace fit supports the full S3 method contract", {
   skip_on_cran()
   d <- make_re_data(42)
@@ -27,7 +54,7 @@ test_that("Laplace fit supports the full S3 method contract", {
   expect_named(cf, c("(Intercept)", "x"))
   expect_length(cf, 2L)
 
-  sm <- summary(fit)
+  sm <- coef(summary(fit))
   expect_equal(nrow(sm), 2L)
   expect_true(all(is.finite(sm$std.error)))
   expect_equal(rownames(sm), c("(Intercept)", "x"))
@@ -146,8 +173,8 @@ test_that("Gibbs fit (one chain in $draws) supports the contract", {
   cf <- coef(fit)
   expect_named(cf, c("(Intercept)", "x"))
   expect_length(cf, 2L)
-  expect_equal(nrow(summary(fit)), 2L)
-  expect_true(all(is.finite(summary(fit)$std.error)))
+  expect_equal(nrow(coef(summary(fit))), 2L)
+  expect_true(all(is.finite(coef(summary(fit))$std.error)))
   expect_equal(dim(vcov(fit)), c(2L, 2L))
   expect_gt(nrow(ranef(fit)), 0L)
   # predict reuses coef()/vcov(), so it must work here too
@@ -167,33 +194,8 @@ test_that("sampler fit reports named fixed effects and separate random effects",
   expect_named(cf, c("(Intercept)", "x"))
   expect_length(cf, 2L)             # fixed effects only
 
-  expect_equal(nrow(summary(fit)), 2L)
+  expect_equal(nrow(coef(summary(fit))), 2L)
   expect_equal(nrow(ranef(fit)), d$n_groups)
   expect_setequal(names(tidy(fit)),
                   c("term", "estimate", "std.error", "conf.low", "conf.high"))
-})
-
-
-# --- logLik() df resolution ---------------------------------------------------
-
-test_that("logLik() df falls through to means when n_fixed and mode are absent", {
-  # `length(NULL)` is 0, not NULL, so resolving df with a `%||%` chain over
-  # `length()` calls stopped at the first ABSENT candidate: a fit carrying
-  # neither `n_fixed` nor `mode` came back with df = 0.
-  fit <- structure(
-    list(log_prob = rep(-100, 5L), means = stats::setNames(rnorm(6L), letters[1:6]),
-         N = 50L),
-    class = c("tulpa_fit"))
-  ll <- stats::logLik(fit)
-  expect_equal(attr(ll, "df"), 6L)
-})
-
-test_that("logLik() df prefers n_fixed, then mode, over means", {
-  base <- list(log_prob = rep(-100, 5L), means = rnorm(6L), N = 50L)
-  with_nf <- structure(c(base, list(n_fixed = 4L, mode = rnorm(5L))),
-                       class = "tulpa_fit")
-  expect_equal(attr(stats::logLik(with_nf), "df"), 4L)
-
-  with_mode <- structure(c(base, list(mode = rnorm(5L))), class = "tulpa_fit")
-  expect_equal(attr(stats::logLik(with_mode), "df"), 5L)
 })

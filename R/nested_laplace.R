@@ -36,7 +36,26 @@
 #'           `rho_bounds = c(lower, upper)` (defaults to (0, 1)).
 #'   * rw1/rw2: `temporal_idx` (1-based), `n_times`; optional `tau_grid`,
 #'             `cyclic` (default FALSE).
-#'   * ar1:   `temporal_idx`, `n_times`; optional `tau_grid`, `rho_grid`.
+#'   * ar1:   `temporal_idx`, `n_times`; optional `tau_grid`, `rho_grid`
+#'           (each `rho_grid` value strictly inside (-1, 1)).
+#'
+#'   An `icar`, `bym2`, `car_proper` or `nngp` block may carry `projector`, an
+#'   `N x n_spatial_units` (`N x n_spatial` for `nngp`) matrix (dense or a
+#'   \pkg{Matrix} sparse matrix), in place of `spatial_idx`: observation `i`
+#'   then receives `(A z)_i`, so restricted spatial regression is
+#'   `A = S P_perp` with `S` the observation-to-unit incidence. The block is
+#'   fitted by the multi-block driver, alone or in a list of blocks. An
+#'   intrinsic field's level is placed from `A 1`: removed with no fold where
+#'   it is zero, folded into the intercept where it is the intercept column,
+#'   otherwise left to the augmentation. The `nngp` and `car_proper` priors are
+#'   proper and carry their level themselves.
+#'
+#'   Grids of a two-axis type (`bym2`, `car_proper`, `ar1`) are PAIRED when
+#'   both are supplied: the i-th entries of `tau_grid` / `sigma_grid` and
+#'   `rho_grid` form the i-th outer-grid cell, so the two must have equal
+#'   length, and a tensor grid is written as `expand.grid()` columns. A single
+#'   supplied axis is kept as an axis (its distinct values) and crossed with
+#'   the default of the other.
 #'
 #'   A default grid axis is a starting axis, not a hard ceiling: for `icar`
 #'   (`tau_grid`) and `bym2` (`sigma_grid`) a posterior mode that rails a
@@ -90,35 +109,30 @@
 #'     FIXED inner Laplace, this scores whether that inner Gaussian
 #'     approximation is itself a good fit to the latent-field conditional
 #'     posterior. See [diagnostics()] for the combined whole-fit verdict.
-#'   * `within_cell` (`"box_uniform"`) -- the WITHIN-CELL construction the
+#'   * `within_cell` (`"log_quadratic"`) -- the WITHIN-CELL construction the
 #'     reported per-axis hyperparameter intervals are read with. The outer
 #'     grid's weights say how much mass each cell holds; they do not say how it
-#'     is spread inside the cell, and a quantile needs both. `"box_uniform"`
-#'     puts the cumulative FULL mass at each cell EDGE and interpolates between
-#'     edges; `"chord"` puts the cumulative MID-mass at each cell coordinate
-#'     and interpolates between coordinates -- the same masses over the same
-#'     boxes with the knots moved half a cell, which measures as a whole order
-#'     of convergence (2.00 against 1.04 on a fixture with a closed-form
-#'     posterior). THE DEFAULT IS `"box_uniform"` since 0.0.188, decided on
-#'     FIXED-TRUTH coverage at the placement the engine ships, with
-#'     `auto_recenter = "resolve"` as the default. Summed
-#'     |coverage - nominal| over nominal 0.95 / 0.80 / 0.50, chord against
-#'     box-uniform: 0.2900 / 0.1233 on the pre-registered fixed-truth
-#'     instrument, 0.2004 / 0.0361 over 4680 truth-swept fits of the same
-#'     fixture, and 0.2467 / 0.1572 over nine (config, axis) rows spanning
-#'     seven families, at 0.69 to 1.08x the width. The conditional-coverage
-#'     swing that held the default back reads 0.110 at the shipped placement
-#'     against 0.415 on the coarse pinned grid it was measured on, and at
-#'     nominal 0.50 it is the same on both reads. `outer_grid_h_over_sd` is how
-#'     wide a cell is on each axis (with `outer_grid_resolution_declined`
-#'     naming why an axis carries no ratio, and `outer_grid_railed_axes` naming
-#'     any axis whose nodes do not contain its own posterior mode), and
-#'     `theta_within_cell` is what each axis was actually read with. Only a
-#'     `"density"` support admits it -- a CCD design, a locally refined grid
-#'     and a posterior sample are not cell partitions that tile -- and an axis
-#'     it declines on reports `"chord"` with a reason rather than erroring.
+#'     is spread inside the cell, and a quantile needs both.
+#'     `"log_quadratic"` joins each row's node log densities by overlapping
+#'     quadratics, exact for a Gaussian at any spacing, and continues the end
+#'     quadratic past the outer node instead of stopping at the box edge; it
+#'     runs on the rows that resolve their own conditional (`h / sd <= 2`) and
+#'     reads every other row as boxes, declining to `"box_uniform"` where no
+#'     row qualifies. `"box_uniform"` puts the cumulative FULL mass at each
+#'     cell EDGE and interpolates between edges; `"chord"` puts the cumulative
+#'     MID-mass at each cell coordinate and interpolates between coordinates.
+#'     The default moved from `"box_uniform"` at gcol33/tulpa#932: a placed
+#'     axis sits at 1.25 posterior SDs per cell, where the box read is narrow
+#'     by construction, and against dense references of a two-arm ICAR
+#'     fixture the log-quadratic read's summed error is 0.038 against the box
+#'     read's 0.110 on the same grids. `outer_grid_h_over_sd` is how wide a
+#'     cell is on each axis, and `theta_within_cell` is what each axis was
+#'     actually read with. Only a `"density"` support admits the box and
+#'     log-quadratic reads -- a CCD design, a locally refined grid and a
+#'     posterior sample are not cell partitions that tile -- and an axis they
+#'     decline on reports the read that ran with a reason rather than erroring.
 #'     Nothing else moves: point estimates, moments, draws and weights are
-#'     untouched, and `"chord"` restores the previous report exactly.
+#'     untouched.
 #'   * `skew_correct` (`TRUE`) -- consume the inner-Laplace expansion instead of
 #'     only grading it: report
 #'     Cornish-Fisher marginal quantiles at each coefficient's own `gamma_3`,
@@ -240,11 +254,11 @@
 #'     in silence. The per-axis policy names are the standalone registry path
 #'     only -- [tulpa_nested_laplace_joint()] and [fit_st_nested()] refuse them
 #'     rather than accept them and ignore them.
-#'   * `max_grid_cells` (`2048L`) -- cell-count ceiling on a multi-block outer
-#'     grid, refused with an error above it. Each cell is one inner Newton
-#'     solve, so the default catches a per-block grid that multiplied out to a
-#'     run nobody asked for; a deliberate converged tensor reference grid (4
-#'     axes at 7 levels is 2401 cells) raises it here.
+#'   * `max_grid_cells` (`NULL`, no ceiling) -- a ceiling on a multi-block
+#'     outer grid's cell count, one inner Newton solve per cell; a grid past it
+#'     is refused before any solve, naming the axes that produced the count.
+#'     Unset, a grid of any size is solved, and one past 2048 cells is announced
+#'     with a warning first.
 #'   * `checkpoint` (`list(path =, resume =)`) -- grid-cell checkpoint /
 #'     resume. Each solved outer cell is appended to `path`, keyed by its
 #'     hyperparameter coordinate; `resume = TRUE` loads the finished cells and
@@ -254,37 +268,35 @@
 #'   * `progress`, `progress.every`, `progress.file`, `progress.throttle` --
 #'     the outer-grid progress reporter: whether to print, how often (in
 #'     cells), where to, and the minimum seconds between lines.
-#'   * `prune` (`FALSE`), `prune_tol` (`1e-3`), `screen_iters`
-#'     (`.NL_SCREEN$iters`, 2 -- the doc said 5 while the engine read 2, which
-#'     is what gcol33/tulpa#640 measured the depth down to) --
-#'     opt-in cheap-pass screening of the outer grid. When `prune = TRUE`, the
-#'     driver first sweeps the lattice running a `screen_iters`-step inner
-#'     Newton per cell, each warm-started from the previous screened cell's
-#'     quasi-mode, computes a screening Laplace log-marginal, softmax-normalises
-#'     it, and skips the full inner Newton on every cell whose screened weight
-#'     is below `prune_tol`. The neighbour warm-start keeps each cheap mode near
-#'     its cell's own mode, so the cheap ranking tracks the full-solve ranking
-#'     even where the latent mode moves across the grid. Pruned cells get
+#'   * `prune` (`TRUE`), `prune_tol` (`1e-3`), `screen_iters`
+#'     (`.NL_SCREEN$iters`, 2 -- the depth gcol33/tulpa#640 measured the screen
+#'     down to) -- cheap-pass screening of the outer grid. The driver first
+#'     sweeps the lattice running a `screen_iters`-step inner Newton per cell,
+#'     each warm-started from the previous screened cell's quasi-mode, computes
+#'     a screening Laplace log-marginal, softmax-normalises it, and skips the
+#'     full inner Newton on every cell whose screened weight is below
+#'     `prune_tol`. The neighbour warm-start keeps each cheap mode near its
+#'     cell's own mode, so the cheap ranking tracks the full-solve ranking even
+#'     where the latent mode moves across the grid. Pruned cells get
 #'     `log_marginal = -Inf`, `n_iter = 0` and inherit the pilot mode; the pilot
 #'     cell is never pruned, and at least `prune_min_keep` cells (5) are solved
 #'     in full whatever the tolerance says -- the highest-ranked dropped cells
 #'     are restored up to that floor, because the outer grid placement pass
 #'     reads a finite-difference curvature off the cells that were SOLVED and a
-#'     kept set of one carries none. A safety gate falls back to the full grid
-#'     (with a warning) whenever the cheap-screen argmax disagrees with the
-#'     full-solve argmax, or the kept posterior collapses onto a cell the screen
-#'     mis-estimated by more than the margin it discarded cells by. The gate
-#'     bounds a MIS-RANKING, not the whole error: it compares the screen against
-#'     the cells that were solved, so a cell it discarded and never solved is
-#'     outside what it can see. The default `prune = FALSE` is the setting under
-#'     which no such question arises.
+#'     kept set of one carries none. After the full pass the posterior mass the
+#'     dropped cells may carry is bounded by lifting each by the worst screening
+#'     error measured on a kept cell (`prune_dropped_mass_bound`); past 1% the
+#'     driver solves the dropped cells that contribute most to it until it is
+#'     under 1% (`prune_n_repaired`), and a safety gate falls back to the full
+#'     grid (with a warning) if the bound still fails. The bound assumes a
+#'     dropped cell is screened no worse than the worst kept one. On by default
+#'     (gcol33/tulpa#925); `FALSE` solves every cell.
 #'     `prune_tol` must be a finite numeric in `[0, 1)` and `screen_iters` a
-#'     single integer `>= 1`; both are validated whatever `prune` says. Pruning
-#'     is OPT-IN: the default `FALSE` solves every cell, which is correct
-#'     whatever the grid looks like. `prune` / `prune_tol` reach both the
-#'     single-block and the multi-block dispatch; the screening DEPTH is
-#'     declared by the single-block kernels only, so a multi-block prior refuses
-#'     a pinned `screen_iters` rather than accepting it and ignoring it.
+#'     single integer `>= 1`; both are validated whatever `prune` says.
+#'     `prune` / `prune_tol` reach both the single-block and the multi-block
+#'     dispatch; the screening DEPTH is declared by the single-block kernels
+#'     only, so a multi-block prior refuses a pinned `screen_iters` rather than
+#'     accepting it and ignoring it.
 #'   * `prune_log_gap` (unset) -- the screening cut stated in nats instead of as
 #'     a normalised weight: keep every cell within this many nats of the best
 #'     screened cell. `prune_tol` is a weight, so what it cuts at is the gap
@@ -306,6 +318,21 @@
 #'     SPDE and spatiotemporal fields included, each read off its cell's own
 #'     precision at the mode; a multi-block prior refuses `FALSE` rather than
 #'     accepting it and ignoring it.
+#'   * `var_of_means_consistency` (`TRUE`) -- the consistency pass of
+#'     [tulpa_nested_laplace_joint()]: a field SD (`tau` of an `icar`, `rw1` or
+#'     `rw2` block, `sigma` of an `iid`, `bym2` or `spde` block) whose marginal
+#'     has collapsed onto too few nodes to carry a spread has levels added in
+#'     every row of the other axes that holds the posterior until it resolves, and the new cells are
+#'     solved and carried like the rest (`var_of_means_consistency_info`
+#'     records the pass). Other axes keep the nodes they were laid on.
+#'   * `adaptive_grid` (`FALSE`), `adaptive_grid_edge_thresh` (`0.02`),
+#'     `adaptive_grid_max_passes` (`1L`) -- the opt-in boundary / interior pass,
+#'     on the same axes.
+#'   * `axis_refine` (`NULL`) -- per-axis override of how far those axes may be
+#'     moved, named by the grid's axes (`"tau"`; `"b1.tau"` on a multi-block
+#'     prior): `"none"`, `"densify"` (inside the declared span) or `"extend"`.
+#'     Nodes the caller wrote down densify by default and an engine-placed axis
+#'     extends, as in [tulpa_nested_laplace_joint()].
 #'
 #' @return A list with:
 #'   * `theta_grid`: matrix or vector of grid hyperparameter values.
@@ -332,8 +359,11 @@
 #'     `grid`, `postproc`, `diagnostics`); the `grid` phase is the inner
 #'     Laplace pass that scales with grid size. Surfaced one-line in `print`.
 #'   * `prune_cheap_log_marginal`, `prune_mask`, `prune_n_pruned`, `prune_tol`:
-#'     present only when `control$prune = TRUE` and the safety gate did not
-#'     trip -- the cheap-screen log-marginal per cell, the logical mask of
+#'     present when the grid was screened and the safety gate did not
+#'     trip -- the cheap-screen log-marginal per cell (the truncated solve's
+#'     value plus half its Newton decrement, the second-order estimate of the
+#'     converged value the cells are ranked by; the decrement itself is
+#'     `prune_screen_decrement`), the logical mask of
 #'     pruned cells, the pruned-cell count, and the threshold actually applied.
 #'   * `prune_log_gap_cut`, `prune_cheap_lm_spread`, `prune_min_keep`,
 #'     `prune_n_floor_restored`: the same screen read on the scale it operates
@@ -341,6 +371,10 @@
 #'     how many nats the screened surface spans, the kept-cell floor applied,
 #'     and how many cells that floor put back. A cut that is a sliver of the
 #'     spread is a tolerance with no resolution on this grid.
+#'   * `prune_dropped_mass_bound`, `prune_n_repaired`, `prune_gate_mass`: the
+#'     posterior mass the dropped cells may carry, with each lifted by the worst
+#'     screening error measured on a kept cell; how many dropped cells the
+#'     driver solved in full to bring that under the gate; and the gate.
 #'   * `prune_fallback_triggered`, `prune_fallback_reason`: present only when
 #'     the gate did trip; the rest of the fit is then the full-grid result and
 #'     the reason string records which check fired.
@@ -394,6 +428,10 @@ tulpa_nested_laplace <- function(y, n_trials, X, prior = NULL,
                             control = list()) {
 
   tulpa_check_control(control, .CONTROL_KEYS$nested_laplace, "tulpa_nested_laplace")
+  # A typo is named here, against the family registry, rather than by the C++
+  # family lookup, whose message names a header (gcol33/tulpa#886). A consumer
+  # `likelihood` supplies its own density and bypasses the builtin family.
+  if (is.null(likelihood)) .family_or_stop(.canonical_family(family))
   hyperprior <- .hp_choice(match.arg(hyperprior))
   tm <- .tulpa_timer()
 
@@ -409,7 +447,7 @@ tulpa_nested_laplace <- function(y, n_trials, X, prior = NULL,
   # tolerance and the screening depth are validated whatever `prune` says, so a
   # misspecified value is reported where the user set it rather than at the next
   # fit that happens to switch pruning on.
-  prune              <- isTRUE(control$prune %||% FALSE)
+  prune              <- isTRUE(control$prune %||% .nl_screen("prune")[["registry"]])
   # `prune_log_gap` states the same cut in nats -- the units the screened
   # surface is measured in -- and replaces the tolerance when set.
   prune_tol          <- .nl_prune_tol_from_control(
@@ -447,6 +485,14 @@ tulpa_nested_laplace <- function(y, n_trials, X, prior = NULL,
   # `.nl_diag("within_cell")`, and `"chord"` restores the pre-0.0.188 report
   # byte-identically.
   within_cell        <- .nl_within_cell_mode(control$within_cell)
+  # Outer-grid refinement: the passes the joint drivers run
+  # (`.joint_refine_outer_grid()`), over the field SD axes this door can write a
+  # cell onto. The consistency pass is on by default, the boundary / interior
+  # pass opt in, as there.
+  var_of_means_consistency  <- isTRUE(control$var_of_means_consistency %||% TRUE)
+  adaptive_grid             <- isTRUE(control$adaptive_grid %||% FALSE)
+  adaptive_grid_edge_thresh <- control$adaptive_grid_edge_thresh %||% 0.02
+  adaptive_grid_max_passes  <- control$adaptive_grid_max_passes %||% 1L
 
   # Grid-cell checkpoint/resume. `control$checkpoint =
   # list(path =, resume =)` makes every grid cell append to `path`; a resume
@@ -462,9 +508,9 @@ tulpa_nested_laplace <- function(y, n_trials, X, prior = NULL,
     file.remove(.ckpt$path)
   }
 
-  # Multi-block outer-grid cell ceiling, published for the duration of this fit
-  # so the initial dispatch and every re-dispatch (the k-hat re-evaluations, the
-  # subspace-debias refit) enforce the caller's value rather than the default.
+  # The caller's outer-grid ceiling, published for the duration of this fit so
+  # the initial dispatch and every re-dispatch (the k-hat re-evaluations, the
+  # subspace-debias refit) read the same value.
   .op_grid_cap <- options(tulpa.nl_max_grid_cells = .nl_max_grid_cells(control))
   on.exit(options(.op_grid_cap), add = TRUE)
 
@@ -488,6 +534,19 @@ tulpa_nested_laplace <- function(y, n_trials, X, prior = NULL,
     stop("`prior` must be a list (single block) or list-of-lists (multi-block).",
          call. = FALSE)
   }
+  # This door's outer grid is spanned by the latent blocks' hyperparameters
+  # alone, so a prior with no block leaves nothing to integrate. The joint door
+  # integrates per-arm dispersion axes as well and does take an empty prior.
+  if (!length(prior)) {
+    stop("`prior` holds no latent block, so tulpa_nested_laplace() has no ",
+         "hyperparameter to integrate. Fit a fixed-effects model with ",
+         "tulpa(mode = \"laplace\"), or integrate a dispersion axis with ",
+         "tulpa_nested_laplace_joint(prior = list(), phi_grid = ).",
+         call. = FALSE)
+  }
+  # A projected areal field is read by the multi-block driver alone, so a
+  # single projected block routes there as a length-1 block list.
+  if (.nl_block_is_projected(prior)) prior <- list(prior)
   # Outer-axis provenance: record which grid axes the caller
   # declared as defaults with `auto_grid()` -- the registry rescue below reads
   # it -- and strip the markers so every downstream consumer sees plain grids.
@@ -571,7 +630,7 @@ tulpa_nested_laplace <- function(y, n_trials, X, prior = NULL,
     # pass's refit -- is screened at the same tolerance and gated the same way,
     # so no reported grid is a pruned one whose screen ranking was unreliable.
     solve_grid_multi <- function(prior_i) {
-      .nl_prune_gate(
+      out <- .nl_prune_gate(
         .nl_dispatch_multi(cargs, prior_i, likelihood = likelihood,
                            progress = .nl_progress_args(control),
                            within_cell = within_cell),
@@ -580,6 +639,22 @@ tulpa_nested_laplace <- function(y, n_trials, X, prior = NULL,
           utils::modifyList(cargs, list(prune_tol = 0)), prior_i,
           likelihood = likelihood, progress = .nl_progress_args(control),
           within_cell = within_cell))
+      refined <- .nl_refine_registry(
+        out, function(theta_mat, screen = NULL) .nl_dispatch_multi(
+          .nl_refine_cargs(cargs_no_ckpt, screen, prune_tol_eff), prior_i,
+          likelihood = likelihood, theta_grid_override = theta_mat),
+        prior_i, TRUE, .prov$auto,
+        consistency = var_of_means_consistency,
+        adaptive_grid = adaptive_grid,
+        edge_thresh = adaptive_grid_edge_thresh,
+        max_passes = adaptive_grid_max_passes,
+        user = control$axis_refine)
+      if (is.null(refined$refining_axis)) return(refined)
+      # The dispatcher integrated the base grid; the appended cells are measured
+      # and read with the rest.
+      refined <- .nl_attach_outer_integration(refined, "multi-block outer grid")
+      .nl_posterior_moments_multi(refined, refined$blocks, refined$axis_offsets,
+                                  refined$theta_grid, within = within_cell)
     }
     res <- solve_grid_multi(prior)
     tm$mark("grid")
@@ -622,12 +697,14 @@ tulpa_nested_laplace <- function(y, n_trials, X, prior = NULL,
     res <- .nl_subspace_debias_attach(
       res, sd_cfg,
       redispatch = function(req) .nl_dispatch_multi(
-        cargs_no_ckpt, prior, likelihood = likelihood, debias = req),
+        cargs_no_ckpt, prior, likelihood = likelihood, debias = req,
+        theta_grid_override = .nl_refined_theta(res)),
       p_fixed = p_fixed, beta_names = colnames(X))
     res <- .nl_cila_attach(
       res, cila_cfg,
       redispatch = function(req) .nl_dispatch_multi(
-        cargs_no_ckpt, prior, likelihood = likelihood, cila = req),
+        cargs_no_ckpt, prior, likelihood = likelihood, cila = req,
+        theta_grid_override = .nl_refined_theta(res)),
       p_fixed = p_fixed, beta_names = colnames(X),
       remoments = function(r) .nl_posterior_moments_multi(
         r, r$blocks, r$axis_offsets, r$theta_grid, within = within_cell))
@@ -657,11 +734,24 @@ tulpa_nested_laplace <- function(y, n_trials, X, prior = NULL,
   # refit -- is screened at the same tolerance and gated the same way, so no
   # reported grid is a pruned one whose screen ranking was unreliable.
   solve_grid <- function(prior_i) {
-    .nl_prune_gate(
+    out <- .nl_prune_gate(
       .nl_dispatch(type, cargs, prior_i, prior_i),
       prune_tol_eff,
       function() .nl_dispatch(type, utils::modifyList(cargs, list(prune_tol = 0)),
                               prior_i, prior_i))
+    .nl_refine_registry(
+      out, function(theta_mat, screen = NULL) {
+        blk2 <- .nl_registry_write_theta(
+          list(prior_i), theta_mat, colnames(theta_mat))[[1L]]
+        .nl_dispatch(type, .nl_refine_cargs(cargs_no_ckpt, screen, prune_tol_eff),
+                     blk2, prior_i)
+      },
+      prior_i, FALSE, .prov$auto,
+      consistency = var_of_means_consistency,
+      adaptive_grid = adaptive_grid,
+      edge_thresh = adaptive_grid_edge_thresh,
+      max_passes = adaptive_grid_max_passes,
+      user = control$axis_refine)
   }
   res <- solve_grid(prior)
   tm$mark("grid")
@@ -676,7 +766,9 @@ tulpa_nested_laplace <- function(y, n_trials, X, prior = NULL,
   res <- .nl_attach_outer_integration(res, "outer grid")
   res <- .nl_posterior_moments(res, type, within = within_cell)
   if (isTRUE(keep_grid_hessians)) {
-    res <- .nl_attach_grid_hessians(res, p_fixed, keep_joint_prec)
+    res <- .nl_attach_grid_hessians(
+      res, p_fixed, keep_joint_prec,
+      var_cols = .nl_role_cols(prior, NULL, res$Q_csc_n, "temporal"))
   }
   tm$mark("postproc")
   res <- .nl_attach_pareto_k(res, prior, cargs_no_ckpt, "single", type, NULL,
@@ -697,7 +789,11 @@ tulpa_nested_laplace <- function(y, n_trials, X, prior = NULL,
       r <- solve_grid(prior_i)
       r <- .nl_attach_outer_integration(r, "outer grid")
       r <- .nl_posterior_moments(r, type, within = within_cell)
-      if (isTRUE(keep_grid_hessians)) r <- .nl_attach_grid_hessians(r, p_fixed, keep_joint_prec)
+      if (isTRUE(keep_grid_hessians)) {
+        r <- .nl_attach_grid_hessians(
+          r, p_fixed, keep_joint_prec,
+          var_cols = .nl_role_cols(prior_i, NULL, r$Q_csc_n, "temporal"))
+      }
       .nl_attach_pareto_k(r, prior_i, cargs_no_ckpt, "single", type, NULL,
                           k_samples, compute = diagnose_k,
                           tail_points = k_tail_points)
@@ -720,12 +816,14 @@ tulpa_nested_laplace <- function(y, n_trials, X, prior = NULL,
   res <- .nl_subspace_debias_attach(
     res, sd_cfg,
     redispatch = function(req) .nl_dispatch(
-      type, utils::modifyList(cargs_no_ckpt, list(debias = req)), prior, prior),
+      type, utils::modifyList(cargs_no_ckpt, list(debias = req)),
+      .nl_refined_block(res, prior), prior),
     p_fixed = p_fixed, beta_names = colnames(X))
   res <- .nl_cila_attach(
     res, cila_cfg,
     redispatch = function(req) .nl_dispatch(
-      type, utils::modifyList(cargs_no_ckpt, list(cila = req)), prior, prior),
+      type, utils::modifyList(cargs_no_ckpt, list(cila = req)),
+      .nl_refined_block(res, prior), prior),
     p_fixed = p_fixed, beta_names = colnames(X),
     remoments = function(r) .nl_posterior_moments(r, type, within = within_cell))
   tm$mark("diagnostics")
@@ -900,12 +998,17 @@ tulpa_nested_laplace <- function(y, n_trials, X, prior = NULL,
 #          extra fields .joint_call_kernel_via_multi() indexes on the
 #          single-block joint path, where the per-observation index lives on
 #          each arm rather than on the block.
+#   projected
+#          the fields a projected block carries on a multi-block path: an areal
+#          block's graph or an NNGP block's neighbour structure, with
+#          `projector` in place of `spatial_idx`.
 # A key absent from an entry means the type is not dispatchable on that path;
 # the path's own converter raises its "only supported inside ..." message.
 .NL_REQ_AREAL_GRAPH <- c("n_spatial_units", "adj_row_ptr", "adj_col_idx",
                          "n_neighbors")
 .NL_REQ_AREAL <- c("spatial_idx", .NL_REQ_AREAL_GRAPH)
 .NL_REQ_TEMPORAL <- c("temporal_idx", "n_times")
+.NL_REQ_NNGP_FIELD <- c("coords", "nn_idx", "nn_dist", "n_spatial", "nn")
 .NL_REQ_HSGP_ARM <- c("m_total", "phi", "n_obs_per_arm", "eigenvalues")
 .NL_REQ_SPDE_MESH <- c("n_mesh", "A_x", "A_i", "A_p",
                        "C0_diag", "G1_x", "G1_i", "G1_p", "nu")
@@ -979,6 +1082,7 @@ tulpa_nested_laplace <- function(y, n_trials, X, prior = NULL,
     cpp_fn = "cpp_nested_laplace_icar",
     required = list(single = .NL_REQ_AREAL, multi = .NL_REQ_AREAL,
                     joint = .NL_REQ_AREAL,
+                    projected = .NL_REQ_AREAL_GRAPH,
                     joint_single = .NL_REQ_AREAL_GRAPH),
     defaults = function(p, a) .nl_fill_family_axes(p, "icar"),
     pack = function(p) c(.nl_adj_args(p), list(
@@ -991,12 +1095,14 @@ tulpa_nested_laplace <- function(y, n_trials, X, prior = NULL,
     cpp_fn = "cpp_nested_laplace_bym2",
     required = list(single = .NL_REQ_AREAL, multi = .NL_REQ_AREAL,
                     joint = .NL_REQ_AREAL,
+                    projected = .NL_REQ_AREAL_GRAPH,
                     joint_single = .NL_REQ_AREAL_GRAPH),
     defaults = function(p, a) .nl_fill_family_axes(p, "bym2"),
     pack = function(p) c(.nl_adj_args(p), list(
       scale_factor       = as.numeric(p$scale_factor %||% 1.0),
       sigma_spatial_grid = as.numeric(p$sigma_grid),
-      rho_grid           = as.numeric(p$rho_grid)
+      rho_grid           = as.numeric(p$rho_grid),
+      node_prec          = if (!is.null(p$node_prec)) as.numeric(p$node_prec)
     )),
     theta = function(p) list(
       grid  = cbind(sigma = p$sigma_grid, rho = p$rho_grid),
@@ -1008,6 +1114,7 @@ tulpa_nested_laplace <- function(y, n_trials, X, prior = NULL,
     cpp_fn = "cpp_nested_laplace_car_proper",
     required = list(single = .NL_REQ_AREAL, multi = .NL_REQ_AREAL,
                     joint = .NL_REQ_AREAL,
+                    projected = .NL_REQ_AREAL_GRAPH,
                     joint_single = .NL_REQ_AREAL_GRAPH),
     defaults = function(p, a) {
       # `rho_car_grid` is the joint-API spelling of the correlation axis; accept
@@ -1015,7 +1122,9 @@ tulpa_nested_laplace <- function(y, n_trials, X, prior = NULL,
       p$rho_grid <- p$rho_grid %||% p$rho_car_grid
       # Both axes supplied -> treat as the pre-paired integration grid (the
       # theta builder pairs them with cbind), matching bym2 / ar1.
-      if (!is.null(p$tau_grid) && !is.null(p$rho_grid)) return(p)
+      if (!is.null(p$tau_grid) && !is.null(p$rho_grid)) {
+        return(.nl_check_paired_axes(p, c("tau_grid", "rho_grid")))
+      }
       # Otherwise default each missing axis independently and cross the two, so
       # supplying only one axis keeps it instead of discarding it.
       rb <- p$rho_bounds %||% .nl_grid_par("car_rho", "bounds")
@@ -1094,33 +1203,25 @@ tulpa_nested_laplace <- function(y, n_trials, X, prior = NULL,
 
   nngp = list(
     cpp_fn = "cpp_nested_laplace_nngp",
-    # spatial_idx / nn_order / cov_type are defaulted below, so they are not
-    # required.
-    required = list(single = c("coords", "nn_idx", "nn_dist", "n_spatial", "nn")),
+    # spatial_idx / nn_order / cov_type are defaulted on the single-block path,
+    # so they are not required there; the multi-block path reads spatial_idx.
+    required = list(single = .NL_REQ_NNGP_FIELD,
+                    multi = c(.NL_REQ_NNGP_FIELD, "spatial_idx"),
+                    joint = c(.NL_REQ_NNGP_FIELD, "spatial_idx"),
+                    projected = .NL_REQ_NNGP_FIELD),
     defaults = function(p, a) .nl_fill_family_axes(p, "nngp"),
     pack = function(p) {
-      # nn_order in cpp_nested_laplace_nngp expects 0-based indices, matching
-      # the convention in cpp_laplace_fit_gp (see R/fit_laplace.R:433).
-      n_spatial <- as.integer(p$n_spatial)
       # spatial_idx (1-based, length N) maps obs -> spatial unit. Default to
       # 1..n_spatial when N == n_spatial (the legacy one-obs-per-location case).
       spatial_idx <- if (!is.null(p$spatial_idx)) {
         as.integer(p$spatial_idx)
       } else {
-        seq_len(n_spatial)
+        seq_len(as.integer(p$n_spatial))
       }
-      list(
-        spatial_idx = spatial_idx,
-        coords      = as.matrix(p$coords),
-        nn_idx      = as.matrix(p$nn_idx),
-        nn_dist     = as.matrix(p$nn_dist),
-        nn_order    = as.integer((p$nn_order %||% seq_len(n_spatial)) - 1L),
-        n_spatial   = n_spatial,
-        nn          = as.integer(p$nn),
-        sigma2_grid = as.numeric(p$sigma2_grid),
-        phi_gp_grid = as.numeric(p$phi_gp_grid),
-        cov_type    = as.integer(p$cov_type %||% 2L)  # default Matern-5/2
-      )
+      c(list(spatial_idx = spatial_idx),
+        .nl_nngp_field_args(p),
+        list(sigma2_grid = as.numeric(p$sigma2_grid),
+             phi_gp_grid = as.numeric(p$phi_gp_grid)))
     },
     theta = function(p) list(
       grid  = cbind(sigma2 = p$sigma2_grid, phi_gp = p$phi_gp_grid),
@@ -1205,6 +1306,7 @@ tulpa_nested_laplace <- function(y, n_trials, X, prior = NULL,
     # eigenvalues (lambda_eig); the joint one takes a per-arm list (phi) with
     # `eigenvalues` and the basis / row counts it needs to slice them.
     required = list(single = c("phi_basis", "lambda_eig"),
+                    multi = c("phi_basis", "lambda_eig"),
                     joint = .NL_REQ_HSGP_ARM),
     defaults = function(p, a) .nl_fill_family_axes(p, "hsgp"),
     pack = function(p) list(
@@ -1288,7 +1390,13 @@ tulpa_nested_laplace <- function(y, n_trials, X, prior = NULL,
     cpp_fn = "cpp_nested_laplace_temporal",
     required = list(single = .NL_REQ_TEMPORAL, multi = .NL_REQ_TEMPORAL,
                     joint = .NL_REQ_TEMPORAL),
-    defaults = function(p, a) .nl_fill_family_axes(p, "ar1"),
+    defaults = function(p, a) {
+      # The temporal kernel takes rho as given, so an AR1 correlation outside
+      # (-1, 1) -- a non-stationary process -- is refused here, by name.
+      .nl_check_axis_open_interval(p, "rho_grid", -1, 1,
+                                   "an AR1 correlation")
+      .nl_fill_family_axes(p, "ar1")
+    },
     pack = function(p) list(
       temporal_idx  = as.integer(p$temporal_idx),
       n_times       = as.integer(p$n_times),
@@ -1388,6 +1496,10 @@ tulpa_nested_laplace <- function(y, n_trials, X, prior = NULL,
   if (!is.null(spec$cpp_fn)) .nl_check_block_fields(p, c("axis", "single"))
   hyperprior <- .hp_choice(a$hyperprior)
   a$hyperprior <- NULL
+  # A refinement round's screen record (`.hyper_refine_screen()`): the cells
+  # are a batch joining a solved grid. Read here, never handed to a kernel.
+  screen <- a$screen_refine
+  a$screen_refine <- NULL
   p   <- spec$defaults(p, a)
   th  <- spec$theta(p)
   tg  <- .nl_theta_matrix(list(theta_grid = th$grid, theta_names = th$names))
@@ -1403,7 +1515,9 @@ tulpa_nested_laplace <- function(y, n_trials, X, prior = NULL,
   # the grid solve, the placement refit and its stencil, the k-hat refit. A
   # screened solve ranks its cells with it too.
   hp  <- list(.nl_block_log_hyperprior(p, tg, hyperprior, declared = hp_declared))
-  if ((a$prune_tol %||% 0) > 0) a$screen_log_offset <- .nl_screen_log_offset(tg, hp)
+  if ((a$prune_tol %||% 0) > 0) {
+    a$screen_log_offset <- .nl_screen_log_offset(tg, hp, screen = screen)
+  }
   out <- do.call(spec$cpp_fn, c(spec$pack(p), a))
   out$theta_grid  <- th$grid
   out$theta_names <- th$names
@@ -1416,7 +1530,13 @@ tulpa_nested_laplace <- function(y, n_trials, X, prior = NULL,
 # order. Both are fixed by the grid before any cell is solved, and together with
 # the kernel's log-marginal they are the posterior weight a cell ends up with,
 # so the screen and the full pass rank the same quantity.
-.nl_screen_log_offset <- function(tg, hp_parts, specs = NULL) {
+#
+# `screen` is the record a refinement round hands its kernel
+# (`.hyper_refine_screen()`): the cells are a batch joining a solved grid, so
+# their measure is read on the merged grid (`log_measure`) rather than on the
+# batch, and the grid's own mass (`log_ref`) travels as the offset's `log_ref`
+# attribute, which the kernel's screen normalises against.
+.nl_screen_log_offset <- function(tg, hp_parts, specs = NULL, screen = NULL) {
   tg <- as.matrix(tg)
   n  <- nrow(tg)
   lp <- numeric(n)
@@ -1425,12 +1545,21 @@ tulpa_nested_laplace <- function(y, n_trials, X, prior = NULL,
     lp <- lp + hp$lp
     axes <- union(axes, hp$axes)
   }
-  if (is.null(specs) && !is.null(colnames(tg))) {
-    specs <- .joint_axis_specs_from_grid(tg, folded_axes = axes)
+  lq <- if (!is.null(screen)) {
+    if (length(screen$log_measure) != n) {
+      stop("A refinement screen measures ", length(screen$log_measure),
+           " cells; the kernel call holds ", n, ".", call. = FALSE)
+    }
+    screen$log_measure
+  } else {
+    if (is.null(specs) && !is.null(colnames(tg))) {
+      specs <- .joint_axis_specs_from_grid(tg, folded_axes = axes)
+    }
+    .hyper_log_quad_weights(tg, specs)
   }
-  lq <- .hyper_log_quad_weights(tg, specs)
   off <- lp + (if (length(lq) == n) lq else 0)
   off[is.na(off)] <- -Inf
+  if (!is.null(screen)) attr(off, "log_ref") <- as.numeric(screen$log_ref)
   off
 }
 
@@ -1441,12 +1570,17 @@ tulpa_nested_laplace <- function(y, n_trials, X, prior = NULL,
 # clipped to the span the nodes were declared over.
 .nl_attach_outer_integration <- function(res, what = "outer grid") {
   tg    <- .nl_theta_matrix(res)
+  # A node a refinement pass appended was not declared, so the specs are read
+  # off the base cells and the cells' tags carry the rest.
+  refining <- res$refining_axis
+  base  <- !nzchar(.hyper_slice_home(refining, nrow(tg)))
   specs <- .joint_axis_specs_from_grid(
-    tg, folded_axes = res$log_hyperprior_axes)
-  res$log_quad     <- .hyper_log_quad_weights(tg, specs)
-  res$axis_support <- .hyper_grid_supports(tg, specs)
+    tg[base, , drop = FALSE], folded_axes = res$log_hyperprior_axes)
+  res$log_quad     <- .hyper_log_quad_weights(tg, specs, refining = refining)
+  res$axis_support <- .hyper_grid_supports(tg, specs, refining = refining)
   res$weights      <- .nl_normalise_weights_safe(res$log_marginal, what,
                                                  log_quad = res$log_quad)
+  res <- .nl_prune_merged_record(res)
   .nl_attach_evidence(res, tg, specs)
 }
 
@@ -1482,6 +1616,10 @@ tulpa_nested_laplace <- function(y, n_trials, X, prior = NULL,
 #' @return Numeric vector of posterior cell weights summing to 1, the same
 #'   length as `lm`, or all-`NA` if no cell carries finite mass.
 #' @seealso [tulpa_theta_matrix()], [tulpa_grid_log_quad()]
+#' @examples
+#' tulpa_normalise_weights_safe(c(-1, 0, -2))
+#' # With per-cell log quadrature weights (cell prior masses):
+#' tulpa_normalise_weights_safe(c(-1, 0, -2), log_quad = log(c(0.2, 0.5, 0.3)))
 #' @export
 tulpa_normalise_weights_safe <- function(lm, what = "grids / data",
                                           log_quad = NULL) {
@@ -1622,7 +1760,34 @@ tulpa_normalise_weights_safe <- function(lm, what = "grids / data",
   L + Matrix::t(L) - Matrix::Diagonal(n_x, Matrix::diag(L))
 }
 
-.nl_attach_grid_hessians <- function(res, p_fixed, keep_joint = FALSE) {
+#
+# `var_cols` names latent coordinates whose per-cell MARGINAL variance,
+# diag(Q_k^{-1}), is retained alongside (`grid_field_var`, n_grid x
+# length(var_cols), with the columns in `grid_field_var_cols`). The same solve
+# delivers it: those unit columns join E. It defaults to the temporal field (the
+# `temporal =` block, or a latent(temporal_ar*()) block), so
+# temporal() reports each cell's Gaussian -- mode AND curvature -- mixed over
+# the grid rather than the cell modes alone, which carried only the spread
+# between cells and covered the truth at 57% for a nominal 95%
+# (gcol33/tulpa#904). Only a field whose read-back needs it is retained: one
+# column per coordinate per cell, and a large spatial field is not asked for.
+#
+# The field's full within-cell covariance (`grid_field_cov`, a list of
+# n_var x n_var matrices parallel to the cells, NULL where a cell was pruned)
+# is retained too, so temporal()'s draws carry the correlation BETWEEN time
+# points a cell's Gaussian implies and not only each point's marginal: a
+# derived quantity over time (a trend, a difference between two years, a
+# cumulative sum) read off draws with independent coordinates has the wrong
+# spread. Capped at `.NL_FIELD_COV_MAX` doubles over the grid; past the cap only
+# the marginals are kept and the draws fall back to independent coordinates.
+.NL_FIELD_COV_MAX <- 4e6
+
+.nl_attach_grid_hessians <- function(res, p_fixed, keep_joint = FALSE,
+                                     var_cols = c(
+                                       .nl_role_cols(res$blocks,
+                                                     res$block_latent_offsets,
+                                                     res$Q_csc_n, "temporal"),
+                                       .nl_temporal_latent_block(res)$cols)) {
   Q_p <- res$Q_csc_p_per_grid
   Q_i <- res$Q_csc_i_per_grid
   Q_x <- res$Q_csc_x_per_grid
@@ -1639,10 +1804,45 @@ tulpa_normalise_weights_safe <- function(lm, what = "grids / data",
   grid_hessians <- vector("list", n_grid)
   grid_modes    <- vector("list", n_grid)
 
-  E <- matrix(0, nrow = n_x, ncol = p_fixed)
-  for (j in seq_len(p_fixed)) E[j, j] <- 1
+  var_cols <- as.integer(var_cols)
+  var_cols <- var_cols[var_cols > p_fixed & var_cols <= n_x]
+  n_var <- length(var_cols)
+  field_var <- if (n_var) matrix(NA_real_, n_grid, n_var) else NULL
+  # The field's whole within-cell covariance is the lower-right block of the
+  # same S, so retaining it costs no further solve -- only the storage, which
+  # grows as n_var^2 per cell and is capped by `.NL_FIELD_COV_MAX`.
+  keep_cov <- n_var > 0L && as.numeric(n_grid) * n_var^2 <= .NL_FIELD_COV_MAX
+  field_cov <- if (keep_cov) vector("list", n_grid)
+
+  E <- matrix(0, nrow = n_x, ncol = p_fixed + n_var)
+  E[cbind(c(seq_len(p_fixed), var_cols), seq_len(p_fixed + n_var))] <- 1
 
   modes_mat <- res$modes  # n_grid x n_x
+
+  # An intrinsic block (ICAR, BYM2's structured part, RW1 / RW2) stands for a
+  # field whose constant is a HARD sum-to-zero constraint. The inner solve
+  # augments that direction so the Hessian inverts, and centres it into the
+  # intercept, so the stored precision carries a finite 1 / (tau J) variance
+  # on the level -- and the unconditioned inverse puts it into the intercept's
+  # standard error (3-4x the exact posterior SD on a 50-node ICAR,
+  # gcol33/tulpa#901) and into an intrinsic temporal field's marginal variance.
+  # The driver names each intrinsic block's constraint group
+  # (`constraint_cols`), and both reads are conditioned on them by the kriging
+  # correction a joint fit's retained block and posterior draws use
+  # (cpp_joint_inner_vcov_blocks, Rue & Held 2005):
+  #   Cov(x | A x = 0) = V - W (A W)^-1 W',  V = Q^-1 E,  W = Q^-1 A'.
+  # The mode needs no correction: the centring already put it on the
+  # constraint.
+  constr <- res$constraint_cols
+  n_con <- length(constr)
+  if (n_con) {
+    E <- cbind(E, vapply(constr, function(cc) {
+      a <- numeric(n_x)
+      a[as.integer(cc)] <- 1
+      a
+    }, numeric(n_x)))
+  }
+  sel <- seq_len(p_fixed + n_var)
 
   for (k in seq_len(n_grid)) {
     # A cell the cheap screen pruned is never solved, so it holds no precision
@@ -1654,6 +1854,11 @@ tulpa_normalise_weights_safe <- function(lm, what = "grids / data",
     # parallel to `weights` -- assigning NULL removes the element and shortens
     # the list, which NAs the whole coefficient table (gcol33/tulpa#345).
     if (length(Q_p[[k]]) != n_x + 1L) next
+    grid_modes[[k]] <- if (!is.null(modes_mat)) {
+      as.numeric(modes_mat[k, seq_len(p_fixed)])
+    } else {
+      rep(NA_real_, p_fixed)
+    }
     L <- Matrix::sparseMatrix(
       i = Q_i[[k]], p = Q_p[[k]], x = Q_x[[k]],
       dims = c(n_x, n_x), index1 = FALSE
@@ -1661,12 +1866,12 @@ tulpa_normalise_weights_safe <- function(lm, what = "grids / data",
     diag_L <- Matrix::diag(L)
     Qk <- L + Matrix::t(L) - Matrix::Diagonal(n_x, diag_L)
 
-    # V = Qk^{-1} E selects the fixed-effect columns of the joint inverse; its
-    # top p_fixed rows are the fixed-effect marginal covariance. A dense GP /
-    # NNGP field precision at close locations makes the joint precision
-    # ill-conditioned, which trips Matrix's condition-number guard. Retry with a
-    # negligible diagonal jitter (scaled to the precision) so the marginal-SE
-    # extraction stays available rather than aborting the whole fit.
+    # V = Qk^{-1} E selects the fixed-effect (and read field) columns of the
+    # joint inverse. A dense GP / NNGP field precision at close locations makes
+    # the joint precision ill-conditioned, which trips Matrix's
+    # condition-number guard. Retry with a negligible diagonal jitter (scaled
+    # to the precision) so the marginal-SE extraction stays available rather
+    # than aborting the whole fit.
     V <- tryCatch(
       as.matrix(Matrix::solve(Qk, E)),
       error = function(e) {
@@ -1674,18 +1879,33 @@ tulpa_normalise_weights_safe <- function(lm, what = "grids / data",
         as.matrix(Matrix::solve(Qk + Matrix::Diagonal(n_x, jit), E))
       }
     )
-    Sigma_bb <- V[seq_len(p_fixed), , drop = FALSE]
-    grid_hessians[[k]] <- solve(Sigma_bb)
-
-    grid_modes[[k]] <- if (!is.null(modes_mat)) {
-      as.numeric(modes_mat[k, seq_len(p_fixed)])
-    } else {
-      rep(NA_real_, p_fixed)
+    rows <- c(seq_len(p_fixed), var_cols)
+    S <- V[rows, sel, drop = FALSE]
+    if (n_con) {
+      W  <- V[, p_fixed + n_var + seq_len(n_con), drop = FALSE]
+      AW <- crossprod(E[, p_fixed + n_var + seq_len(n_con), drop = FALSE], W)
+      Wr <- W[rows, , drop = FALSE]
+      S  <- S - Wr %*% solve((AW + t(AW)) / 2, t(Wr))
+    }
+    Sigma_bb <- S[seq_len(p_fixed), seq_len(p_fixed), drop = FALSE]
+    grid_hessians[[k]] <- .spd_inverse(Sigma_bb)
+    if (n_var) {
+      fi <- p_fixed + seq_len(n_var)
+      field_var[k, ] <- diag(S)[fi]
+      if (keep_cov) {
+        Sf <- S[fi, fi, drop = FALSE]
+        field_cov[[k]] <- (Sf + t(Sf)) / 2
+      }
     }
   }
 
   res$grid_hessians <- grid_hessians
   res$grid_modes    <- grid_modes
+  if (n_var) {
+    res$grid_field_var      <- field_var
+    res$grid_field_var_cols <- var_cols
+    if (keep_cov) res$grid_field_cov <- field_cov
+  }
   if (isTRUE(keep_joint)) res$H_joint <- .nl_modal_joint_precision(res)
   # Strip the verbose CSC scratch fields once Hessians are assembled.
   res$Q_csc_p_per_grid <- NULL
@@ -1702,9 +1922,160 @@ tulpa_normalise_weights_safe <- function(lm, what = "grids / data",
 # outer-grid point all blocks share a Newton solve; the joint grid is the
 # Cartesian product of per-block axes.
 
+# Block types whose field may reach the observations through a projector: arm
+# k's predictor receives A_k z in place of the unit gather z[spatial_idx]
+# (restricted spatial regression, A_k = P_k S_k). Both multi-block drivers read
+# one; an areal block's level is placed from A_k 1, an NNGP block's prior
+# carries its own.
+.NL_PROJECTABLE_AREAL <- c("icar", "bym2", "car_proper")
+.NL_PROJECTABLE_TYPES <- c(.NL_PROJECTABLE_AREAL, "nngp")
+
+.nl_block_is_projected <- function(p) {
+  is.list(p) && tolower(p$type %||% "") %in% .NL_PROJECTABLE_TYPES &&
+    !is.null(p$projector)
+}
+
+# A block `projector` is read by the two multi-block drivers, the single-arm
+# one behind tulpa_nested_laplace() and the joint one. The single-block joint
+# path would gather the field through `spatial_idx` and drop the projector, so
+# it refuses it.
+.nl_refuse_projector <- function(prior, door) {
+  blocks <- if (is.list(prior) && !is.null(prior$type)) list(prior) else prior
+  if (!is.list(blocks)) return(invisible(NULL))
+  has <- vapply(blocks, function(b) is.list(b) && !is.null(b$projector),
+                logical(1))
+  if (any(has)) {
+    stop(door, " does not read a block `projector`; a projected areal field ",
+         "is fitted by tulpa_nested_laplace_joint() with a list of blocks, ",
+         "`prior = list(<block>)`.", call. = FALSE)
+  }
+  invisible(NULL)
+}
+
+# A projected block's per-arm projectors as the column-compressed triple
+# the C++ block builders read (0-based `A_i` / `A_p`, the SPDE projector's
+# layout). `p$projector` is a list of n_arms matrices, each N_k x n_units
+# (dense or a Matrix sparse matrix), or one matrix shared by every arm; a NULL
+# entry is an arm the field does not reach. The projector replaces the unit
+# gather, so a block carrying `spatial_idx` as well, or a per-row
+# `svc_weight` that belongs inside A_k, is refused.
+.nl_block_projector <- function(p, n_arms, block_index, arm_n_obs) {
+  type <- tolower(p$type)
+  lab <- paste0("Block ", block_index, " (type '", type, "')")
+  if (!is.null(p$spatial_idx)) {
+    stop(lab, ": pass either `projector` or `spatial_idx`, not both; a ",
+         "projector already maps the observations to the units.",
+         call. = FALSE)
+  }
+  if (!is.null(p$svc_weight)) {
+    stop(lab, ": `projector` and `svc_weight` cannot be combined; scale ",
+         "the projector's rows by the weight.", call. = FALSE)
+  }
+  if (is.null(arm_n_obs)) {
+    stop(lab, ": a projector needs the arms' observation counts.",
+         call. = FALSE)
+  }
+  n_units <- as.integer(p$n_spatial_units %||% p$n_spatial)
+  projector <- p$projector
+  if (!is.list(projector)) projector <- rep(list(projector), n_arms)
+  if (length(projector) != n_arms) {
+    stop(lab, ": `projector` must be a list of length n_arms (", n_arms,
+         "), or one matrix shared by every arm.", call. = FALSE)
+  }
+  csc <- lapply(seq_len(n_arms), function(k) {
+    A <- projector[[k]]
+    if (is.null(A)) {
+      return(list(x = numeric(0), i = integer(0), p = integer(n_units + 1L)))
+    }
+    if (!(is.matrix(A) || methods::is(A, "Matrix")) ||
+        nrow(A) != arm_n_obs[k] || ncol(A) != n_units) {
+      stop(lab, ": `projector[[", k, "]]` must be a ", arm_n_obs[k],
+           " x ", n_units, " matrix (arm ", k, "'s observations by the ",
+           "block's units).", call. = FALSE)
+    }
+    A <- methods::as(methods::as(Matrix::Matrix(A, sparse = TRUE),
+                                 "generalMatrix"), "CsparseMatrix")
+    if (!all(is.finite(A@x))) {
+      stop(lab, ": `projector[[", k, "]]` holds a non-finite entry.",
+           call. = FALSE)
+    }
+    list(x = as.numeric(A@x), i = as.integer(A@i), p = as.integer(A@p))
+  })
+  list(A_x = lapply(csc, `[[`, "x"),
+       A_i = lapply(csc, `[[`, "i"),
+       A_p = lapply(csc, `[[`, "p"))
+}
+
+# An NNGP block's neighbour structure as the C++ block builders read it, on
+# either the single-block kernel or the multi-block driver. nn_order is passed
+# 0-based, the convention cpp_laplace_fit_gp also uses.
+.nl_nngp_field_args <- function(p) {
+  n_spatial <- as.integer(p$n_spatial)
+  list(
+    coords    = as.matrix(p$coords),
+    nn_idx    = as.matrix(p$nn_idx),
+    nn_dist   = as.matrix(p$nn_dist),
+    nn_order  = as.integer((p$nn_order %||% seq_len(n_spatial)) - 1L),
+    n_spatial = n_spatial,
+    nn        = as.integer(p$nn),
+    cov_type  = as.integer(p$cov_type %||% 2L)  # default Matern-5/2
+  )
+}
+
 .is_multi_block_prior <- function(p) {
-  is.list(p) && is.null(p$type) && length(p) > 0 &&
+  is.list(p) && is.null(p$type) &&
     all(vapply(p, function(x) is.list(x) && !is.null(x$type), logical(1)))
+}
+
+# What each block of a nested prior is FOR: "spatial", "temporal" or "other".
+# tulpa() tags its `spatial =` / `temporal =` blocks with `role`, and on a tagged
+# prior every untagged block (an s(x) smoother, a latent() block, a `(1 | g)`
+# iid block) is "other" -- a type does not say what a block is for, since a
+# smoother is an rw1 / rw2 block and a random intercept an iid one. A prior
+# built by hand carries no tags, and its blocks are classified by type
+# (`.SPATIAL_NL_TYPES` / `.TEMPORAL_NL_TYPES`). `prior` is a single block or a
+# list of blocks; the result has one entry per block.
+.nl_block_roles <- function(prior) {
+  if (is.null(prior) || !is.list(prior) || !length(prior)) return(character(0))
+  blocks <- if (!is.null(prior$type)) list(prior) else prior
+  tagged <- vapply(blocks, function(b) {
+    r <- if (is.list(b)) b$role else NULL
+    if (is.character(r) && length(r) == 1L) r else NA_character_
+  }, character(1))
+  if (any(!is.na(tagged))) return(ifelse(is.na(tagged), "other", tagged))
+  types <- vapply(blocks, function(b) tolower(b$type %||% ""), character(1))
+  ifelse(types %in% .SPATIAL_NL_TYPES, "spatial",
+         ifelse(types %in% .TEMPORAL_NL_TYPES, "temporal", "other"))
+}
+
+# Columns of a nested fit's latent vector (`modes`, the per-cell precision)
+# holding the first block whose role is `role`, or NULL. A multi-block solve
+# reports where each block starts (`block_latent_offsets`, from the C++ block
+# builders, which are what decide a block's width); a single-block solve lays
+# out [fixed, RE, field], so its field is the tail. `blocks` is the fit's block
+# list (or single block), `n_x` the latent length.
+.nl_role_cols <- function(blocks, offsets, n_x, role) {
+  roles <- .nl_block_roles(blocks)
+  k <- which(roles == role)[1L]
+  if (is.na(k) || is.null(n_x)) return(NULL)
+  if (length(roles) == 1L && !is.null(blocks$type)) {
+    w <- .nl_single_block_width(blocks)
+    if (is.null(w) || w < 1L || w > n_x) return(NULL)
+    return(as.integer(seq.int(n_x - w + 1L, n_x)))
+  }
+  if (length(offsets) != length(roles) + 1L) return(NULL)
+  lo <- offsets[k]; hi <- offsets[k + 1L]
+  if (!is.finite(lo) || !is.finite(hi) || hi <= lo || hi > n_x) return(NULL)
+  as.integer(seq.int(lo + 1L, hi))
+}
+
+# Width of a single temporal block's field (the only single-block field whose
+# coefficients a read-back slices; the rest report through their own
+# accessors). NULL when the block does not say.
+.nl_single_block_width <- function(p) {
+  nt <- p$n_times
+  if (is.null(nt)) return(NULL)
+  as.integer(nt) * max(as.integer(p$n_groups %||% 1L), 1L)
 }
 
 # Structural spec for one block sent to cpp_nested_laplace_multi. Grid values
@@ -1715,9 +2086,12 @@ tulpa_normalise_weights_safe <- function(lm, what = "grids / data",
 # already realised from the Cartesian product. tgmrf needs it to precompute
 # Q(theta_k) at every joint-grid row; built-in types ignore the argument
 # because they read theta values directly from theta_grid in the C++ side.
-.nl_block_spec_for_cpp <- function(p, block_joint_grid = NULL) {
+.nl_block_spec_for_cpp <- function(p, block_joint_grid = NULL, n_obs = NULL,
+                                   block_index = NULL) {
   type <- tolower(p$type)
-  .nl_check_block_fields(p, c("axis", "multi"))
+  projected <- .nl_block_is_projected(p)
+  .nl_check_block_fields(p, c("axis", if (projected) "projected" else "multi"),
+                         block_index)
   # Optional per-observation design weight, attached after the type branch has
   # built the spec: it turns any block into a varying coefficient whose eta
   # contribution is svc_weight[i] * <the block's field at i>, and the C++ side
@@ -1728,19 +2102,37 @@ tulpa_normalise_weights_safe <- function(lm, what = "grids / data",
     out$svc_weight <- as.numeric(p$svc_weight)
     out
   }
-  if (type %in% c("icar", "bym2", "car_proper")) {
+  if (type %in% .NL_PROJECTABLE_AREAL) {
     out <- list(
       type            = type,
-      spatial_idx     = as.integer(p$spatial_idx),
+      spatial_idx     = if (!projected) as.integer(p$spatial_idx),
       n_spatial_units = as.integer(p$n_spatial_units),
       adj_row_ptr     = as.integer(p$adj_row_ptr),
       adj_col_idx     = as.integer(p$adj_col_idx),
       n_neighbors     = as.integer(p$n_neighbors)
     )
+    if (projected) {
+      out$projector <- .nl_block_projector(p, 1L, block_index %||% 1L, n_obs)
+    }
     if (type == "bym2") {
       out$scale_factor <- as.numeric(p$scale_factor %||% 1.0)
+      if (!is.null(p$node_prec)) out$node_prec <- as.numeric(p$node_prec)
     }
     .with_svc(out)
+  } else if (type == "nngp") {
+    out <- c(list(type        = "nngp",
+                  spatial_idx = if (!projected) as.integer(p$spatial_idx)),
+             .nl_nngp_field_args(p))
+    if (projected) {
+      out$projector <- .nl_block_projector(p, 1L, block_index %||% 1L, n_obs)
+    }
+    .with_svc(out)
+  } else if (type == "hsgp") {
+    .with_svc(list(
+      type       = "hsgp",
+      phi_basis  = as.matrix(p$phi_basis),
+      lambda_eig = as.numeric(p$lambda_eig)
+    ))
   } else if (type %in% c("rw1", "rw2", "ar1")) {
     out <- list(
       type         = type,
@@ -1902,10 +2294,6 @@ tulpa_normalise_weights_safe <- function(lm, what = "grids / data",
   list(grid = grid, names = colnames(grid), prepared = p)
 }
 
-# Hard cap on the joint-grid cell count, and the default value of
-# `control$max_grid_cells`.
-.NL_MULTI_GRID_HARD_CAP <- 2048L
-
 # Wall-clock threshold, in seconds, above which a multi-block outer-grid
 # solve gets a "this was slow" warning. Cell count alone does not predict
 # solve time -- a family/likelihood pair, N, or a block's own per-cell cost
@@ -1921,12 +2309,36 @@ tulpa_normalise_weights_safe <- function(lm, what = "grids / data",
 # (`R/nested_laplace_joint_multi.R`): both solve their outer grid in one call
 # and mark its elapsed time as the "grid" timing bucket, so both warn off that
 # measurement through this one function rather than keeping two copies of the
-# same message.
-.nl_multi_grid_warn <- function(elapsed, n_cells, remedy) {
+# same message. `layout` is `.nl_grid_crossing()`'s account of the axes that
+# produced the count, so the advice names which grids to shrink.
+.nl_multi_grid_warn <- function(elapsed, n_cells, remedy, layout = "") {
   if (isTRUE(elapsed > .NL_MULTI_GRID_WARN_SECONDS) && !.nl_internal_batch()) {
     warning(sprintf(
-      "Multi-block outer grid (%d cells) took %s to solve. %s",
-      n_cells, .format_duration(elapsed), remedy
+      "Multi-block outer grid (%s cells) took %s to solve.%s %s",
+      format(n_cells, scientific = FALSE, trim = TRUE),
+      .format_duration(elapsed), layout, remedy
+    ), call. = FALSE)
+  }
+  invisible(NULL)
+}
+
+# Cell count above which a dense multi-block outer tensor is announced with a
+# warning BEFORE its solve starts. Each cell is one inner Laplace solve, so the
+# count is the run's size in solves; it does not know the per-solve cost, which
+# is why it warns rather than refuses and why the post-solve warning above reads
+# measured time.
+.NL_DENSE_GRID_WARN_CELLS <- 2048L
+
+# Shared by both multi-block dispatchers: the dense tensor about to be solved
+# has `n_cells` inner solves, `layout` (`.nl_grid_crossing()`) names the axes
+# that produced them and `remedy` is the dispatcher's advice. Gated like the
+# timing warning, so an internal batch the caller did not size stays quiet.
+.nl_dense_grid_warn <- function(n_cells, remedy, layout = "") {
+  if (isTRUE(n_cells > .NL_DENSE_GRID_WARN_CELLS) && !.nl_internal_batch()) {
+    warning(sprintf(
+      paste0("Multi-block outer grid is a dense tensor of %s cells, one inner ",
+             "solve each.%s %s"),
+      format(n_cells, scientific = FALSE, trim = TRUE), layout, remedy
     ), call. = FALSE)
   }
   invisible(NULL)
@@ -1939,9 +2351,7 @@ tulpa_normalise_weights_safe <- function(lm, what = "grids / data",
 # importance draws by substituting them for the block's grid axis, so a 7-node
 # fit warned about a cell count the diagnostic's own budget set and advised
 # reducing per-block grid sizes, which does not reach the number in the message
-# (gcol33/tulpa#614). The HARD cap is deliberately not gated: it is a resource
-# ceiling the front door publishes so every re-dispatch enforces the caller's
-# value, and an internal batch is exactly as expensive as a user one.
+# (gcol33/tulpa#614).
 #
 # Transported on an option rather than an argument because the two warning sites
 # sit behind different dispatchers -- `.nl_dispatch_multi()` takes `cargs`, the
@@ -1959,19 +2369,19 @@ tulpa_normalise_weights_safe <- function(lm, what = "grids / data",
   force(expr)
 }
 
-# Resolve the hard cap for one fit. `control$max_grid_cells = <n>` moves the
-# ceiling in either direction: the default refuses the accidental blow-up, and a
-# deliberate converged tensor reference grid (4 axes x 7 levels = 2401 cells) is
-# a run a caller can knowingly ask for. The front doors
-# publish the resolved value on the scoped `tulpa.nl_max_grid_cells` option, so
-# every grid built inside the fit -- the multi-block dispatch, the joint
-# multi-block dispatch, the k-hat re-evaluations -- reads one ceiling without
-# carrying it in each signature, the transport `tulpa.nl_progress` and
-# `tulpa.nl_checkpoint` already use.
+# The caller's ceiling on a dense multi-block outer tensor, in inner solves.
+# Unset there is none: a cell count does not measure the run's cost, so the
+# default is the pre-solve warning above, and a caller who wants a hard stop
+# (a batch of fits on a shared node, say) sets `control$max_grid_cells`. The
+# front doors publish the resolved value on the scoped
+# `tulpa.nl_max_grid_cells` option, so every grid built inside the fit -- the
+# multi-block dispatch, the joint multi-block dispatch, the k-hat
+# re-evaluations -- reads one ceiling without carrying it in each signature,
+# the transport `tulpa.nl_progress` and `tulpa.nl_checkpoint` already use.
 .nl_max_grid_cells <- function(control = list()) {
   v <- control$max_grid_cells
   if (is.null(v)) v <- getOption("tulpa.nl_max_grid_cells", NULL)
-  if (is.null(v)) return(as.numeric(.NL_MULTI_GRID_HARD_CAP))
+  if (is.null(v)) return(Inf)
   if (!is.numeric(v) || length(v) != 1L || is.na(v) || v < 1) {
     stop("`control$max_grid_cells` must be a single number >= 1 ",
          "(the cell-count ceiling on a multi-block outer grid).", call. = FALSE)
@@ -1979,24 +2389,53 @@ tulpa_normalise_weights_safe <- function(lm, what = "grids / data",
   as.numeric(v)
 }
 
-# The single enforcement of that ceiling, shared by the multi-block
-# nested-Laplace dispatch and the joint multi-block dispatch. `remedy` is the
-# caller's advice for the accidental case; the override is named for the
-# deliberate one.
-.nl_check_grid_cap <- function(n_cells, max_cells, remedy) {
+# The single enforcement of that ceiling, shared by both multi-block
+# dispatchers, before any inner solve. `layout` is `.nl_grid_crossing()`'s
+# account of the axes that produced the count and `remedy` the dispatcher's
+# advice.
+.nl_check_grid_cap <- function(n_cells, max_cells, remedy, layout = "") {
   if (n_cells <= max_cells) return(invisible(n_cells))
   fmt <- function(x) format(x, scientific = FALSE, trim = TRUE)
   stop(sprintf(
-    paste0("Joint multi-block grid has %s cells (hard cap %s). %s ",
-           "A deliberate reference grid raises the cap with ",
-           "control$max_grid_cells = %s."),
-    fmt(n_cells), fmt(max_cells), remedy, fmt(n_cells)
+    paste0("Multi-block outer grid has %s cells, past control$max_grid_cells ",
+           "= %s.%s %s"),
+    fmt(n_cells), fmt(max_cells), layout, remedy
   ), call. = FALSE)
+}
+
+# The axes a dense outer tensor crosses, as the sentence the timing warning
+# carries: " It crosses b1 (...) x phi_pos 4." `block_grids` are the per-block
+# axis grids, so a fit that set no grid learns which default axes produced its
+# count (gcol33/tulpa#913); `phi_axes` are the active named per-arm dispersion
+# axes crossed on top, each a factor on the number of inner solves.
+.nl_grid_crossing <- function(block_grids = NULL, phi_axes = NULL) {
+  parts <- c(if (length(block_grids)) .nl_grid_layout(block_grids),
+             if (length(phi_axes))
+               paste0("phi_", names(phi_axes), " ", lengths(phi_axes)))
+  if (length(parts)) paste0(" It crosses ", paste(parts, collapse = " x "), ".")
+  else ""
+}
+
+# One block's grid as "b<k> (<rows> rows: <axis> <levels> x ...)", the levels
+# being each axis's distinct node count. A block grid is a tensor of its axes
+# for the grid-axis families and a paired node list for others (BYM2's
+# (sigma, rho) nodes), so the row count is stated alongside the per-axis
+# levels rather than derived from them.
+.nl_grid_layout <- function(block_grids) {
+  parts <- vapply(seq_along(block_grids), function(b) {
+    g <- as.matrix(block_grids[[b]])
+    nm <- colnames(g) %||% paste0("axis", seq_len(ncol(g)))
+    lv <- vapply(seq_len(ncol(g)), function(j)
+      length(unique(as.numeric(g[, j]))), integer(1))
+    sprintf("b%d (%d rows: %s)", b, nrow(g),
+            paste(nm, lv, collapse = " x "))
+  }, character(1))
+  paste(parts, collapse = " x ")
 }
 
 .nl_dispatch_multi <- function(cargs, prior_list, likelihood = NULL,
                                progress = .nl_progress_args(list(progress = FALSE)),
-                               within_cell = .NL_WITHIN_CELL,
+                               within_cell = NULL,
                                # Single-cell re-dispatch for the inner-Laplace
                                # skewness diagnostic (.nl_inner_skew_at_theta()):
                                # when supplied, `theta_grid_override` (a 1-row
@@ -2049,6 +2488,7 @@ tulpa_normalise_weights_safe <- function(lm, what = "grids / data",
   # (skew / k-hat / recenter probes -- already never the caller's own grid).
   n_cells <- NA_integer_
   grid_warn_remedy <- NULL
+  grid_layout <- ""
 
   if (!is.null(theta_grid_override)) {
     joint_grid <- as.matrix(theta_grid_override)
@@ -2067,7 +2507,10 @@ tulpa_normalise_weights_safe <- function(lm, what = "grids / data",
     idx <- do.call(expand.grid, lapply(row_counts, seq_len))
     n_cells <- nrow(idx)
     grid_warn_remedy <- "Reduce per-block grid sizes."
-    .nl_check_grid_cap(n_cells, .nl_max_grid_cells(), grid_warn_remedy)
+    grid_layout <- .nl_grid_crossing(block_grids)
+    .nl_check_grid_cap(n_cells, .nl_max_grid_cells(), grid_warn_remedy,
+                       grid_layout)
+    .nl_dense_grid_warn(n_cells, grid_warn_remedy, grid_layout)
 
     # Concatenate per-block axis grids into the joint theta_grid.
     joint_grid <- do.call(cbind, lapply(seq_along(block_grids), function(b) {
@@ -2079,7 +2522,8 @@ tulpa_normalise_weights_safe <- function(lm, what = "grids / data",
   blocks_spec <- lapply(seq_along(prepared), function(b) {
     cols <- (axis_offsets[b] + 1L):axis_offsets[b + 1L]
     block_joint <- joint_grid[, cols, drop = FALSE]
-    .nl_block_spec_for_cpp(prepared[[b]], block_joint)
+    .nl_block_spec_for_cpp(prepared[[b]], block_joint,
+                           n_obs = length(cargs$y), block_index = b)
   })
 
   # Every block's hyperprior over its own columns, folded on the override path
@@ -2134,11 +2578,12 @@ tulpa_normalise_weights_safe <- function(lm, what = "grids / data",
     cila              = cila,
     offset_nullable   = cargs$offset_nullable,
     screen_log_offset = if (prune_tol > 0)
-                          .nl_screen_log_offset(joint_grid, hp_parts)
+                          .nl_screen_log_offset(joint_grid, hp_parts,
+                                                screen = cargs$screen_refine)
   )
   if (!is.null(grid_warn_remedy)) {
     .nl_multi_grid_warn(proc.time()[["elapsed"]] - grid_solve_start,
-                        n_cells, grid_warn_remedy)
+                        n_cells, grid_warn_remedy, grid_layout)
   }
 
   out$theta_grid   <- joint_grid
@@ -2153,7 +2598,7 @@ tulpa_normalise_weights_safe <- function(lm, what = "grids / data",
 
   out <- .nl_attach_outer_integration(out, "multi-block outer grid")
   out <- .nl_posterior_moments_multi(out, prepared, axis_offsets, joint_grid,
-                                     within = match.arg(within_cell))
+                                     within = .nl_within_cell_mode(within_cell))
   out
 }
 
@@ -2186,6 +2631,10 @@ tulpa_normalise_weights_safe <- function(lm, what = "grids / data",
 #' @param spec A `tulpa_temporal` or `tulpa_spatial` object.
 #' @param data Data frame the spec resolves time/group/site indices against.
 #' @return A `prior` list ready for [tulpa_nested_laplace()].
+#' @examples
+#' d <- data.frame(year = rep(1:10, each = 3))
+#' pr <- prior_from_spec(temporal_ar1("year"), d)
+#' str(pr)
 #' @export
 prior_from_spec <- function(spec, data) {
   if (inherits(spec, "tulpa_temporal")) {

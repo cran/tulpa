@@ -152,7 +152,20 @@
        f_a = f_a, f_ae = f_ae, f_aa = f_aa, f_a_ae = f_a_ae, f_aeae = f_aeae)
 }
 
-#' @keywords internal
+# d/dphi of the beta eta-score dmu g_mu, g_mu = phi (y* - mu*) with
+# y* = logit(y), mu* = psi(a) - psi(b): the term is read by the score's own
+# phi-derivative and, through the score term of the observed weight, by the
+# weight's.
+.beta_dscore_dphi <- function(eta, y, phi) {
+  mu <- .mean_beta(eta)
+  a <- mu * phi
+  b <- (1 - mu) * phi
+  dmu <- mu * (1 - mu)
+  dmu * ((log(y) - log1p(-y) - digamma(a) + digamma(b)) +
+           phi * (-trigamma(a) * mu + trigamma(b) * (1 - mu)))
+}
+
+#' @noRd
 .FAMILY_DPHI <- list(
 
   # phi = size. mu = exp(eta); Var(y) = mu + mu^2 / phi.
@@ -312,9 +325,10 @@
 
   # phi = precision, a = mu phi and b = (1 - mu) phi, so da/dphi = mu and
   # db/dphi = 1 - mu carry every derivative. The weight differentiated is the
-  # Fisher form phi^2 (psi'(a) + psi'(b)) dmu^2 that H is built from; the
-  # observed curvature is a different function, and it reaches the mode motion
-  # through obs_curvature_delta_for_family rather than through this entry.
+  # OBSERVED curvature H is built from, `obs_weight` = the Fisher form
+  # phi^2 (psi'(a) + psi'(b)) dmu^2 minus the score term (1 - 2 mu) dmu g_mu;
+  # the score term's phi-derivative is (1 - 2 mu) times `dscore`, the registered
+  # phi-derivative of the eta-score dmu g_mu.
   beta = list(
     dloglik = function(eta, y, n_trials, phi, phi2 = NULL) {
       mu <- .mean_beta(eta)
@@ -324,12 +338,7 @@
         mu * log(y) + (1 - mu) * log1p(-y)
     },
     dscore = function(eta, y, n_trials, phi, phi2 = NULL) {
-      mu <- .mean_beta(eta)
-      a <- mu * phi
-      b <- (1 - mu) * phi
-      dmu <- mu * (1 - mu)
-      dmu * ((log(y) - log1p(-y) - digamma(a) + digamma(b)) +
-               phi * (-trigamma(a) * mu + trigamma(b) * (1 - mu)))
+      .beta_dscore_dphi(eta, y, phi)
     },
     dweight = function(eta, y, n_trials, phi, phi2 = NULL) {
       mu <- .mean_beta(eta)
@@ -337,7 +346,8 @@
       b <- (1 - mu) * phi
       dmu <- mu * (1 - mu)
       dmu^2 * (2 * phi * (trigamma(a) + trigamma(b)) +
-                 phi^2 * (psigamma(a, 2L) * mu + psigamma(b, 2L) * (1 - mu)))
+                 phi^2 * (psigamma(a, 2L) * mu + psigamma(b, 2L) * (1 - mu))) -
+        (1 - 2 * mu) * .beta_dscore_dphi(eta, y, phi)
     }
   ),
 
@@ -421,7 +431,7 @@
 #' @return A list with `dloglik`, `dscore` and `dweight`, or `NULL` when the
 #'   family has no free dispersion or none has been derived. `NULL` is a refusal
 #'   to estimate, never a signal to fall back to a fixed value silently.
-#' @keywords internal
+#' @noRd
 .family_dphi <- function(family) {
   nm <- .family_base(family)
   # The leading-dot entries are parked derivations, not registered families;
@@ -461,7 +471,7 @@
 # differencing stencil rather than reporting an inexact closed form.
 # ============================================================================
 
-#' @keywords internal
+#' @noRd
 .FAMILY_DPHI2 <- list(
 
   # phi = size. Differentiates .FAMILY_DPHI$neg_binomial_2 once more in phi;
@@ -609,7 +619,7 @@
 #'   `NULL` when the family's phi Hessian has not been derived. `NULL` is a
 #'   refusal, not a fixed-value fallback: it hands the phi Hessian to the
 #'   differencing stencil rather than reporting an inexact closed form.
-#' @keywords internal
+#' @noRd
 .family_dphi2 <- function(family) {
   nm <- .family_base(family)
   if (startsWith(nm, ".")) return(NULL)
@@ -632,7 +642,7 @@
 #' inverses multiply a zero channel and the answer would come out the same
 #' either way, but the entry is required regardless rather than resting on that
 #' second coincidence.
-#' @keywords internal
+#' @noRd
 .family_dphi2_needs_obs <- function(family) {
   nm <- .family_base(family)
   !isTRUE(tryCatch(cpp_family_working_weight_is_observed(nm),
@@ -641,7 +651,7 @@
 
 
 #' Families whose dispersion can be estimated
-#' @keywords internal
+#' @noRd
 .dispersion_families <- function() {
   nms <- names(.FAMILY_DPHI)
   nms[!startsWith(nms, ".")]

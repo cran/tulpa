@@ -8,8 +8,10 @@
 //
 // Callbacks operate on a vector of per-arm eta vectors:
 //   - compute_eta_joint(x, etas): caller fills etas[k] for each arm.
-//   - scatter_joint(x, etas, grad, H): caller scatters per-arm contributions
-//                                       and shared prior into the joint (g, H).
+//   - scatter_joint(x, etas, grad, H, cm): caller scatters per-arm
+//                                       contributions and shared prior into the
+//                                       joint (g, H), coupled cells at the
+//                                       curvature `cm` the loop asks for.
 //   - compute_log_prior_joint(x, etas): joint log p(x | theta).
 //   - center_effects_fn(x): post-step centering of structured blocks.
 //
@@ -404,7 +406,8 @@ inline bool joint_pd_step_solve_dense_ridged(
     SparseCholeskySolver& solver, bool prefer_sparse,
     DenseCholeskyScratch& dense_scratch, JointPDMode pd_mode,
     double* out_log_det = nullptr,
-    bool* out_modified = nullptr
+    bool* out_modified = nullptr,
+    int max_tries = JOINT_LM_MAX_TRIES
 ) {
     if (pd_mode == JointPDMode::PSD && n_x <= JOINT_PSD_MAX_DIM) {
         Eigen::MatrixXd Hd(n_x, n_x);
@@ -421,7 +424,7 @@ inline bool joint_pd_step_solve_dense_ridged(
                                                 log_det);
         },
         [&](double bump) { add_uniform_ridge_dense(H, n_x, bump); },
-        out_log_det, out_modified);
+        out_log_det, out_modified, max_tries);
 }
 
 // Per-iteration entry: `H` arrives UNRIDGED, exactly as the scatter left it, so
@@ -431,12 +434,14 @@ inline bool joint_pd_step_solve_dense(
     SparseCholeskySolver& solver, bool prefer_sparse,
     DenseCholeskyScratch& dense_scratch, JointPDMode pd_mode,
     double* out_log_det = nullptr,
-    bool* out_modified = nullptr
+    bool* out_modified = nullptr,
+    int max_tries = JOINT_LM_MAX_TRIES
 ) {
     add_uniform_ridge_dense(H, n_x, LAPLACE_UNIFORM_RIDGE);
     return joint_pd_step_solve_dense_ridged(H, grad, delta, n_x, solver,
                                             prefer_sparse, dense_scratch,
-                                            pd_mode, out_log_det, out_modified);
+                                            pd_mode, out_log_det, out_modified,
+                                            max_tries);
 }
 
 // Per-thread scratch for the joint Newton solver. Same role as NewtonScratch
@@ -521,9 +526,11 @@ inline void joint_newton_finalize_dense(
     // at twice the documented base and shift every rank-deficient direction's
     // log-determinant contribution by log(2).
     add_uniform_ridge_dense(H, n_x, LAPLACE_UNIFORM_RIDGE);
-    const bool hessian_pd_at_mode = dispatch_factor_log_det_ridged(
-        H, n_x, sparse_solver, use_sparse, scratch.chol,
-        result.log_det_Q);
+    bool hessian_pd_at_mode;
+    { TULPA_PROFILE_PHASE(PHASE_LOG_DET);
+      hessian_pd_at_mode = dispatch_factor_log_det_ridged(
+          H, n_x, sparse_solver, use_sparse, scratch.chol,
+          result.log_det_Q); }
 
     // A non-finite log-determinant is the plain Cholesky reporting that the
     // Hessian at the returned point is not PD -- a point the solve stopped at
@@ -534,17 +541,37 @@ inline void joint_newton_finalize_dense(
     // factorizes on the first attempt is unchanged.
     result.hessian_pd_at_mode = hessian_pd_at_mode;
     result.pd_conditioned = !hessian_pd_at_mode;
+    std::vector<double> final_step;
     if (!hessian_pd_at_mode) {
-        joint_pd_step_solve_dense_ridged(H, grad, scratch.delta,
-                                         n_x, sparse_solver, use_sparse,
-                                         scratch.chol, pd_mode,
-                                         &result.log_det_Q);
+        TULPA_PROFILE_PHASE(PHASE_LOG_DET);
+        if (joint_pd_step_solve_dense_ridged(H, grad, scratch.delta,
+                                             n_x, sparse_solver, use_sparse,
+                                             scratch.chol, pd_mode,
+                                             &result.log_det_Q)) {
+            double dec = 0.0;
+            for (int j = 0; j < n_x; j++) dec += grad[j] * scratch.delta[j];
+            if (std::isfinite(dec)) {
+                result.newton_decrement = dec;
+                final_step.assign(scratch.delta.begin(), scratch.delta.begin() + n_x);
+            }
+        }
+    } else {
+        result.newton_decrement = newton_decrement_live(
+            grad.data(), n_x, use_sparse && sparse_solver.factored(),
+            sparse_solver, scratch.chol, &final_step);
     }
 
-    double log_lik   = log_lik_fn(scratch.etas);
-    double log_prior = compute_log_prior_joint(x, scratch.etas);
+    double log_lik, log_prior;
+    { TULPA_PROFILE_PHASE(PHASE_LOG_LIK_PRIOR);
+      log_lik   = log_lik_fn(scratch.etas);
+      log_prior = compute_log_prior_joint(x, scratch.etas); }
 
     result.log_marginal = finalize_log_marginal(log_lik, log_prior, result.log_det_Q, n_x);
+    if (std::isfinite(result.newton_decrement)) {
+        result.newton_step_gain = newton_step_gain(
+            x, final_step.data(), n_x, log_lik + log_prior, eval_objective,
+            scratch.x_try);
+    }
 
     // The Newton-converged iterate, before the cosmetic post-hoc centering
     // below. Every probe of the inner layer -- gamma_3, the importance curve,
@@ -554,66 +581,69 @@ inline void joint_newton_finalize_dense(
     for (int j = 0; j < n_x; j++) pre_center_x[j] = x[j];
     const bool used_sparse_factor = use_sparse && sparse_solver.factored();
 
-    if (compute_skew) {
-        std::vector<int> all_idx;
-        const std::vector<int>& probe =
-            inner_probe_indices(n_x, skew_probe_idx, all_idx);
-        if (!result.converged) {
-            // gamma_3 expands about the mode and the inner k-hat scores the
-            // Gaussian at it, so neither exists at a point the solve stopped
-            // short of. Emitting the indices unscored is what separates that
-            // from the diagnostic never having been requested.
-            inner_probe_decline(result, probe, "not_converged");
-        } else {
-            if (curvature3_fns) {
-                InnerSkewOutcome sk = compute_inner_skew_gamma3_joint(
-                    n_x, pre_center_x, scratch.chol, sparse_solver,
-                    used_sparse_factor, compute_eta_joint, x, scratch.etas,
-                    scratch.etas_tmp, *curvature3_fns, probe
-                );
-                result.inner_skew = std::move(sk.gamma3);
-                result.inner_skew_gamma1 = std::move(sk.gamma1);
-                result.inner_skew_gamma1_declined = sk.gamma1_declined;
-                result.inner_skew_idx = probe;
-                result.inner_skew_dropped = sk.n_nonfinite_dropped;
-                result.inner_skew_declined = sk.declined;
-                result.inner_skew_arms_declined = sk.arms_declined;
+    {   // post-mode probes of the inner layer, timed as one phase
+        TULPA_PROFILE_PHASE(PHASE_INNER_DIAG);
+        if (compute_skew) {
+            std::vector<int> all_idx;
+            const std::vector<int>& probe =
+                inner_probe_indices(n_x, skew_probe_idx, all_idx);
+            if (!result.converged) {
+                // gamma_3 expands about the mode and the inner k-hat scores the
+                // Gaussian at it, so neither exists at a point the solve stopped
+                // short of. Emitting the indices unscored is what separates that
+                // from the diagnostic never having been requested.
+                inner_probe_decline(result, probe, "not_converged");
             } else {
-                // No oracle set was built at all: report the indices as unscored
-                // rather than emit nothing, so the reason reaches the fit.
-                result.inner_skew.assign(probe.size(),
-                                         std::numeric_limits<double>::quiet_NaN());
-                result.inner_skew_idx = probe;
-                result.inner_skew_declined = "curvature3_unavailable";
-                result.inner_skew_gamma1_declined = "curvature3_unavailable";
+                if (curvature3_fns) {
+                    InnerSkewOutcome sk = compute_inner_skew_gamma3_joint(
+                        n_x, pre_center_x, scratch.chol, sparse_solver,
+                        used_sparse_factor, compute_eta_joint, x, scratch.etas,
+                        scratch.etas_tmp, *curvature3_fns, probe
+                    );
+                    result.inner_skew = std::move(sk.gamma3);
+                    result.inner_skew_gamma1 = std::move(sk.gamma1);
+                    result.inner_skew_gamma1_declined = sk.gamma1_declined;
+                    result.inner_skew_idx = probe;
+                    result.inner_skew_dropped = sk.n_nonfinite_dropped;
+                    result.inner_skew_declined = sk.declined;
+                    result.inner_skew_arms_declined = sk.arms_declined;
+                } else {
+                    // No oracle set was built at all: report the indices as unscored
+                    // rather than emit nothing, so the reason reaches the fit.
+                    result.inner_skew.assign(probe.size(),
+                                             std::numeric_limits<double>::quiet_NaN());
+                    result.inner_skew_idx = probe;
+                    result.inner_skew_declined = "curvature3_unavailable";
+                    result.inner_skew_gamma1_declined = "curvature3_unavailable";
+                }
+
+                // The likelihood-agnostic inner k-hat over the same probed
+                // subspace. Evaluated at the pre-centering iterate for the same
+                // reason gamma_3 is: that is the point the live factor and the
+                // reported log_marginal belong to.
+                InnerISOutcome is_out = compute_inner_is_curve(
+                    n_x, pre_center_x, scratch.chol, sparse_solver,
+                    used_sparse_factor, eval_objective, x, probe
+                );
+                result.inner_is_z         = std::move(is_out.z);
+                result.inner_is_log_joint = std::move(is_out.log_joint);
+                result.inner_is_sigma     = std::move(is_out.sigma);
+                result.inner_is_declined  = is_out.declined;
             }
-
-            // The likelihood-agnostic inner k-hat over the same probed
-            // subspace. Evaluated at the pre-centering iterate for the same
-            // reason gamma_3 is: that is the point the live factor and the
-            // reported log_marginal belong to.
-            InnerISOutcome is_out = compute_inner_is_curve(
-                n_x, pre_center_x, scratch.chol, sparse_solver,
-                used_sparse_factor, eval_objective, x, probe
-            );
-            result.inner_is_z         = std::move(is_out.z);
-            result.inner_is_log_joint = std::move(is_out.log_joint);
-            result.inner_is_sigma     = std::move(is_out.sigma);
-            result.inner_is_declined  = is_out.declined;
         }
+
+        run_subspace_debias(result, n_x, pre_center_x, scratch.chol,
+                            sparse_solver, used_sparse_factor,
+                            eval_objective, x, debias);
+
+        // The correction reads the same pre-centering iterate for the same reason,
+        // and presents each draw through the loop's own centering fold so a drawn
+        // coefficient is in the coordinates the reported mode is in.
+        run_inner_cila(result, n_x, pre_center_x, scratch.chol, sparse_solver,
+                       used_sparse_factor, eval_objective,
+                       [&](Rcpp::NumericVector& xv) { center_effects_fn(xv); },
+                       x, cila, cila_cell_key);
     }
-
-    run_subspace_debias(result, n_x, pre_center_x, scratch.chol,
-                        sparse_solver, used_sparse_factor,
-                        eval_objective, x, debias);
-
-    // The correction reads the same pre-centering iterate for the same reason,
-    // and presents each draw through the loop's own centering fold so a drawn
-    // coefficient is in the coordinates the reported mode is in.
-    run_inner_cila(result, n_x, pre_center_x, scratch.chol, sparse_solver,
-                   used_sparse_factor, eval_objective,
-                   [&](Rcpp::NumericVector& xv) { center_effects_fn(xv); },
-                   x, cila, cila_cell_key);
 
     center_effects_fn(x);
     for (int j = 0; j < n_x; j++) result.mode[j] = x[j];
@@ -637,6 +667,7 @@ inline void joint_newton_finalize_dense(
                               std::numeric_limits<double>::quiet_NaN());
     }
     if ((store_Q || want_block || want_eta_var) && hessian_pd_at_mode) {
+        TULPA_PROFILE_PHASE(PHASE_HESSIAN_EXTRACT);
         std::vector<int> csc_p, csc_i;
         std::vector<double> csc_x;
         dense_to_csc_lower_drop_raw(H, n_x, SPARSE_DROP_TOL_DISPATCH,
@@ -697,6 +728,9 @@ LaplaceResult laplace_newton_solve_joint_ll(
     // LM (the default) reduces to the plain Newton step wherever H is already
     // PD.
     JointPDMode pd_mode = JointPDMode::LM,
+    // Curvature each inner step is built from (joint_pd_step.h). The scatter
+    // receives the CurvatureMode to assemble at; the final pass is observed.
+    StepCurvature step_curvature = StepCurvature::Observed,
     // Inner-Laplace skewness diagnostic (inner_laplace_skew.h), opt-in like
     // store_Q. curvature3_fns carries one per-observation oracle per arm plus the
     // optional coupled-cell tensor contraction (build_joint_curvature3_fns +
@@ -756,9 +790,7 @@ LaplaceResult laplace_newton_solve_joint_ll(
     } else {
         for (int j = 0; j < n_x; j++) x[j] = 0.0;
     }
-    bool use_sparse = (sparse_override == 0)
-                          ? (n_x >= SPARSE_THRESHOLD)
-                          : (sparse_override > 0);
+    const bool use_sparse = newton_use_sparse(n_x, sparse_override);
 
     SparseCholeskySolver local_solver;
     SparseCholeskySolver& sparse_solver = shared_solver ? *shared_solver : local_solver;
@@ -770,21 +802,34 @@ LaplaceResult laplace_newton_solve_joint_ll(
         );
     };
 
-    auto cholesky_solve = [&]() -> bool {
-        return joint_pd_step_solve_dense(scratch.H, scratch.grad, scratch.delta,
-                                         n_x, sparse_solver, use_sparse,
-                                         scratch.chol, pd_mode);
+    // The step is taken while the gradient and Hessian are assembled, since
+    // under StepCurvature::Auto an observed Hessian that does not factor is
+    // replaced by the expected one before the step is taken; the shared
+    // newton_step then reads the outcome through `cholesky_solve`.
+    bool step_ok = false;
+    auto refresh_grad_hess = [&]() {
+        { TULPA_PROFILE_PHASE(PHASE_ETA);
+          compute_eta_joint(x, scratch.etas); }
+        step_ok = inner_step_under_curvature(
+            step_curvature,
+            [&](CurvatureMode cm) {
+                scratch.zero_for_iter();
+                TULPA_PROFILE_PHASE(PHASE_SCATTER);
+                scatter_joint(x, scratch.etas, scratch.grad, scratch.H, cm);
+            },
+            [&](bool guarded) {
+                TULPA_PROFILE_PHASE(PHASE_FACTORIZE);
+                return joint_pd_step_solve_dense(
+                    scratch.H, scratch.grad, scratch.delta, n_x, sparse_solver,
+                    use_sparse, scratch.chol, pd_mode, nullptr, nullptr,
+                    guarded ? JOINT_LM_MAX_TRIES : 1);
+            });
     };
+    auto cholesky_solve = [&]() -> bool { return step_ok; };
 
     double obj_current = -1e300;
     bool obj_valid = false;
     NewtonConvState conv_state;
-
-    auto refresh_grad_hess = [&]() {
-        compute_eta_joint(x, scratch.etas);
-        scratch.zero_for_iter();
-        scatter_joint(x, scratch.etas, scratch.grad, scratch.H, /*finalize=*/false);
-    };
 
     for (int iter = 0; iter < max_iter; iter++) {
         if (newton_step(x, scratch, n_x, iter, tol, refresh_grad_hess,
@@ -804,9 +849,12 @@ LaplaceResult laplace_newton_solve_joint_ll(
     // *after* log_marginal so the reported mode block has mean(phi) = 0 with
     // the equivalent intercept shift absorbed into each arm's first beta
     // column. Net effect: same eta, same log_marginal, centered phi block.
-    compute_eta_joint(x, scratch.etas);
+    { TULPA_PROFILE_PHASE(PHASE_ETA);
+      compute_eta_joint(x, scratch.etas); }
     scratch.zero_for_iter();
-    scatter_joint(x, scratch.etas, scratch.grad, scratch.H, /*finalize=*/true);
+    { TULPA_PROFILE_PHASE(PHASE_SCATTER);
+      scatter_joint(x, scratch.etas, scratch.grad, scratch.H,
+                    CurvatureMode::Observed); }
     joint_newton_finalize_dense(
         result, n_x, scratch, scratch.H, scratch.grad, sparse_solver, use_sparse,
         compute_eta_joint, center_effects_fn, compute_log_prior_joint,

@@ -1,3 +1,18 @@
+
+skip_on_cran_budget()
+
+test_that("gaussian: passing phi on the wrong scale is detectable", {
+  skip_on_cran_budget()
+  # Guards the guard: if the two conventions were accidentally the same, the
+  # test above would pass even after a convention flip. At sd != 1 the wrong
+  # scale must give a different answer.
+  sd <- 2.0
+  right <- cpp_glmm_elt_terms("gaussian", 0.5, 1.0, 1, sd^2)   # variance: correct
+  wrong <- cpp_glmm_elt_terms("gaussian", 0.5, 1.0, 1, sd)     # SD: the 0.0.73 bug
+  expect_false(isTRUE(all.equal(unname(right), unname(wrong))))
+})
+
+skip_on_cran()
 # Cross-path equality for the per-family (loglik, grad, curvature) triplets
 # (gcol33/tulpa#142 A9).
 #
@@ -15,6 +30,7 @@
 # here instead of silently changing what a backend fits.
 
 test_that("gaussian: the SD and VARIANCE phi conventions line up exactly", {
+  skip_on_cran()
   # THE 0.0.73 REGRESSION GUARD.
   # laplace_family_link.h and laplace_likelihoods.cpp take phi = residual SD.
   # glmm_oracle.h takes phi = residual VARIANCE. The R layer bridges this
@@ -42,17 +58,8 @@ test_that("gaussian: the SD and VARIANCE phi conventions line up exactly", {
   }
 })
 
-test_that("gaussian: passing phi on the wrong scale is detectable", {
-  # Guards the guard: if the two conventions were accidentally the same, the
-  # test above would pass even after a convention flip. At sd != 1 the wrong
-  # scale must give a different answer.
-  sd <- 2.0
-  right <- cpp_glmm_elt_terms("gaussian", 0.5, 1.0, 1, sd^2)   # variance: correct
-  wrong <- cpp_glmm_elt_terms("gaussian", 0.5, 1.0, 1, sd)     # SD: the 0.0.73 bug
-  expect_false(isTRUE(all.equal(unname(right), unname(wrong))))
-})
-
 test_that("poisson: every kernel agrees at a shared eta", {
+  skip_on_cran()
   for (y in c(0L, 1L, 5L, 17L)) {
     for (eta in c(-1.0, 0.0, 1.2, 2.5)) {
       link <- cpp_family_terms(y, 1L, eta, "poisson", 1.0)
@@ -72,6 +79,7 @@ test_that("poisson: every kernel agrees at a shared eta", {
 })
 
 test_that("neg_binomial_2: every kernel agrees, and phi is the size everywhere", {
+  skip_on_cran()
   # A mu/size vs mu/dispersion split between copies would show up here.
   ys <- c(0L, 3L, 12L); etas <- c(-0.5, 0.0, 1.4); sizes <- c(0.7, 2.0, 10.0)
   # CRAN reads each axis at its two ends; the dev loop reads the whole grid.
@@ -121,6 +129,7 @@ test_that("binomial: every kernel agrees and keeps the lchoose normalizer", {
 })
 
 test_that("the curvature of every family matches a numerical derivative", {
+  skip_on_cran()
   # Catches a grad/curvature that drifts out of step with its own loglik --
   # the gamma copies disagree on observed vs expected information, so a kernel
   # can be self-inconsistent without any cross-path check noticing.

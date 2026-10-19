@@ -73,59 +73,6 @@ make_nngp_dataset <- function(n_spatial = 60L, beta0 = -0.3,
        coords = coords, n_spatial = n_spatial, w_true = w_true)
 }
 
-test_that("nested_laplace NNGP runs on a 2D (sigma2, phi_gp) grid", {
-  skip_on_cran()
-  d <- make_nngp_dataset(n_spatial = 60L, sigma2 = 0.6, phi_gp = 0.3)
-  nb <- make_nngp_neighbors(d$coords, n_neighbors = 8L)
-
-  s2 <- c(0.3, 0.6, 1.0)
-  pg <- c(0.2, 0.4, 0.8)
-  gr <- expand.grid(sigma2 = s2, phi_gp = pg)
-
-  res <- cpp_nested_laplace_nngp(
-    y = d$y, n = d$n_trials, X = d$X,
-    re_idx = rep(0, d$n_spatial), n_re_groups = 0L, sigma_re = 1.0,
-    spatial_idx = seq_len(d$n_spatial),
-    coords = nb$coords_ord, nn_idx = nb$nn_idx, nn_dist = nb$nn_dist,
-    nn_order = nb$nn_order_0,
-    n_spatial = d$n_spatial, nn = nb$n_neighbors,
-    sigma2_grid = gr$sigma2, phi_gp_grid = gr$phi_gp,
-    cov_type = 0L,    # exponential — matches simulation
-    family = "binomial", phi = 1.0,
-    max_iter = 50L, tol = 1e-6, n_threads = 1L
-  )
-
-  expect_equal(res$n_grid, 9L)
-  expect_true(all(is.finite(res$log_marginal)))
-  expect_true(all(res$n_iter > 0))
-  expect_gt(max(res$log_marginal) - min(res$log_marginal), 0.01)
-})
-
-test_that("tulpa_nested_laplace() routes a nngp prior through the dispatch", {
-  skip_on_cran()
-  d <- make_nngp_dataset(n_spatial = 50L)
-  nb <- make_nngp_neighbors(d$coords, n_neighbors = 6L)
-
-  prior <- list(
-    type        = "nngp",
-    coords      = nb$coords_ord,
-    nn_idx      = nb$nn_idx,
-    nn_dist     = nb$nn_dist,
-    nn_order    = nb$nn_order_0 + 1L,  # dispatcher subtracts 1 to make 0-based
-    n_spatial   = d$n_spatial,
-    nn          = nb$n_neighbors,
-    cov_type    = 0L,
-    sigma2_grid = c(0.3, 0.8, 1.2),
-    phi_gp_grid = c(0.2, 0.5, 0.9)
-  )
-
-  res <- tulpa_nested_laplace(d$y, d$n_trials, d$X, prior = prior,
-                         family = "binomial")
-  expect_s3_class(res, "tulpa_nested_laplace")
-  expect_named(res$theta_mean, c("sigma2", "phi_gp"))
-  expect_equal(sum(res$weights), 1.0, tolerance = 1e-6)
-})
-
 # =====================================================================
 # HSGP
 # =====================================================================
@@ -158,58 +105,6 @@ make_hsgp_basis_2d <- function(coords, m_per_dim = 5L, c = 1.5) {
        L1 = L1, L2 = L2, m = m_per_dim, M = M)
 }
 
-test_that("nested_laplace HSGP runs on a 2D (sigma2, lengthscale) grid", {
-  skip_on_cran()
-  set.seed(7)
-  N <- 80
-  obs_coords <- cbind(runif(N), runif(N))
-  basis <- make_hsgp_basis_2d(obs_coords, m_per_dim = 4L, c = 1.5)
-  beta_true <- rnorm(basis$M, 0, 0.3)
-  f <- as.numeric(basis$phi_basis %*% beta_true)
-  y <- rbinom(N, 1L, plogis(0.2 + f))
-
-  s2 <- c(0.2, 0.7, 1.5)
-  ls <- c(0.1, 0.3, 0.7)
-  gr <- expand.grid(sigma2 = s2, ell = ls)
-
-  res <- cpp_nested_laplace_hsgp(
-    y = as.integer(y), n = rep(1L, N), X = matrix(1, N, 1),
-    re_idx = rep(0, N), n_re_groups = 0L, sigma_re = 1.0,
-    phi_basis = basis$phi_basis, lambda_eig = basis$lambda_eig,
-    sigma2_grid = gr$sigma2, lengthscale_grid = gr$ell,
-    family = "binomial", phi = 1.0,
-    max_iter = 50L, tol = 1e-6, n_threads = 1L
-  )
-
-  expect_equal(res$n_grid, 9L)
-  expect_true(all(is.finite(res$log_marginal)))
-  expect_true(all(res$n_iter > 0))
-  expect_gt(max(res$log_marginal) - min(res$log_marginal), 0.01)
-})
-
-test_that("tulpa_nested_laplace() routes a hsgp prior through the dispatch", {
-  skip_on_cran()
-  set.seed(11)
-  N <- 60
-  obs_coords <- cbind(runif(N), runif(N))
-  basis <- make_hsgp_basis_2d(obs_coords, m_per_dim = 4L, c = 1.5)
-  y <- rbinom(N, 1L, 0.5)
-
-  prior <- list(
-    type             = "hsgp",
-    phi_basis        = basis$phi_basis,
-    lambda_eig       = basis$lambda_eig,
-    sigma2_grid      = c(0.3, 0.8),
-    lengthscale_grid = c(0.2, 0.6)
-  )
-  res <- tulpa_nested_laplace(as.integer(y), rep(1L, N),
-                         matrix(1, N, 1), prior = prior,
-                         family = "binomial")
-  expect_s3_class(res, "tulpa_nested_laplace")
-  expect_named(res$theta_mean, c("sigma2", "lengthscale"))
-  expect_equal(sum(res$weights), 1.0, tolerance = 1e-6)
-})
-
 test_that("HSGP rejects mismatched basis dimensions", {
   set.seed(3)
   N <- 25
@@ -237,4 +132,111 @@ test_that("HSGP rejects mismatched basis dimensions", {
     ),
     "lambda_eig must have length"
   )
+})
+
+skip_on_cran()
+
+test_that("nested_laplace NNGP runs on a 2D (sigma2, phi_gp) grid", {
+  skip_on_cran()
+  d <- make_nngp_dataset(n_spatial = 60L, sigma2 = 0.6, phi_gp = 0.3)
+  nb <- make_nngp_neighbors(d$coords, n_neighbors = 8L)
+
+  s2 <- c(0.3, 0.6, 1.0)
+  pg <- c(0.2, 0.4, 0.8)
+  gr <- expand.grid(sigma2 = s2, phi_gp = pg)
+
+  res <- cpp_nested_laplace_nngp(
+    y = d$y, n = d$n_trials, X = d$X,
+    re_idx = rep(0, d$n_spatial), n_re_groups = 0L, sigma_re = 1.0,
+    spatial_idx = seq_len(d$n_spatial),
+    coords = nb$coords_ord, nn_idx = nb$nn_idx, nn_dist = nb$nn_dist,
+    nn_order = nb$nn_order_0,
+    n_spatial = d$n_spatial, nn = nb$n_neighbors,
+    sigma2_grid = gr$sigma2, phi_gp_grid = gr$phi_gp,
+    cov_type = 0L,    # exponential — matches simulation
+    family = "binomial", phi = 1.0,
+    max_iter = 50L, tol = 1e-6, n_threads = 1L
+  )
+
+  expect_equal(res$n_grid, 9L)
+  expect_cells_solved(res)
+  expect_true(all(res$n_iter > 0))
+  expect_gt(max(res$log_marginal) - min(res$log_marginal), 0.01)
+})
+
+test_that("tulpa_nested_laplace() routes a nngp prior through the dispatch", {
+  skip_on_cran()
+  d <- make_nngp_dataset(n_spatial = 50L)
+  nb <- make_nngp_neighbors(d$coords, n_neighbors = 6L)
+
+  prior <- list(
+    type        = "nngp",
+    coords      = nb$coords_ord,
+    nn_idx      = nb$nn_idx,
+    nn_dist     = nb$nn_dist,
+    nn_order    = nb$nn_order_0 + 1L,  # dispatcher subtracts 1 to make 0-based
+    n_spatial   = d$n_spatial,
+    nn          = nb$n_neighbors,
+    cov_type    = 0L,
+    sigma2_grid = c(0.3, 0.8, 1.2),
+    phi_gp_grid = c(0.2, 0.5, 0.9)
+  )
+
+  res <- tulpa_nested_laplace(d$y, d$n_trials, d$X, prior = prior,
+                         family = "binomial")
+  expect_s3_class(res, "tulpa_nested_laplace")
+  expect_named(res$theta_mean, c("sigma2", "phi_gp"))
+  expect_equal(sum(res$weights), 1.0, tolerance = 1e-6)
+})
+
+test_that("nested_laplace HSGP runs on a 2D (sigma2, lengthscale) grid", {
+  skip_on_cran()
+  set.seed(7)
+  N <- 80
+  obs_coords <- cbind(runif(N), runif(N))
+  basis <- make_hsgp_basis_2d(obs_coords, m_per_dim = 4L, c = 1.5)
+  beta_true <- rnorm(basis$M, 0, 0.3)
+  f <- as.numeric(basis$phi_basis %*% beta_true)
+  y <- rbinom(N, 1L, plogis(0.2 + f))
+
+  s2 <- c(0.2, 0.7, 1.5)
+  ls <- c(0.1, 0.3, 0.7)
+  gr <- expand.grid(sigma2 = s2, ell = ls)
+
+  res <- cpp_nested_laplace_hsgp(
+    y = as.integer(y), n = rep(1L, N), X = matrix(1, N, 1),
+    re_idx = rep(0, N), n_re_groups = 0L, sigma_re = 1.0,
+    phi_basis = basis$phi_basis, lambda_eig = basis$lambda_eig,
+    sigma2_grid = gr$sigma2, lengthscale_grid = gr$ell,
+    family = "binomial", phi = 1.0,
+    max_iter = 50L, tol = 1e-6, n_threads = 1L
+  )
+
+  expect_equal(res$n_grid, 9L)
+  expect_cells_solved(res)
+  expect_true(all(res$n_iter > 0))
+  expect_gt(max(res$log_marginal) - min(res$log_marginal), 0.01)
+})
+
+test_that("tulpa_nested_laplace() routes a hsgp prior through the dispatch", {
+  skip_on_cran()
+  set.seed(11)
+  N <- 60
+  obs_coords <- cbind(runif(N), runif(N))
+  basis <- make_hsgp_basis_2d(obs_coords, m_per_dim = 4L, c = 1.5)
+  y <- rbinom(N, 1L, 0.5)
+
+  prior <- list(
+    type             = "hsgp",
+    phi_basis        = basis$phi_basis,
+    lambda_eig       = basis$lambda_eig,
+    sigma2_grid      = c(0.3, 0.8),
+    lengthscale_grid = c(0.2, 0.6)
+  )
+  res <- tulpa_nested_laplace(as.integer(y), rep(1L, N),
+                         matrix(1, N, 1), prior = prior,
+                         family = "binomial")
+  expect_s3_class(res, "tulpa_nested_laplace")
+  expect_named(res$theta_mean, c("sigma2", "lengthscale"))
+  expect_equal(sum(res$weights), 1.0, tolerance = 1e-6)
 })

@@ -2,7 +2,8 @@
 % Please edit documentation in R/spatial_gp.R
 \name{spatial_multiscale}
 \alias{spatial_multiscale}
-\title{Multi-Scale Gaussian Process spatial structure}
+\alias{print.tulpa_multiscale}
+\title{Multi-scale Gaussian process spatial structure}
 \usage{
 spatial_multiscale(
   coords,
@@ -20,6 +21,8 @@ spatial_multiscale(
   scale_coords = TRUE,
   sampler = c("auto", "noncentered", "centered", "interweaved")
 )
+
+\method{print}{tulpa_multiscale}(x, ...)
 }
 \arguments{
 \item{coords}{A one-sided formula specifying coordinate columns (e.g.,
@@ -58,8 +61,9 @@ intervals separated is what identifies the scales against each other.}
 \item{shared}{Logical; if TRUE (default), spatial effects enter both
 all processes.}
 
-\item{scale_coords}{Logical; if TRUE (default), coordinates are scaled to
-unit variance before computing distances.}
+\item{scale_coords}{Logical; if TRUE (default), coordinates are centred
+and divided by one common factor before computing distances (see
+\code{\link[=spatial_gp]{spatial_gp()}}).}
 
 \item{sampler}{Latent parameterization for the exact-NUTS field. \code{"auto"}
 (default) and \code{"noncentered"} sample \code{z ~ N(0, I)} per scale and
@@ -67,6 +71,10 @@ reconstruct each field as \code{w = f(z, sigma2, phi)}, avoiding the
 field/hyperparameter funnel; \code{"centered"} places the NNGP density on each
 field directly. \code{"interweaved"} alternates between parameterizations and
 is not implemented on the exact-NUTS path.}
+
+\item{x}{A \code{tulpa_multiscale} specification.}
+
+\item{...}{Ignored.}
 }
 \value{
 A \code{tulpa_multiscale} object

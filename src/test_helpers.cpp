@@ -11,15 +11,18 @@
 #include "tulpa/autodiff_fwd.h"
 #include "autodiff_utils.h"
 #include "spde_nc_transform.h"
+#include "s2z_direct_reference.h"
 #include "spde_qbuilder.h"
 #include "laplace_core.h"
 #include "pg_binomial.h"
 #include "pg_shared.h"
 #include "pg_spatial.h"
+#include "laplace_spatial_priors.h"  // read_node_prec / node_prec_ptr
 #include "hmc_gp.h"
 #include "pc_prior.h"
 #include "sparse_hessian.h"
 #include "sparse_cholesky.h"
+#include "laplace_newton_joint_sparse.h"
 #include "mcar_block_factory.h"
 #include "tgmrf_block_factory.h"
 #include "gpu_nngp_laplace.h"
@@ -1490,10 +1493,18 @@ List cpp_test_spde_nc_transform_fwd(
 // for B = A + sum_k coef_k 1_k 1_k' on a caller-supplied symmetric PD `A` and a
 // set of rank-1 sum-to-zero pins, and returns three independent computations of
 // log|B| plus the step error against a dense reference:
-//   * ld_block_schur  -- s2z_log_det_block_schur (the path under test);
+//   * ld_block_schur  -- s2z_log_det_block_schur (the path under test, with a
+//                        PD field block);
+//   * ld_block_schur_step -- s2z_block_schur with the inertia route on, as the
+//                        joint driver's final pass runs it, together with the
+//                        step and `field_indefinite`;
 //   * ld_direct       -- s2z_log_det_direct (the CHOLMOD full-(A+11') reference);
 //   * ld_dense        -- an independent Eigen LLT factorization of dense B;
-//   * max_dstep       -- max|delta_block_schur - B^{-1} grad| (Eigen LLT solve).
+//   * max_dstep       -- max|delta_block_schur - B^{-1} grad| (Eigen LLT solve);
+//   * newton_ok / newton_block_schur / max_dstep_newton -- the unguarded inner
+//                        Newton step (s2z_newton_step), whether it was taken,
+//                        whether through the block-Schur factor, and its error
+//                        against the same dense solve.
 // `A` is read as a full symmetric matrix; its lower-triangle nonzeros seed the
 // SparseHessianBuilder pattern. Field membership is the union of the pin ranges.
 //
@@ -1570,13 +1581,26 @@ List cpp_test_s2z_block_schur(
   const double ld_block_schur =
       tulpa::s2z_log_det_block_schur(H, H.s2z_rank1, NA_REAL);
   const double ld_direct =
-      tulpa::s2z_log_det_direct(H, H.s2z_rank1, NA_REAL, nullptr);
+      tulpa::s2z_log_det_direct(H, H.s2z_rank1, NA_REAL);
 
   std::vector<double> g(grad.begin(), grad.end());
   std::vector<double> delta_bs(n, 0.0);
   double ld_bs_step = NA_REAL;
+  bool field_indefinite = false;
   const bool ok =
-      tulpa::s2z_block_schur(H, H.s2z_rank1, g.data(), delta_bs.data(), &ld_bs_step);
+      tulpa::s2z_block_schur(H, H.s2z_rank1, g.data(), delta_bs.data(), &ld_bs_step,
+                             nullptr, /*field_inertia=*/true, &field_indefinite);
+
+  // The inner Newton step on the same matrix, unguarded: the test the auto
+  // curvature rule runs of whether H gives a Newton step as it stands. Without
+  // the ridge ladder a pinned H leaves the builder untouched.
+  std::vector<double> delta_nt(n, 0.0);
+  bool nt_used_block_schur = false;
+  tulpa::SparseCholeskySolver nt_solver;
+  const bool nt_ok = tulpa::s2z_newton_step(H, nt_solver, n, tulpa::JointPDMode::LM,
+                                            g.data(), delta_nt.data(),
+                                            nt_used_block_schur, nullptr,
+                                            /*guarded=*/false);
 
   // Independent dense reference: B = A + sum_k coef_k 1_k 1_k', Eigen LLT.
   Eigen::MatrixXd B(n, n);
@@ -1597,6 +1621,7 @@ List cpp_test_s2z_block_schur(
   Eigen::LLT<Eigen::MatrixXd> llt(B);
   double ld_dense = NA_REAL;
   double max_dstep = NA_REAL;
+  double max_dstep_newton = NA_REAL;
   if (llt.info() == Eigen::Success) {
     const Eigen::MatrixXd& L = llt.matrixL();
     double ld = 0.0;
@@ -1609,6 +1634,12 @@ List cpp_test_s2z_block_schur(
     for (int i = 0; i < n; ++i)
       md = std::max(md, std::fabs(delta_bs[i] - dd[i]));
     max_dstep = md;
+    if (nt_ok) {
+      double mn = 0.0;
+      for (int i = 0; i < n; ++i)
+        mn = std::max(mn, std::fabs(delta_nt[i] - dd[i]));
+      max_dstep_newton = mn;
+    }
   }
 
   return List::create(
@@ -1617,7 +1648,11 @@ List cpp_test_s2z_block_schur(
     _["ld_dense"]            = ld_dense,
     _["ld_block_schur_step"] = ld_bs_step,
     _["ok"]                  = ok,
-    _["max_dstep"]           = max_dstep
+    _["field_indefinite"]    = field_indefinite,
+    _["max_dstep"]           = max_dstep,
+    _["newton_ok"]           = nt_ok,
+    _["newton_block_schur"]  = nt_used_block_schur,
+    _["max_dstep_newton"]    = max_dstep_newton
   );
 }
 
@@ -2197,15 +2232,60 @@ Rcpp::List cpp_test_update_spatial_icar(
   }
   Rcpp::NumericVector phi_out = Rcpp::clone(phi);
   double removed_mean = 0.0;
-  tulpa::update_spatial_icar(kappa, omega, offset, group, adj, tau, beta0,
+  const tulpa::PgIcarPrior icar(adj);
+  tulpa::update_spatial_icar(kappa, omega, offset, group, icar, tau, beta0,
                              prior_beta_sd, phi_out, removed_mean);
   return Rcpp::List::create(
     Rcpp::_["phi"]          = phi_out,
     Rcpp::_["removed_mean"] = removed_mean,
     Rcpp::_["n_components"] = adj.n_components,
     Rcpp::_["component"]    = Rcpp::IntegerVector(adj.component.begin(),
-                                                  adj.component.end()),
-    Rcpp::_["isolated_prec"] = tulpa::PG_ICAR_ISOLATED_PREC
+                                                  adj.component.end())
+  );
+}
+
+// The Polya-Gamma kernels' intrinsic prior Qt (PgIcarPrior) at an optional
+// per-node multiplier: its dense form, its quadratic form at `x`, its rank,
+// and the single-site conditional terms a sweep reads at `x` (scale 1), so a
+// test can check all four against the Schur complement built in R.
+// [[Rcpp::export]]
+Rcpp::List cpp_test_pg_icar_prior(
+    Rcpp::List adj_list,
+    Rcpp::IntegerVector n_neighbors,
+    int n_units,
+    Rcpp::NumericVector x,
+    Rcpp::Nullable<Rcpp::NumericVector> node_prec = R_NilValue
+) {
+  const tulpa::PgAdjacency adj =
+      tulpa::pg_build_adjacency(adj_list, n_neighbors, n_units);
+  const std::vector<double> w = tulpa::read_node_prec(
+      node_prec, n_units, "cpp_test_pg_icar_prior");
+  const tulpa::PgIcarPrior icar(adj, tulpa::node_prec_ptr(w));
+  if (x.size() != n_units) {
+    Rcpp::stop("`x` has length %d; must be n_units (%d).",
+               static_cast<int>(x.size()), n_units);
+  }
+  std::vector<double> M(static_cast<size_t>(n_units) * n_units, 0.0);
+  icar.add_dense(M.data(), 1.0);
+  Rcpp::NumericMatrix Qt(n_units, n_units);
+  for (int a = 0; a < n_units; a++)
+    for (int b = 0; b < n_units; b++)
+      Qt(a, b) = M[static_cast<size_t>(a) * n_units + b];
+
+  const tulpa::PgIcarSweep sweep(icar, x.begin());
+  Rcpp::NumericVector site_prec(n_units), site_num(n_units);
+  for (int j = 0; j < n_units; j++) {
+    double nb = 0.0;
+    for (int e = adj.row_ptr[j]; e < adj.row_ptr[j + 1]; e++)
+      nb += x[adj.col_idx[e]];
+    sweep.site(j, x[j], nb, 1.0, site_prec[j], site_num[j]);
+  }
+  return Rcpp::List::create(
+    Rcpp::_["Qt"]        = Qt,
+    Rcpp::_["quad"]      = icar.quad(x.begin()),
+    Rcpp::_["rank"]      = icar.rank(),
+    Rcpp::_["site_prec"] = site_prec,
+    Rcpp::_["site_num"]  = site_num
   );
 }
 

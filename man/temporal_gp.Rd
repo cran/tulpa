@@ -2,7 +2,8 @@
 % Please edit documentation in R/temporal_gp.R
 \name{temporal_gp}
 \alias{temporal_gp}
-\title{Gaussian Process temporal structure}
+\alias{print.tulpa_temporal_gp}
+\title{Gaussian process temporal structure}
 \usage{
 temporal_gp(
   time_var,
@@ -14,6 +15,8 @@ temporal_gp(
   scale_coords = TRUE,
   parameterization = c("noncentered", "centered")
 )
+
+\method{print}{tulpa_temporal_gp}(x, ...)
 }
 \arguments{
 \item{time_var}{Name of the time variable in data. Can be a formula
@@ -44,12 +47,18 @@ If provided, separate GPs are estimated for each group.}
 all processes.}
 
 \item{scale_coords}{Logical; if TRUE (default), time values are scaled to
-unit variance before computing distances.}
+unit variance before computing distances. Either way the lengthscale's
+support is placed relative to the spread of the times, and
+\code{\link[=temporal_corr]{temporal_corr()}} reports the lengthscale in the original time units.}
 
 \item{parameterization}{Parameterization for GP effects:
 \code{"noncentered"} (default) stores z ~ N(0,1) and scales by covariance
 (better for weakly-informed effects);
 \code{"centered"} stores effects directly (better for strongly-informed effects).}
+
+\item{x}{A \code{tulpa_temporal_gp} specification.}
+
+\item{...}{Ignored.}
 }
 \value{
 A \code{tulpa_temporal_gp} object

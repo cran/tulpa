@@ -35,7 +35,10 @@ test_that("multiscale temporal is refused by the nested-Laplace modes", {
   )
 })
 
+skip_on_cran_budget()
+
 test_that("an unsupported multiscale component is refused by name", {
+  skip_on_cran_budget()
   d <- data.frame(t = rep(1:5, 2))
   expect_error(temporal_multiscale("t", trend = "rw3"), "should be one of")
   expect_error(temporal_multiscale("t", short_term = "arma"), "should be one of")
@@ -43,6 +46,8 @@ test_that("an unsupported multiscale component is refused by name", {
   expect_error(temporal_multiscale("t", trend = "none", short_term = "none"),
                "At least one temporal component")
 })
+
+skip_on_cran()
 
 test_that("multiscale temporal allocates and names its arms (structural)", {
   skip_if_not_slow()

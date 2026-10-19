@@ -8,7 +8,7 @@ validate_temporal_multiscale(temporal, data)
 }
 \arguments{
 \item{temporal}{A \code{\link[=temporal_multiscale]{temporal_multiscale()}} object (or a single-component
-temporal spec, dispatched to \code{\link[=validate_temporal]{validate_temporal()}}).}
+temporal spec, dispatched to \code{validate_temporal()}).}
 
 \item{data}{Data frame containing the time column named in \code{temporal}.}
 }
@@ -21,6 +21,11 @@ Fills in the time index and point count that \code{\link[=tulpa_gibbs]{tulpa_gib
 design-matrix door takes no \code{data} argument to validate one itself.
 \code{\link[=tulpa]{tulpa()}} calls this internally, so it only needs to be called directly
 when fitting through a design-matrix door.
+}
+\examples{
+tm <- temporal_multiscale("t", trend = "rw1", seasonal = 12)
+tm <- validate_temporal_multiscale(tm, data.frame(t = 1:36))
+class(tm)
 }
 \seealso{
 \code{\link[=validate_gp]{validate_gp()}}, \code{\link[=temporal_multiscale]{temporal_multiscale()}}

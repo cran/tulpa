@@ -34,7 +34,7 @@
 }
 
 .fit_pp <- function(sim, adj, phi_axis, prior_phi = NULL,
-                    consistency = TRUE) {
+                    consistency = TRUE, prune = NULL) {
     arm_occ <- list(y = as.numeric(sim$occur), n_trials = rep(1L, sim$N),
                     X = sim$Xocc, spatial_idx = sim$spatial_idx,
                     re_idx = rep(0, sim$N), n_re_groups = 0L, sigma_re = 1.0,
@@ -53,8 +53,20 @@
         prior = prior, phi_grid = list(pos = phi_axis),
         prior_phi = prior_phi,
         control = list(diagnose_k = FALSE,
-                       var_of_means_consistency = consistency))
+                       var_of_means_consistency = consistency,
+                       prune = prune))
 }
+
+test_that("prior_phi validates malformed specs", {
+    expect_error(
+        .joint_parse_sigma_prior(list("pc.prec", c(-1, 0.5)), "prior_phi"),
+        "prior_phi")
+    expect_error(
+        .joint_parse_sigma_prior(list("nope", 1), "prior_phi"),
+        "Unknown hyperprior")
+})
+
+skip_on_cran()
 
 test_that("prior_phi replaces the default density with the PC one on the axis's own coordinate", {
     skip_on_cran()
@@ -63,12 +75,13 @@ test_that("prior_phi replaces the default density with the PC one on the axis's 
     phi_axis <- exp(seq(log(0.08), log(1.0), length.out = 9))^2
 
     U <- 1.0; a <- 0.01; lambda <- -log(a) / U
-    # The consistency pass appends slice cells, and where it appends them
-    # depends on the weights, so the two fits would not share a grid. This
+    # The consistency pass appends slice cells and the screen drops cells, both
+    # by the weights, so the two fits would not share a solved grid. This
     # assertion is about what the prior adds at a cell, so the grid is pinned.
-    flat <- .fit_pp(sim, adj, phi_axis, prior_phi = NULL, consistency = FALSE)
+    flat <- .fit_pp(sim, adj, phi_axis, prior_phi = NULL, consistency = FALSE,
+                    prune = FALSE)
     pc   <- .fit_pp(sim, adj, phi_axis, prior_phi = list("pc.prec", c(U, a)),
-                    consistency = FALSE)
+                    consistency = FALSE, prune = FALSE)
 
     expect_true("phi_pos" %in% colnames(flat$theta_grid))
     # Same grid in both fits, so the only difference in log_marginal is the
@@ -136,13 +149,4 @@ test_that("prior_phi is a no-op when no phi_grid is declared", {
     }
     expect_equal(mk(list("pc.prec", c(1.0, 0.01)))$log_marginal,
                  mk(NULL)$log_marginal, tolerance = 1e-12)
-})
-
-test_that("prior_phi validates malformed specs", {
-    expect_error(
-        .joint_parse_sigma_prior(list("pc.prec", c(-1, 0.5)), "prior_phi"),
-        "prior_phi")
-    expect_error(
-        .joint_parse_sigma_prior(list("nope", 1), "prior_phi"),
-        "Unknown hyperprior")
 })

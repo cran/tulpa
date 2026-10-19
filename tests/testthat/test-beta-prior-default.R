@@ -11,34 +11,6 @@ test_that("there is one default fixed-effect prior, at the documented scale", {
   expect_equal(tulpa:::.TULPA_PRIOR$beta_sd, prior_normal()$sd)
 })
 
-test_that("every consumer reads that one setting", {
-  for (nm in names(tulpa:::.PRIOR_CONSUMERS)) {
-    expect_equal(tulpa:::.tulpa_prior_sd(nm), tulpa:::.TULPA_PRIOR$beta_sd,
-                 info = nm)
-  }
-  expect_error(tulpa:::.tulpa_prior_sd("not_a_backend"),
-               "Unknown fixed-effect prior consumer")
-})
-
-test_that("every fitter's own default resolves to the same prior SD", {
-  fitters <- list(
-    ep           = tulpa:::tulpa_ep,
-    ep_fit       = tulpa:::ep_fit,
-    gaussian     = tulpa:::tulpa_gaussian,
-    gibbs        = tulpa:::tulpa_gibbs,
-    multinomial  = tulpa:::tulpa_multinomial,
-    ordinal      = tulpa:::tulpa_ordinal,
-    re_cov_gibbs = tulpa:::tulpa_re_cov_gibbs,
-    glmm_logpost = tulpa:::build_glmm_logpost
-  )
-  for (nm in names(fitters)) {
-    bp <- eval(formals(fitters[[nm]])$beta_prior,
-               envir = asNamespace("tulpa"))
-    expect_equal(bp$sd, tulpa:::.TULPA_PRIOR$beta_sd, info = nm)
-    expect_equal(bp$mean, 0, info = nm)
-  }
-})
-
 test_that("the scalar-ridge resolver takes the same default", {
   expect_equal(tulpa:::.beta_prior_ridge_sd(NULL), tulpa:::.TULPA_PRIOR$beta_sd)
   expect_equal(tulpa:::.beta_prior_ridge_sd(list(mean = 0, sd = 7)), 7)
@@ -60,7 +32,25 @@ test_that("a beta_prior with no sd errors instead of taking the default", {
   expect_error(tulpa:::.beta_prior_ridge_sd(2.5), "must be NULL or a list")
 })
 
+test_that("prior_normal() with no sd is still accepted through its own default", {
+  expect_equal(tulpa:::.beta_prior_fields(prior_normal())$sd, 2.5)
+  expect_equal(tulpa:::.beta_prior_fields(list(sd = 4)), list(mean = 0, sd = 4))
+})
+
+skip_on_cran_budget()
+
+test_that("every consumer reads that one setting", {
+  skip_on_cran_budget()
+  for (nm in names(tulpa:::.PRIOR_CONSUMERS)) {
+    expect_equal(tulpa:::.tulpa_prior_sd(nm), tulpa:::.TULPA_PRIOR$beta_sd,
+                 info = nm)
+  }
+  expect_error(tulpa:::.tulpa_prior_sd("not_a_backend"),
+               "Unknown fixed-effect prior consumer")
+})
+
 test_that("the two prior resolvers accept and reject the same inputs", {
+  skip_on_cran_budget()
   ok   <- list(list(mean = 0, sd = 1), prior_normal(0, 1), list(sd = 3))
   bad  <- list(prior_half_cauchy(2.5), prior_pc(1, 0.01), list(sigma = 1))
   for (bp in ok) {
@@ -73,9 +63,26 @@ test_that("the two prior resolvers accept and reject the same inputs", {
   }
 })
 
-test_that("prior_normal() with no sd is still accepted through its own default", {
-  expect_equal(tulpa:::.beta_prior_fields(prior_normal())$sd, 2.5)
-  expect_equal(tulpa:::.beta_prior_fields(list(sd = 4)), list(mean = 0, sd = 4))
+skip_on_cran()
+
+test_that("every fitter's own default resolves to the same prior SD", {
+  skip_on_cran()
+  fitters <- list(
+    ep           = tulpa:::tulpa_ep,
+    ep_fit       = tulpa:::ep_fit,
+    gaussian     = tulpa:::tulpa_gaussian,
+    gibbs        = tulpa:::tulpa_gibbs,
+    multinomial  = tulpa:::tulpa_multinomial,
+    ordinal      = tulpa:::tulpa_ordinal,
+    re_cov_gibbs = tulpa:::tulpa_re_cov_gibbs,
+    glmm_logpost = tulpa:::build_glmm_logpost
+  )
+  for (nm in names(fitters)) {
+    bp <- eval(formals(fitters[[nm]])$beta_prior,
+               envir = asNamespace("tulpa"))
+    expect_equal(bp$sd, tulpa:::.TULPA_PRIOR$beta_sd, info = nm)
+    expect_equal(bp$mean, 0, info = nm)
+  }
 })
 
 # --- what the fit reports ----------------------------------------------------
@@ -89,7 +96,7 @@ test_that("a fit records the fixed-effect prior it ran under", {
 
   fit <- tulpa(y ~ x, data = d, family = "binomial", mode = "ep")
   expect_equal(fit$beta_prior$sd, tulpa:::.TULPA_PRIOR$beta_sd)
-  expect_equal(attr(summary(fit), "beta_prior")$sd,
+  expect_equal(summary(fit)$prior$beta$sd,
                tulpa:::.TULPA_PRIOR$beta_sd)
 
   supplied <- tulpa(y ~ x, data = d, family = "binomial", mode = "ep",
@@ -114,4 +121,45 @@ test_that("the backend mode = auto picks does not change the prior", {
   expect_false(identical(fixed$backend, re$backend))
   expect_equal(fixed$beta_prior$sd, tulpa:::.TULPA_PRIOR$beta_sd)
   expect_equal(re$beta_prior$sd, tulpa:::.TULPA_PRIOR$beta_sd)
+})
+
+test_that("laplace, eb and re_cov_nested fit under the default prior too (#869)", {
+  skip_on_cran()
+  # Closed form: the posterior mode under N(0, 2.5) on a tiny poisson fit
+  # differs from the flat-ish N(0, 100) one in the third decimal.
+  set.seed(1)
+  n <- 6
+  d <- data.frame(x = rnorm(n))
+  d$y <- rpois(n, exp(0.5 + 0.8 * d$x))
+  X <- cbind(1, d$x)
+  lp <- function(b, s) sum(dpois(d$y, exp(X %*% b), log = TRUE)) +
+    sum(dnorm(b, 0, s, log = TRUE))
+  mode_25 <- optim(c(0, 0), function(b) -lp(b, 2.5), method = "BFGS",
+                   control = list(reltol = 1e-12))$par
+
+  f <- tulpa(y ~ x, d, family = "poisson", mode = "laplace")
+  expect_equal(f$beta_prior$sd, tulpa:::.TULPA_PRIOR$beta_sd)
+  expect_equal(unname(coef(f)), mode_25, tolerance = 1e-4)
+  expect_equal(summary(f)$prior$beta$sd,
+               tulpa:::.TULPA_PRIOR$beta_sd)
+
+  # Separation: the default prior is what keeps the slope finite.
+  set.seed(1)
+  d2 <- data.frame(x = rnorm(200))
+  d2$ysep <- as.integer(d2$x > 0)
+  sep <- tulpa(ysep ~ x, d2, family = "binomial", mode = "laplace")
+  sep_25 <- tulpa(ysep ~ x, d2, family = "binomial", mode = "laplace",
+                  beta_prior = list(mean = 0, sd = 2.5))
+  expect_equal(coef(sep), coef(sep_25), tolerance = 1e-8)
+  expect_lt(abs(unname(coef(sep)[2])), 20)
+
+  set.seed(3)
+  G <- 12
+  dg <- data.frame(x = rnorm(120), g = factor(rep(seq_len(G), each = 10)))
+  dg$y <- rpois(120, exp(0.3 + 0.5 * dg$x + rnorm(G, 0, 0.5)[dg$g]))
+  for (m in c("eb", "re_cov_nested")) {
+    fm <- suppressWarnings(tulpa(y ~ x + (1 | g), dg, family = "poisson",
+                                 mode = m))
+    expect_equal(fm$beta_prior$sd, tulpa:::.TULPA_PRIOR$beta_sd, info = m)
+  }
 })

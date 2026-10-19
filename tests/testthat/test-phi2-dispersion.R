@@ -1,3 +1,5 @@
+
+skip_on_cran_budget()
 # Second dispersion channel phi2 (gcol33/tulpa C7): configurable Student-t df
 # through the registry, the Laplace kernel, and the samplers; the lognormal
 # family registered with the variance convention; and the gaussian phi
@@ -10,6 +12,7 @@
 # than defaulted there (gcol33/tulpa#257).
 
 test_that("t-family registry ops honor phi2 and match dt()", {
+  skip_on_cran_budget()
   eta <- c(-0.5, 0.2, 1.4)
   y   <- c(0.3, -1.1, 2.0)
   s   <- 0.7
@@ -35,6 +38,7 @@ test_that("t-family registry ops honor phi2 and match dt()", {
 })
 
 test_that("phi2 is rejected for families without a second dispersion", {
+  skip_on_cran_budget()
   expect_error(tulpa:::family_loglik(0, 1, "gaussian", phi = 1, phi2 = 5),
                "no second dispersion")
   d <- data.frame(x = rnorm(30)); d$y <- rnorm(30)
@@ -46,6 +50,25 @@ test_that("phi2 is rejected for families without a second dispersion", {
     tulpa(y2 ~ x, data = d, family = "binomial", mode = "laplace", phi2 = -1),
     "phi2")
 })
+
+test_that("lognormal is registered with the variance convention", {
+  skip_on_cran_budget()
+  set.seed(85)
+  eta <- c(0.2, 1.0); y <- c(1.5, 4.0); v <- 0.36
+
+  expect_equal(tulpa:::family_loglik(eta, y, "lognormal", phi = v),
+               stats::dlnorm(y, meanlog = eta, sdlog = sqrt(v), log = TRUE),
+               tolerance = 1e-12)
+  expect_equal(tulpa:::family_mean(eta, "lognormal", phi = v),
+               exp(eta + v / 2))
+  # Sample moments.
+  ys <- tulpa:::family_sample(rep(0.5, 40000), "lognormal", phi = 0.25)
+  expect_equal(mean(ys), exp(0.5 + 0.125), tolerance = 0.03)
+  expect_equal(stats::var(ys),
+               (exp(0.25) - 1) * exp(1 + 0.25), tolerance = 0.1)
+})
+
+skip_on_cran()
 
 test_that("Laplace t fit with phi2 matches an optim reference and differs from df 4", {
   skip_on_cran()
@@ -59,13 +82,14 @@ test_that("Laplace t fit with phi2 matches an optim reference and differs from d
                  phi = 0.8, phi2 = 10)
   fit4  <- tulpa(y ~ x, data = d, family = "t", mode = "laplace", phi = 0.8)
 
-  # Reference: penalized MAP of the same posterior (weak builtin prior
-  # beta ~ N(0, 100^2)) via optim.
+  # Reference: penalized MAP of the same posterior (the front door's default
+  # prior beta ~ N(0, 2.5^2), gcol33/tulpa#869) via optim.
   nlp <- function(b, nu) {
     -sum(stats::dt((y - X %*% b) / 0.8, df = nu, log = TRUE) - log(0.8)) +
-      sum(b^2) / (2 * 100^2)
+      sum(b^2) / (2 * 2.5^2)
   }
-  ref10 <- stats::optim(c(0, 0), nlp, nu = 10, method = "BFGS")$par
+  ref10 <- stats::optim(c(0, 0), nlp, nu = 10, method = "BFGS",
+                        control = list(reltol = 1e-12))$par
   expect_equal(unname(coef(fit10)), ref10, tolerance = 1e-4)
   expect_false(isTRUE(all.equal(unname(coef(fit10)), unname(coef(fit4)),
                                 tolerance = 1e-6)))
@@ -103,22 +127,6 @@ test_that("gaussian phi means the residual variance on every backend", {
                tolerance = 0.15)
 })
 
-test_that("lognormal is registered with the variance convention", {
-  set.seed(85)
-  eta <- c(0.2, 1.0); y <- c(1.5, 4.0); v <- 0.36
-
-  expect_equal(tulpa:::family_loglik(eta, y, "lognormal", phi = v),
-               stats::dlnorm(y, meanlog = eta, sdlog = sqrt(v), log = TRUE),
-               tolerance = 1e-12)
-  expect_equal(tulpa:::family_mean(eta, "lognormal", phi = v),
-               exp(eta + v / 2))
-  # Sample moments.
-  ys <- tulpa:::family_sample(rep(0.5, 40000), "lognormal", phi = 0.25)
-  expect_equal(mean(ys), exp(0.5 + 0.125), tolerance = 0.03)
-  expect_equal(stats::var(ys),
-               (exp(0.25) - 1) * exp(1 + 0.25), tolerance = 0.1)
-})
-
 test_that("lognormal fits through the front door", {
   skip_on_cran()
   set.seed(87)
@@ -139,6 +147,7 @@ test_that("lognormal fits through the front door", {
 })
 
 test_that("the variance/SD convention follows the base family, not the spelling", {
+  skip_on_cran()
   # gcol33/tulpa#256: the conversion tested the family name for exact equality,
   # so every `<family>_<link>` spelling of a normal family reached the kernel
   # with the variance where the SD belongs.

@@ -29,7 +29,10 @@
     tgmrf      = c("a", "b"),
     lf         = character(0))
 
+skip_on_cran_budget()
+
 test_that("the name table matches what each registry theta() builder emits", {
+    skip_on_cran_budget()
     ax <- .reg_axis_names()
     expect_setequal(names(ax), names(.NL_REGISTRY))
     emit <- list(
@@ -64,26 +67,8 @@ test_that("the name table matches what each registry theta() builder emits", {
         ax$tgmrf)
 })
 
-test_that("the movable-axis table names every axis of every family it lists", {
-    ax <- .reg_axis_names()
-    for (fam in names(.NL_REGISTRY_AXIS_FIELD)) {
-        fields <- .NL_REGISTRY_AXIS_FIELD[[fam]]
-        # Every axis of the family is listed, and nothing else: a passenger
-        # axis re-crossed unchanged is what #361 was filed about.
-        expect_setequal(unname(fields), ax[[fam]])
-        # Every field is one `.NL_FAMILY_AXES` binds for that family, so the
-        # provenance layer recognises the engine's own default coming back in
-        # through a caller's prior (gcol33/tulpa#293).
-        expect_true(all(names(fields) %in% names(.NL_FAMILY_AXES[[fam]])),
-                    info = paste(fam, "lists a field the family never defaults"))
-        # And the transform registry names a coordinate for each, which is what
-        # makes the axis placeable at all.
-        expect_false(anyNA(.joint_pareto_block_tags(fam, ax[[fam]])),
-                     info = paste(fam, "has an unguessable axis"))
-    }
-})
-
 test_that("every family absent from the table is absent for a stated reason", {
+    skip_on_cran_budget()
     ax <- .reg_axis_names()
     absent <- setdiff(names(.NL_REGISTRY), names(.NL_REGISTRY_AXIS_FIELD))
     expect_setequal(absent, c("car_proper", "ar1", "hsgp_mo", "mcar", "miid",
@@ -112,6 +97,7 @@ test_that("every family absent from the table is absent for a stated reason", {
 })
 
 test_that(".nl_registry_write_theta writes each family's fields by column", {
+    skip_on_cran_budget()
     tm <- cbind(sigma2 = c(0.5, 1.5), phi_gp = c(0.2, 0.9))
     blk <- .nl_registry_write_theta(list(list(type = "nngp")), tm,
                                     colnames(tm))[[1L]]
@@ -135,6 +121,28 @@ test_that(".nl_registry_write_theta writes each family's fields by column", {
     expect_null(bl3$tau_grid)
 })
 
+skip_on_cran()
+
+test_that("the movable-axis table names every axis of every family it lists", {
+    skip_on_cran()
+    ax <- .reg_axis_names()
+    for (fam in names(.NL_REGISTRY_AXIS_FIELD)) {
+        fields <- .NL_REGISTRY_AXIS_FIELD[[fam]]
+        # Every axis of the family is listed, and nothing else: a passenger
+        # axis re-crossed unchanged is what #361 was filed about.
+        expect_setequal(unname(fields), ax[[fam]])
+        # Every field is one `.NL_FAMILY_AXES` binds for that family, so the
+        # provenance layer recognises the engine's own default coming back in
+        # through a caller's prior (gcol33/tulpa#293).
+        expect_true(all(names(fields) %in% names(.NL_FAMILY_AXES[[fam]])),
+                    info = paste(fam, "lists a field the family never defaults"))
+        # And the transform registry names a coordinate for each, which is what
+        # makes the axis placeable at all.
+        expect_false(anyNA(.joint_pareto_block_tags(fam, ax[[fam]])),
+                     info = paste(fam, "has an unguessable axis"))
+    }
+})
+
 test_that("a newly-covered family recentres end to end and honours a pin", {
     skip_on_cran()
     set.seed(23)
@@ -151,7 +159,8 @@ test_that("a newly-covered family recentres end to end and honours a pin", {
             family = "gaussian", phi = 0.49,
             control = utils::modifyList(
                 list(max_iter = 200L, tol = 1e-8, n_threads = 1L,
-                     diagnose_k = FALSE, diagnose_skew = FALSE), ctrl)))
+                     diagnose_k = FALSE, diagnose_skew = FALSE,
+                     axis_refine = "none"), ctrl)))
     }
     moved <- fit_rw1(ctrl = list(auto_recenter = "always"))
     expect_identical(moved$outer_grid_placement, "auto_recentered")
@@ -203,7 +212,8 @@ test_that("a multi-block registry fit always records a placement", {
         family = "gaussian", phi = 0.49,
         control = utils::modifyList(
             list(max_iter = 200L, tol = 1e-8, n_threads = 1L, progress = FALSE,
-                 diagnose_k = FALSE, diagnose_skew = FALSE), ctrl)))
+                 diagnose_k = FALSE, diagnose_skew = FALSE,
+                 axis_refine = "none"), ctrl)))
 
     base <- fit_iid()
     expect_true(base$outer_grid_placement %in% c("fixed", "auto_recentered"))

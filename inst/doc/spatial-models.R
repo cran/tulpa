@@ -14,6 +14,19 @@ set.seed(20260529)
 EVAL_FITS <- identical(Sys.getenv("NOT_CRAN"), "true")
 knitr::opts_chunk$set(eval = EVAL_FITS)
 
+## ----eval = FALSE-------------------------------------------------------------
+# # Current release, built for Windows and macOS
+# install.packages("tulpa",
+#                  repos = c("https://gcol33.r-universe.dev",
+#                            "https://cloud.r-project.org"))
+# 
+# # Development version from GitHub
+# install.packages("pak")
+# pak::pak("gcol33/tulpa")
+# 
+# # Pin a release
+# pak::pak("gcol33/tulpa@v0.6.0")
+
 ## ----load, message = FALSE----------------------------------------------------
 # library(tulpa)
 
@@ -42,7 +55,7 @@ knitr::opts_chunk$set(eval = EVAL_FITS)
 # fit <- tulpa(y ~ x + spatial(region), data = ds, family = "binomial",
 #              spatial = list(type = "icar", adjacency = W),
 #              mode = "nested_laplace")
-# fit$backend
+# summary(fit)$inference$backend
 
 ## ----coef---------------------------------------------------------------------
 # coef(fit)
@@ -51,10 +64,8 @@ knitr::opts_chunk$set(eval = EVAL_FITS)
 # summary(fit)
 
 ## ----field-extract------------------------------------------------------------
-# w     <- fit$weights / sum(fit$weights)
-# nf    <- fit$n_fixed
-# field_hat <- vapply(seq_len(K), function(u) sum(w * fit$modes[, nf + u]),
-#                     numeric(1))
+# g         <- tulpa_outer_grid(fit)
+# field_hat <- colSums(g$weights * g$modes)[g$n_fixed + seq_len(K)]
 # round(head(field_hat), 3)
 
 ## ----field-plot, fig.alt = "Estimated spatial field per region against the simulated truth, near the identity line"----
@@ -68,14 +79,13 @@ knitr::opts_chunk$set(eval = EVAL_FITS)
 # cor(field_true, field_hat)
 
 ## ----tau----------------------------------------------------------------------
-# c(tau_mean = fit$theta_mean,
-#   lo = fit$theta_ci_lo, hi = fit$theta_ci_hi)
+# summary(fit)$hyperparameters[, c("parameter", "mean", "ci_lo", "ci_hi")]
 
 ## ----confint------------------------------------------------------------------
 # confint(fit)
 
 ## ----intercept-se-------------------------------------------------------------
-# summary(fit)["(Intercept)", "std.error"]
+# coef(summary(fit))["(Intercept)", "std.error"]
 
 ## ----predict------------------------------------------------------------------
 # nd <- data.frame(x = seq(-2.5, 2.5, length.out = 50))
@@ -112,5 +122,5 @@ knitr::opts_chunk$set(eval = EVAL_FITS)
 # spde <- spatial_spde(~ lon + lat, data = coords, max_edge = c(0.2, 0.5))
 # fit  <- fit_spde(y = y, X = model.matrix(~ xcov), spatial = spde,
 #                  family = "poisson", range = 0.4, sigma = 0.9)
-# round(fit$beta, 3)
+# round(coef(fit), 3)
 

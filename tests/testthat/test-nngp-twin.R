@@ -30,47 +30,6 @@ nngp_inputs <- function(N = 25L, nn = 5L, seed = 3L) {
        nbd = nbd, order0 = order0, inv = inv, N = N, nn = nn)
 }
 
-test_that("the GP NNGP autodiff kernel agrees with its double twin", {
-  d <- nngp_inputs()
-  for (cov_type in 0:1) {            # exponential, matern 3/2
-    for (sigma2 in c(0.4, 1.0, 2.5)) {
-      for (phi in c(0.15, 0.5, 1.2)) {
-        set.seed(11)
-        w <- rnorm(d$N)
-        got <- cpp_test_gp_nngp_twins(w, sigma2, phi, d$coords, d$nn_idx,
-                                      d$nn_dist, d$nbd, d$order0, d$inv,
-                                      cov_type)
-        expect_equal(unname(got[["ad"]]), unname(got[["dbl"]]),
-                     tolerance = 1e-9,
-                     info = paste("cov:", cov_type, "sigma2:", sigma2,
-                                  "phi:", phi))
-      }
-    }
-  }
-})
-
-test_that("the SVC NNGP autodiff kernel agrees with its double twin", {
-  # #109 consolidated the double SVC kernel to jitter/var_floor = 1e-6 via a
-  # double-only core the autodiff twin could not use, so the twin kept 1e-4 and
-  # the two described different models. Both now read tulpa_svc::kSvcJitter /
-  # kSvcVarFloor.
-  d <- nngp_inputs(seed = 5L)
-  for (cov_type in 0:1) {
-    for (sigma2 in c(0.4, 1.0, 2.5)) {
-      for (phi in c(0.15, 0.5, 1.2)) {
-        set.seed(12)
-        w <- rnorm(d$N)
-        got <- cpp_test_svc_nngp_twins(w, sigma2, phi, d$coords, d$nn_idx,
-                                       d$nn_dist, d$order0, cov_type)
-        expect_equal(unname(got[["ad"]]), unname(got[["dbl"]]),
-                     tolerance = 1e-9,
-                     info = paste("cov:", cov_type, "sigma2:", sigma2,
-                                  "phi:", phi))
-      }
-    }
-  }
-})
-
 test_that("the twins agree on a near-degenerate configuration", {
   # Duplicate coordinates drive the neighbour covariance toward singular, which
   # is where the jitter and the variance floor actually bite -- and where the
@@ -92,4 +51,49 @@ test_that("the twins agree on a near-degenerate configuration", {
   svc <- cpp_test_svc_nngp_twins(w, 1.0, 0.5, coords, ni$nn_idx, ni$nn_dist,
                                  order0, 0L)
   expect_equal(unname(svc[["ad"]]), unname(svc[["dbl"]]), tolerance = 1e-8)
+})
+
+skip_on_cran()
+
+test_that("the GP NNGP autodiff kernel agrees with its double twin", {
+  skip_on_cran()
+  d <- nngp_inputs()
+  for (cov_type in 0:1) {            # exponential, matern 3/2
+    for (sigma2 in c(0.4, 1.0, 2.5)) {
+      for (phi in c(0.15, 0.5, 1.2)) {
+        set.seed(11)
+        w <- rnorm(d$N)
+        got <- cpp_test_gp_nngp_twins(w, sigma2, phi, d$coords, d$nn_idx,
+                                      d$nn_dist, d$nbd, d$order0, d$inv,
+                                      cov_type)
+        expect_equal(unname(got[["ad"]]), unname(got[["dbl"]]),
+                     tolerance = 1e-9,
+                     info = paste("cov:", cov_type, "sigma2:", sigma2,
+                                  "phi:", phi))
+      }
+    }
+  }
+})
+
+test_that("the SVC NNGP autodiff kernel agrees with its double twin", {
+  skip_on_cran()
+  # #109 consolidated the double SVC kernel to jitter/var_floor = 1e-6 via a
+  # double-only core the autodiff twin could not use, so the twin kept 1e-4 and
+  # the two described different models. Both now read tulpa_svc::kSvcJitter /
+  # kSvcVarFloor.
+  d <- nngp_inputs(seed = 5L)
+  for (cov_type in 0:1) {
+    for (sigma2 in c(0.4, 1.0, 2.5)) {
+      for (phi in c(0.15, 0.5, 1.2)) {
+        set.seed(12)
+        w <- rnorm(d$N)
+        got <- cpp_test_svc_nngp_twins(w, sigma2, phi, d$coords, d$nn_idx,
+                                       d$nn_dist, d$order0, cov_type)
+        expect_equal(unname(got[["ad"]]), unname(got[["dbl"]]),
+                     tolerance = 1e-9,
+                     info = paste("cov:", cov_type, "sigma2:", sigma2,
+                                  "phi:", phi))
+      }
+    }
+  }
 })

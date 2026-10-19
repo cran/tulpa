@@ -1,4 +1,4 @@
-#' Diagnostic Plotting Functions for tulpa Models
+#' Diagnostic plotting functions for tulpa models
 #'
 #' @description
 #' Visual diagnostic tools for MCMC convergence assessment. All functions
@@ -27,7 +27,7 @@ theme_tulpa <- function() {
 }
 
 
-#' Plot Rhat Convergence Diagnostic
+#' Plot Rhat convergence diagnostic
 #'
 #' @description
 #' Creates a visual display of Rhat values for all parameters, with color-coding
@@ -135,7 +135,7 @@ plot_rhat <- function(fit, threshold = 1.01, pars = NULL) {
 
 
 #' Base R Rhat plot
-#' @keywords internal
+#' @noRd
 plot_rhat_base <- function(diag, threshold) {
   n_pars <- nrow(diag)
   old_par <- graphics::par(mar = c(4, 8, 3, 1))
@@ -158,7 +158,7 @@ plot_rhat_base <- function(diag, threshold) {
 }
 
 
-#' Plot Effective Sample Size Diagnostic
+#' Plot effective sample size diagnostic
 #'
 #' @description
 #' Creates a visual display of effective sample size (ESS) for all parameters,
@@ -264,7 +264,7 @@ plot_ess <- function(fit, type = c("bulk", "tail"), threshold = 400, pars = NULL
 
 
 #' Base R ESS plot
-#' @keywords internal
+#' @noRd
 plot_ess_base <- function(diag, threshold, type) {
   n_pars <- nrow(diag)
   old_par <- graphics::par(mar = c(4, 8, 3, 1))
@@ -286,7 +286,7 @@ plot_ess_base <- function(diag, threshold, type) {
 }
 
 
-#' Plot Autocorrelation Functions
+#' Plot autocorrelation functions
 #'
 #' @description
 #' Creates autocorrelation function (ACF) plots for selected parameters.
@@ -400,7 +400,7 @@ plot_acf <- function(fit, pars = NULL, lags = 25, n_pars = 6) {
 
 
 #' Base R ACF plot
-#' @keywords internal
+#' @noRd
 plot_acf_base <- function(draws, pars, lags) {
   n_pars <- length(pars)
   n_col <- min(3, n_pars)
@@ -416,7 +416,7 @@ plot_acf_base <- function(draws, pars, lags) {
 }
 
 
-#' Plot Bivariate Parameter Posteriors (Pairs Plot)
+#' Plot bivariate parameter posteriors (pairs plot)
 #'
 #' @description
 #' Creates a pairs plot showing bivariate relationships between parameters.
@@ -580,34 +580,65 @@ plot_pairs <- function(fit, pars = NULL, highlight_divergent = TRUE,
 }
 
 
-# Per-chain E-BFMI (Betancourt): the variance of the within-chain energy
-# TRANSITION over the variance of the marginal energy, read off the
-# top-level `$energy` vector every HMC/NUTS sampler writes (gcol33/tulpa#783).
-# Diffing across a chain boundary would compare unrelated trajectories, so
-# each chain's energy is diffed separately (`$chain_id`, defaulting to one
-# chain when absent) and the WORST chain is reported -- one badly-exploring
-# chain is enough to distrust the fit. Returns a list(value=, energy_diff=)
-# with `value = NA_real_` when there is nothing to compute (fewer than two
-# samples in every chain), `energy_diff` the pooled within-chain transitions
-# (for plotting).
-.tulpa_energy_bfmi <- function(fit) {
-  energy <- fit$energy
-  if (is.null(energy) || length(energy) < 10) {
-    return(list(value = NA_real_, energy_diff = numeric(0)))
+#' Energy Bayesian Fraction of Missing Information (E-BFMI)
+#'
+#' Computes E-BFMI (Betancourt 2016) from the per-iteration Hamiltonian
+#' energies an HMC or NUTS sampler records: the variance of the energy
+#' transition between successive iterations over the variance of the marginal
+#' energy. Each chain is diffed separately, since a transition across a chain
+#' boundary compares unrelated trajectories, and the lowest chain value is
+#' reported: one badly exploring chain is enough to distrust a fit. Values
+#' below 0.3 indicate that momentum resampling moves the sampler too little
+#' between energy level sets.
+#'
+#' @param energy Numeric vector of per-iteration energies.
+#' @param chain Chain index of each entry of `energy`. `NULL` (default), or a
+#'   vector of the wrong length, treats `energy` as one chain.
+#'
+#' @return A list with `value` (the lowest per-chain E-BFMI, `NA` when no
+#'   chain has two finite, non-constant energies), `per_chain`,
+#'   `energy_centred` (energies centred within each chain) and `energy_diff`
+#'   (within-chain transitions), the last two pooled across chains for
+#'   plotting.
+#'
+#' @examples
+#' set.seed(1)
+#' energy <- c(cumsum(rnorm(200, sd = 0.3)), rnorm(200, sd = 1))
+#' energy_bfmi(energy, chain = rep(1:2, each = 200))$per_chain
+#'
+#' @export
+energy_bfmi <- function(energy, chain = NULL) {
+  energy <- as.numeric(energy)
+  if (is.null(chain) || length(chain) != length(energy)) {
+    chain <- rep(1L, length(energy))
   }
-  cid <- fit$chain_id
-  if (is.null(cid) || length(cid) != length(energy)) cid <- rep(1L, length(energy))
-  by_chain <- split(energy, cid)
+  by_chain <- split(energy, chain)
   diffs <- lapply(by_chain, function(e) if (length(e) > 1L) diff(e) else numeric(0))
-  bfmi_per_chain <- vapply(seq_along(by_chain), function(i) {
+  per_chain <- vapply(seq_along(by_chain), function(i) {
     e <- by_chain[[i]]; ed <- diffs[[i]]
     if (length(ed) < 1L || !is.finite(stats::var(e)) || stats::var(e) == 0) {
       return(NA_real_)
     }
     stats::var(ed) / stats::var(e)
   }, numeric(1))
-  bfmi_val <- if (all(is.na(bfmi_per_chain))) NA_real_ else min(bfmi_per_chain, na.rm = TRUE)
-  list(value = bfmi_val, energy_diff = unlist(diffs, use.names = FALSE))
+  names(per_chain) <- names(by_chain)
+  list(
+    value = if (all(is.na(per_chain))) NA_real_ else min(per_chain, na.rm = TRUE),
+    per_chain = per_chain,
+    energy_centred = unlist(lapply(by_chain, function(e) e - mean(e)),
+                            use.names = FALSE),
+    energy_diff = unlist(diffs, use.names = FALSE)
+  )
+}
+
+# E-BFMI of a tulpa fit, read off the top-level `$energy` vector every HMC/NUTS
+# sampler writes and its `$chain_id` (gcol33/tulpa#783).
+.tulpa_energy_bfmi <- function(fit) {
+  energy <- fit$energy
+  if (is.null(energy) || length(energy) < 10) {
+    return(list(value = NA_real_, energy_diff = numeric(0)))
+  }
+  energy_bfmi(energy, fit$chain_id)
 }
 
 
@@ -644,7 +675,7 @@ plot_pairs <- function(fit, pars = NULL, highlight_divergent = TRUE,
 
 
 #' Base R pairs plot
-#' @keywords internal
+#' @noRd
 plot_pairs_base <- function(draws_df, pars, has_divergent, alpha) {
   # Subset to just the parameters
   plot_data <- draws_df[, pars, drop = FALSE]
@@ -677,7 +708,7 @@ plot_pairs_base <- function(draws_df, pars, has_divergent, alpha) {
 }
 
 
-#' Plot Divergent Transitions
+#' Plot divergent transitions
 #'
 #' @description
 #' Creates visualizations to investigate divergent transitions. Parallel
@@ -773,7 +804,7 @@ plot_divergences <- function(fit, pars = NULL, type = c("parcoord", "scatter")) 
 
 
 #' Parallel coordinates plot for divergences
-#' @keywords internal
+#' @noRd
 plot_divergences_parcoord <- function(draws_df, pars) {
   # Scale parameters to [0, 1] for comparison
   scaled <- draws_df[, pars, drop = FALSE]
@@ -829,7 +860,7 @@ plot_divergences_parcoord <- function(draws_df, pars) {
 
 
 #' Base R parallel coordinates
-#' @keywords internal
+#' @noRd
 plot_divergences_parcoord_base <- function(scaled, pars, divergent) {
   n_pars <- length(pars)
   n_samples <- nrow(scaled)
@@ -863,7 +894,7 @@ plot_divergences_parcoord_base <- function(scaled, pars, divergent) {
 
 
 #' Scatter plot matrix for divergences
-#' @keywords internal
+#' @noRd
 plot_divergences_scatter <- function(draws_df, pars) {
   # Use first 2-4 parameters for scatter matrix
   pars <- head(pars, 4)
@@ -894,7 +925,7 @@ plot_divergences_scatter <- function(draws_df, pars) {
 }
 
 
-#' Plot Energy Diagnostic (E-BFMI)
+#' Plot energy diagnostic (E-BFMI)
 #'
 #' @description
 #' Creates overlaid histograms of marginal energy and energy transition,
@@ -985,7 +1016,7 @@ plot_energy <- function(fit) {
 
 
 #' Base R energy plot
-#' @keywords internal
+#' @noRd
 plot_energy_base <- function(energy, energy_diff, e_bfmi, status) {
   old_par <- graphics::par(mar = c(4, 4, 4, 2))
   on.exit(graphics::par(old_par))
@@ -1019,7 +1050,7 @@ plot_energy_base <- function(energy, energy_diff, e_bfmi, status) {
 }
 
 
-#' Comprehensive Diagnostic Summary
+#' Comprehensive diagnostic summary
 #'
 #' @description
 #' Provides a comprehensive diagnostic report for a tulpa model, combining
@@ -1096,6 +1127,8 @@ diagnostic_summary <- function(fit, quiet = FALSE) {
     e_bfmi = NA,
     pareto_k = NA_real_,
     s2z_log_det_fallback_cells = 0L,
+    s2z_field_indefinite_cells = 0L,
+    unconverged_cells = 0L,
     outer_regime = NA_character_,
     interval_read = NA_character_,
     interval_design_mass = NA_real_,
@@ -1350,7 +1383,7 @@ diagnostic_summary <- function(fit, quiet = FALSE) {
   # Outer-grid cells whose log-determinant came from the PD-enforced factor.
   # Read outside the approximation-only block for the same reason the axis note
   # below is: the flag rides the grid on every tier that produces one.
-  s2z_fb <- .tulpa_s2z_fallback_cells(fit)
+  s2z_fb <- .tulpa_s2z_flag_cells(fit, "s2z_log_det_fallback")
   if (!is.null(s2z_fb)) {
     result$s2z_log_det_fallback_cells <- s2z_fb$n
     status <- "WARN"
@@ -1359,6 +1392,19 @@ diagnostic_summary <- function(fit, quiet = FALSE) {
             "log-determinant: their weights come from a determinant of",
             "H + lambda I rather than of the pinned sum-to-zero matrix."),
       s2z_fb$n, s2z_fb$n_grid))
+  }
+  # Cells whose field block was indefinite at the final pass: a count, not a
+  # warning, since the inertia route reads the same value wherever the pinned
+  # matrix is PD, and the cells where it is not are counted above.
+  s2z_ind <- .tulpa_s2z_flag_cells(fit, "s2z_field_indefinite")
+  if (!is.null(s2z_ind)) result$s2z_field_indefinite_cells <- s2z_ind$n
+
+  # Outer-grid cells whose inner Newton stopped at the cap without a mode.
+  uc <- .tulpa_unconverged_cells(fit)
+  if (!is.null(uc)) {
+    result$unconverged_cells <- uc$n
+    status <- if (status == "FAIL") "FAIL" else "WARN"
+    recommendations <- c(recommendations, .tulpa_unconverged_cells_note(uc))
   }
 
   # Grid axes the resolved path could not read. Recorded on
@@ -1397,14 +1443,9 @@ if (!quiet) {
 }
 
 
-#' Print method for diagnostic summary
-#'
-#' @param x A tulpa_diagnostic_summary object.
+#' @rdname diagnostic_summary
+#' @param x A `tulpa_diagnostic_summary` object.
 #' @param ... Ignored.
-#'
-#' @return The input `x`, returned invisibly. Called for the side effect of
-#'   printing the diagnostic summary to the console.
-#'
 #' @export
 print.tulpa_diagnostic_summary <- function(x, ...) {
   # Status color (ANSI codes)
@@ -1601,23 +1642,31 @@ plot_diagnostics <- function(fit, pars = NULL) {
 }
 
 
-#' Geweke Convergence Test
+#' Geweke convergence test
 #'
 #' @description
 #' Performs Geweke's convergence diagnostic, comparing the mean of the first
-#' portion of a chain to the last portion. Useful for single-chain diagnostics.
+#' portion of a chain to the last portion. It is a within-chain diagnostic, so
+#' on a multi-chain fit it is computed for each chain separately.
 #'
 #' @param fit A `tulpa_fit` object.
-#' @param frac1 Fraction of chain for first window (default: 0.1).
-#' @param frac2 Fraction of chain for second window (default: 0.5).
+#' @param frac1 Fraction of each chain for the first window (default: 0.1).
+#' @param frac2 Fraction of each chain for the second window (default: 0.5).
+#'   Both lie in `(0, 1)` and the windows may not overlap:
+#'   `frac1 + frac2 <= 1`.
 #' @param pars Character vector of parameter names (default: all main params).
 #'
-#' @return A data frame with columns: parameter, z_score, p_value.
+#' @return A data frame of class `tulpa_geweke` with columns `chain`,
+#'   `parameter`, `z_score` and `p_value`, one row per chain and parameter.
 #'
 #' @details
 #' The Geweke test computes a z-score comparing the means of early and late
 #' portions of a chain. Large z-scores (|z| > 2) indicate the chain has not
-#' converged.
+#' converged. The chains are never pooled: concatenated, the "first" window
+#' would come from the first chain and the "last" from another, which compares
+#' two chains rather than a chain's start with its end (use [diagnostics()]
+#' for the between-chain R-hat). A parameter that is constant within a chain
+#' has an undefined z-score, reported as `NA`.
 #'
 #' @examples
 #' \donttest{
@@ -1636,6 +1685,12 @@ geweke_test <- function(fit, frac1 = 0.1, frac2 = 0.5, pars = NULL) {
   if (!inherits(fit, "tulpa_fit")) {
     stop("fit must be a tulpa_fit object", call. = FALSE)
   }
+  .check_unit_interval(frac1, "frac1")
+  .check_unit_interval(frac2, "frac2")
+  if (frac1 + frac2 > 1) {
+    stop("`frac1 + frac2` must not exceed 1: the two windows would overlap.",
+         call. = FALSE)
+  }
   if (!.tulpa_is_chain(fit)) {
     message(.tulpa_non_chain_msg(fit))
     return(invisible(NULL))
@@ -1645,6 +1700,12 @@ geweke_test <- function(fit, frac1 = 0.1, frac2 = 0.5, pars = NULL) {
   if (is.null(draws)) {
     stop("No draws available in fit object", call. = FALSE)
   }
+  # One series per chain (gcol33/tulpa#895); the pooled matrix only supplies
+  # the resolved parameter names, in the same column order.
+  chains <- lapply(.tulpa_chain_list(fit), function(m) {
+    colnames(m) <- colnames(draws)
+    m
+  })
 
   # Select parameters
   if (is.null(pars)) {
@@ -1653,33 +1714,43 @@ geweke_test <- function(fit, frac1 = 0.1, frac2 = 0.5, pars = NULL) {
     pars <- grep_params(pars, colnames(draws))
   }
 
-  n <- nrow(draws)
+  n <- min(vapply(chains, nrow, integer(1)))
   n1 <- floor(frac1 * n)
   n2 <- floor(frac2 * n)
+  if (n1 < 2L || n2 < 2L) {
+    stop(sprintf(paste0(
+      "The Geweke windows hold %d and %d draws of a %d-draw chain; each needs ",
+      "at least 2. Raise `frac1` / `frac2` or run longer chains."),
+      as.integer(n1), as.integer(n2), as.integer(n)), call. = FALSE)
+  }
 
-  results <- lapply(pars, function(p) {
-    x <- draws[, p]
+  results <- lapply(seq_along(chains), function(k) {
+    ch <- chains[[k]]
+    nk <- nrow(ch)
+    do.call(rbind, lapply(pars, function(p) {
+      x <- ch[, p]
 
-    # First window
-    x1 <- x[1:n1]
-    mean1 <- mean(x1)
-    var1 <- spectrum0_ar(x1) / n1
+      # First window
+      x1 <- x[seq_len(floor(frac1 * nk))]
+      var1 <- spectrum0_ar(x1) / length(x1)
 
-    # Second window (last portion)
-    x2 <- x[(n - n2 + 1):n]
-    mean2 <- mean(x2)
-    var2 <- spectrum0_ar(x2) / n2
+      # Second window (last portion)
+      x2 <- x[(nk - floor(frac2 * nk) + 1):nk]
+      var2 <- spectrum0_ar(x2) / length(x2)
 
-    # Z-score
-    z <- (mean1 - mean2) / sqrt(var1 + var2)
-    p_val <- 2 * (1 - pnorm(abs(z)))
+      # Z-score; a window with no variation leaves it undefined, not infinite
+      z <- if (isTRUE(var1 + var2 > 0)) (mean(x1) - mean(x2)) / sqrt(var1 + var2) else
+        NA_real_
+      p_val <- 2 * (1 - pnorm(abs(z)))
 
-    data.frame(
-      parameter = p,
-      z_score = z,
-      p_value = p_val,
-      stringsAsFactors = FALSE
-    )
+      data.frame(
+        chain = k,
+        parameter = p,
+        z_score = z,
+        p_value = p_val,
+        stringsAsFactors = FALSE
+      )
+    }))
   })
 
   result <- do.call(rbind, results)
@@ -1689,7 +1760,7 @@ geweke_test <- function(fit, frac1 = 0.1, frac2 = 0.5, pars = NULL) {
 
 
 #' Spectrum at frequency zero (AR fit)
-#' @keywords internal
+#' @noRd
 spectrum0_ar <- function(x) {
   # Fit AR model to estimate spectral density at frequency 0
   n <- length(x)
@@ -1710,14 +1781,9 @@ spectrum0_ar <- function(x) {
 }
 
 
-#' Print method for Geweke test
-#'
-#' @param x A tulpa_geweke object.
+#' @rdname geweke_test
+#' @param x A `tulpa_geweke` result.
 #' @param ... Ignored.
-#'
-#' @return The input `x`, returned invisibly. Called for the side effect of
-#'   printing the Geweke convergence diagnostic to the console.
-#'
 #' @export
 print.tulpa_geweke <- function(x, ...) {
   cat("Geweke Convergence Diagnostic\n")
@@ -1728,10 +1794,16 @@ print.tulpa_geweke <- function(x, ...) {
 
   print.data.frame(x, row.names = FALSE)
 
-  # Flag potential issues
-  bad <- abs(x$z_score) > 2
+  # Flag potential issues; an NA z (a window without variation) is not one
+  bad <- !is.na(x$z_score) & abs(x$z_score) > 2
   if (any(bad)) {
-    cat("\nWarning:", sum(bad), "parameter(s) have |z| > 2 (potential non-convergence)\n")
+    what <- if (!is.null(x$chain) && length(unique(x$chain)) > 1L) {
+      "chain/parameter pair(s)"
+    } else {
+      "parameter(s)"
+    }
+    cat("\nWarning:", sum(bad), what,
+        "have |z| > 2 (potential non-convergence)\n")
   }
 
   invisible(x)
@@ -1771,6 +1843,16 @@ grep_params <- function(pattern, names) {
 #' @param fit A `tulpa_fit` object.
 #' @return Integer count of divergent transitions (0 if none are recorded).
 #' @seealso [plot_divergences()], [check_diagnostics()]
+#' @examples
+#' \donttest{
+#' set.seed(1)
+#' d <- data.frame(x = rnorm(60))
+#' d$y <- rpois(60, exp(0.5 + 0.3 * d$x))
+#' fit <- tulpa(y ~ x, data = d, family = "poisson", mode = "hmc",
+#'              control = list(n_iter = 400L, warmup = 200L, n_chains = 2L,
+#'                             seed = 1L))
+#' n_divergent(fit)
+#' }
 #' @export
 n_divergent <- function(fit) {
   .tulpa_divergence_record(fit)$n

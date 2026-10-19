@@ -1,3 +1,5 @@
+
+skip_on_cran_budget()
 # The links carried on eta > 0: inverse (mu = 1/eta), 1mu2 (mu = 1/sqrt(eta))
 # and sqrt (mu = eta^2). The first two have no mean outside the domain; sqrt has
 # one, but it is the mirror image of the eta > 0 branch, so admitting it would
@@ -11,6 +13,7 @@
 # inside before the first iteration.
 
 test_that("the log-likelihood is -Inf outside the eta > 0 links' domain", {
+  skip_on_cran_budget()
   cases <- list(
     list(family = "gamma_inverse",         y = 1.5, phi = 2.0),
     list(family = "inverse_gaussian_1mu2", y = 1.5, phi = 1.1),
@@ -32,31 +35,12 @@ test_that("the log-likelihood is -Inf outside the eta > 0 links' domain", {
   }
 })
 
-test_that("the domain check leaves every other link alone", {
-  cases <- list(
-    list(family = "gamma",             y = 1.5, n = 1L,  phi = 2.0),
-    list(family = "inverse_gaussian",  y = 1.5, n = 1L,  phi = 1.1),
-    list(family = "poisson",           y = 4,   n = 1L,  phi = 1.0),
-    list(family = "binomial",          y = 3,   n = 10L, phi = 1.0),
-    list(family = "binomial_probit",   y = 3,   n = 10L, phi = 1.0),
-    list(family = "gaussian",          y = 1.2, n = 1L,  phi = 1.5),
-    list(family = "gaussian_log",      y = 1.2, n = 1L,  phi = 1.5)
-  )
-  for (cs in cases) {
-    for (eta in c(-3, 0, 0.9)) {
-      expect_true(
-        is.finite(cpp_family_terms(cs$y, cs$n, eta, cs$family, cs$phi)[["log_lik"]]),
-        info = paste(cs$family, "at eta =", eta)
-      )
-    }
-  }
-})
-
 # H_beta is assembled in R, through the family registry, so a fit with
 # return_hessian = TRUE exercises the engine and the R link layer together. That
 # is the end-to-end path: before the link layer existed the mode-finding
 # succeeded in C++ and the R side then failed to describe the same family.
 test_that("a constrained-link fit returns a fixed-effect Hessian", {
+  skip_on_cran_budget()
   set.seed(15)
   n <- 200
   x <- runif(n, -1, 1)
@@ -90,6 +74,7 @@ test_that("a constrained-link fit returns a fixed-effect Hessian", {
 # not a prior.
 
 test_that("gamma with the inverse link reproduces the glm MLE", {
+  skip_on_cran_budget()
   set.seed(11)
   n <- 400
   x <- runif(n, -1, 1)
@@ -113,6 +98,7 @@ test_that("gamma with the inverse link reproduces the glm MLE", {
 })
 
 test_that("inverse gaussian with the 1/mu^2 link reproduces the glm MLE", {
+  skip_on_cran_budget()
   set.seed(12)
   n <- 400
   x <- runif(n, -1, 1)
@@ -133,6 +119,72 @@ test_that("inverse gaussian with the 1/mu^2 link reproduces the glm MLE", {
   expect_equal(as.numeric(fit$mode)[1:2], unname(stats::coef(ref)),
                tolerance = 1e-5)
   expect_true(all(as.vector(X %*% as.numeric(fit$mode)[1:2]) > 0))
+})
+
+test_that("a start outside the domain is moved inside, not clamped", {
+  skip_on_cran_budget()
+  # x = 0 gives eta = 0 for every observation, which is the boundary. The
+  # feasibility sweep has to find an interior start; if it silently clamped
+  # instead, the fit would sit at mu = 1e10 with a huge reported gradient.
+  set.seed(13)
+  n <- 200
+  x <- runif(n, -1, 1)
+  X <- cbind(1, x)
+  mu <- 1 / as.vector(X %*% c(0.8, 0.25))
+  y <- rgamma(n, shape = 6, rate = 6 / mu)
+
+  fit <- tulpa_laplace(y, rep(1L, n), X, family = "gamma_inverse",
+                       phi = 6, beta_prior = list(sd = Inf),
+                       return_hessian = FALSE)
+
+  expect_false(isTRUE(fit$start_infeasible))
+  expect_true(fit$converged)
+  fitted_mu <- 1 / as.vector(X %*% as.numeric(fit$mode)[1:2])
+  expect_true(all(fitted_mu > 0))
+  expect_lt(max(fitted_mu), 100 * max(y))   # nowhere near the 1e10 clamp
+})
+
+test_that("the log link is unaffected by the feasibility sweep", {
+  skip_on_cran_budget()
+  # The sweep only runs when the start has a non-finite objective, so a log-link
+  # fit must reach the same MLE it always did.
+  set.seed(14)
+  n <- 300
+  x <- runif(n, -1, 1)
+  X <- cbind(1, x)
+  mu <- exp(0.4 + 0.6 * x)
+  y <- rgamma(n, shape = 5, rate = 5 / mu)
+
+  ref <- stats::glm(y ~ x, family = stats::Gamma(link = "log"))
+  fit <- tulpa_laplace(y, rep(1L, n), X, family = "gamma",
+                       phi = 5, beta_prior = list(sd = Inf))
+
+  expect_true(fit$converged)
+  expect_equal(as.numeric(fit$mode)[1:2], unname(stats::coef(ref)),
+               tolerance = 1e-5)
+})
+
+skip_on_cran()
+
+test_that("the domain check leaves every other link alone", {
+  skip_on_cran()
+  cases <- list(
+    list(family = "gamma",             y = 1.5, n = 1L,  phi = 2.0),
+    list(family = "inverse_gaussian",  y = 1.5, n = 1L,  phi = 1.1),
+    list(family = "poisson",           y = 4,   n = 1L,  phi = 1.0),
+    list(family = "binomial",          y = 3,   n = 10L, phi = 1.0),
+    list(family = "binomial_probit",   y = 3,   n = 10L, phi = 1.0),
+    list(family = "gaussian",          y = 1.2, n = 1L,  phi = 1.5),
+    list(family = "gaussian_log",      y = 1.2, n = 1L,  phi = 1.5)
+  )
+  for (cs in cases) {
+    for (eta in c(-3, 0, 0.9)) {
+      expect_true(
+        is.finite(cpp_family_terms(cs$y, cs$n, eta, cs$family, cs$phi)[["log_lik"]]),
+        info = paste(cs$family, "at eta =", eta)
+      )
+    }
+  }
 })
 
 test_that("the inverse-link estimator is unbiased across seeds", {
@@ -164,45 +216,4 @@ test_that("the inverse-link estimator is unbiased across seeds", {
     mc_se <- stats::sd(est[, j]) / sqrt(n_seed)
     expect_lt(abs(mean(est[, j]) - beta_true[j]), 3 * mc_se + 1e-8)
   }
-})
-
-test_that("a start outside the domain is moved inside, not clamped", {
-  # x = 0 gives eta = 0 for every observation, which is the boundary. The
-  # feasibility sweep has to find an interior start; if it silently clamped
-  # instead, the fit would sit at mu = 1e10 with a huge reported gradient.
-  set.seed(13)
-  n <- 200
-  x <- runif(n, -1, 1)
-  X <- cbind(1, x)
-  mu <- 1 / as.vector(X %*% c(0.8, 0.25))
-  y <- rgamma(n, shape = 6, rate = 6 / mu)
-
-  fit <- tulpa_laplace(y, rep(1L, n), X, family = "gamma_inverse",
-                       phi = 6, beta_prior = list(sd = Inf),
-                       return_hessian = FALSE)
-
-  expect_false(isTRUE(fit$start_infeasible))
-  expect_true(fit$converged)
-  fitted_mu <- 1 / as.vector(X %*% as.numeric(fit$mode)[1:2])
-  expect_true(all(fitted_mu > 0))
-  expect_lt(max(fitted_mu), 100 * max(y))   # nowhere near the 1e10 clamp
-})
-
-test_that("the log link is unaffected by the feasibility sweep", {
-  # The sweep only runs when the start has a non-finite objective, so a log-link
-  # fit must reach the same MLE it always did.
-  set.seed(14)
-  n <- 300
-  x <- runif(n, -1, 1)
-  X <- cbind(1, x)
-  mu <- exp(0.4 + 0.6 * x)
-  y <- rgamma(n, shape = 5, rate = 5 / mu)
-
-  ref <- stats::glm(y ~ x, family = stats::Gamma(link = "log"))
-  fit <- tulpa_laplace(y, rep(1L, n), X, family = "gamma",
-                       phi = 5, beta_prior = list(sd = Inf))
-
-  expect_true(fit$converged)
-  expect_equal(as.numeric(fit$mode)[1:2], unname(stats::coef(ref)),
-               tolerance = 1e-5)
 })

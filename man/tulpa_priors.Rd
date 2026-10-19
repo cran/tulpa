@@ -2,6 +2,16 @@
 % Please edit documentation in R/priors.R
 \name{tulpa_priors}
 \alias{tulpa_priors}
+\alias{print.tulpa_priors}
+\alias{print.tulpa_prior}
+\alias{format.tulpa_prior_normal}
+\alias{format.tulpa_prior_half_normal}
+\alias{format.tulpa_prior_half_cauchy}
+\alias{format.tulpa_prior_gamma}
+\alias{format.tulpa_prior_exponential}
+\alias{format.tulpa_prior_beta}
+\alias{format.tulpa_prior_pc}
+\alias{format.tulpa_prior}
 \title{Prior specification for tulpa models}
 \usage{
 tulpa_priors(
@@ -11,6 +21,26 @@ tulpa_priors(
   rho_temporal = NULL,
   rho_spatial = NULL
 )
+
+\method{print}{tulpa_priors}(x, ...)
+
+\method{print}{tulpa_prior}(x, ...)
+
+\method{format}{tulpa_prior_normal}(x, indent = "", ...)
+
+\method{format}{tulpa_prior_half_normal}(x, indent = "", ...)
+
+\method{format}{tulpa_prior_half_cauchy}(x, indent = "", ...)
+
+\method{format}{tulpa_prior_gamma}(x, indent = "", ...)
+
+\method{format}{tulpa_prior_exponential}(x, indent = "", ...)
+
+\method{format}{tulpa_prior_beta}(x, indent = "", ...)
+
+\method{format}{tulpa_prior_pc}(x, indent = "", ...)
+
+\method{format}{tulpa_prior}(x, indent = "", ...)
 }
 \arguments{
 \item{beta}{Prior for fixed effects. Default: \code{prior_normal(0, 2.5)}.}
@@ -26,13 +56,40 @@ P(phi > 10) = 0.01.}
 
 \item{rho_spatial}{Prior for spatial proportion (BYM2). Default:
 \code{prior_beta(1, 1)} (uniform).}
+
+\item{x}{A \code{tulpa_priors} specification, or a single prior built by a
+\verb{prior_*()} constructor.}
+
+\item{...}{Ignored.}
+
+\item{indent}{String prefixed to each formatted line.}
 }
 \value{
 A \code{tulpa_priors} object
+
+\code{format()} returns the prior as a character string.
 }
 \description{
 Specify priors for model parameters. Supports both PC (penalized complexity)
 priors for variance components and standard distributions for other parameters.
+
+A \code{tulpa_priors} object is what the simulation tools draw parameters from:
+\code{\link[=prior_predict]{prior_predict()}} and \code{\link[=tulpa_simulate]{tulpa_simulate()}} with \code{theta = NULL}. The model
+fitters do not read one. \code{\link[=tulpa]{tulpa()}} carries its own defaults, set per backend
+through its \code{beta_prior}, \code{re_prior} and \code{hyperprior} arguments:
+\itemize{
+\item Fixed effects: \code{prior_normal(0, 2.5)} on every backend -- the same default
+as \code{beta} here.
+\item Random-effect SDs: a PC prior with \code{P(sigma > 3) = 0.01} (plus an LKJ(2)
+prior on a correlated block's correlations) on the routes that integrate or
+maximize over them (nested Laplace, \code{re_cov_nested}, \code{mode = "eb"});
+half-Cauchy(2.5) on the samplers (\code{re_prior$sigma_re_scale}, and
+\code{re_prior$prior_sigma_scale} for \code{mode = "gibbs"}); an inverse-Wishart
+under \code{control$re_cov = "gibbs"}.
+}
+
+The \code{sigma}, \code{phi}, \code{rho_temporal} and \code{rho_spatial} defaults below are
+therefore the simulation defaults, not the priors a fit ran under.
 }
 \details{
 PC priors (Simpson et al., 2017) provide principled regularization that:

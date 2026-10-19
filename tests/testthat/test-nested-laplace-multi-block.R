@@ -37,6 +37,8 @@
 
 # Build CSR adjacency for a 5x5 grid (n_sites = 25). Borrowed from the
 # spatial helpers used elsewhere in the suite.
+skip_on_cran()
+
 adj <- make_grid_adjacency(5, 5)
 n_sites <- 25
 n_years <- 10
@@ -115,6 +117,8 @@ sim_one_seed <- function(seed) {
 
 fit_one_seed <- function(d) {
   # Coarse Cartesian per-block grids -- keep joint grid manageable.
+  bym2_g <- expand.grid(sigma = c(0.3, 0.6, 1.0, 1.5), rho = c(0.3, 0.6, 0.85))
+  ar1_g  <- expand.grid(tau = c(3, 8, 15, 30), rho = c(0.4, 0.7, 0.9))
   prior_list <- list(
     list(
       type = "bym2",
@@ -124,15 +128,18 @@ fit_one_seed <- function(d) {
       adj_col_idx = adj$adj_col_idx,
       n_neighbors = adj$n_neighbors,
       scale_factor = 1.0,
-      sigma_grid = c(0.3, 0.6, 1.0, 1.5),
-      rho_grid   = c(0.3, 0.6, 0.85)
+      # A two-axis family's fields are PAIRED cells; the tensor grid the
+      # cell count below assumes is written as expand.grid() columns
+      # (gcol33/tulpa#884).
+      sigma_grid = bym2_g$sigma,
+      rho_grid   = bym2_g$rho
     ),
     list(
       type = "ar1",
       temporal_idx = as.integer(d$year_idx),
       n_times = as.integer(n_years),
-      tau_grid = c(3, 8, 15, 30),
-      rho_grid = c(0.4, 0.7, 0.9)
+      tau_grid = ar1_g$tau,
+      rho_grid = ar1_g$rho
     ),
     list(
       type = "iid",
@@ -141,8 +148,8 @@ fit_one_seed <- function(d) {
       sigma_grid = c(0.1, 0.3, 0.6, 1.0)
     )
   )
-  # 12 (bym2) x 12 (ar1) x 4 (iid) = ~576 cells -- well above the warn
-  # threshold but inside the hard cap. Each cell is one inner Newton solve.
+  # 12 (bym2) x 12 (ar1) x 4 (iid) = ~576 cells. Each cell is one inner
+  # Newton solve.
   suppressWarnings(
     tulpa_nested_laplace(
       y = d$y, n_trials = rep(1L, length(d$y)), X = d$X,
@@ -219,7 +226,7 @@ test_that("multi-block (BYM2 + AR1 + IID) runs end-to-end and roughly recovers",
   d <- sim_one_seed(1001L)
   res <- fit_one_seed(d)
   expect_s3_class(res, "tulpa_nested_laplace")
-  expect_true(all(is.finite(res$log_marginal)))
+  expect_cells_solved(res)
   expect_length(res$block_moments, 3L)
   # Each block returns the expected axis names.
   expect_named(res$block_moments[[1]]$mean, c("sigma", "rho"))

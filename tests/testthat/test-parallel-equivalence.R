@@ -72,40 +72,10 @@ report_omp_reduction <- function(got, ref, nt, bound) {
   invisible(d)
 }
 
-test_that("a parallel dot-product reduction is independent of the thread count", {
-  set.seed(5)
-  X <- matrix(rnorm(200 * 8), 200, 8)
-  b <- rnorm(8)
-
-  ref <- cpp_test_parallel_dot_products(X, b, 1L)
-  expect_equal(ref$results, as.numeric(X %*% b), tolerance = 1e-12)
-  expect_equal(ref$total_sum, sum(as.numeric(X %*% b)), tolerance = 1e-10)
-  # One thread takes the plain loop on both constructs, so they are the same
-  # sum in the same order.
-  expect_identical(ref$sum_shipped, ref$sum_omp_red)
-  expect_identical(ref$n_threads_used, 1L)
-
-  bound <- reorder_bound(ref$results)
-  for (nt in c(2L, 4L, 8L)) {
-    got <- cpp_test_parallel_dot_products(X, b, nt)
-    expect_identical(got$n_threads_requested, nt)
-    # Per-row results are written independently: identical, not merely close.
-    expect_identical(got$results, ref$results, info = paste("threads", nt))
-
-    # The engine's construct. Reproducible at a team size, so a repeat call is
-    # bit-identical, and across team sizes it moves only by the chunking.
-    again <- cpp_test_parallel_dot_products(X, b, nt)
-    expect_identical(again$sum_shipped, got$sum_shipped,
-                     info = paste("threads", nt))
-    d_ship <- got$sum_shipped - ref$sum_shipped
-    expect_true(abs(d_ship) < bound, info = thread_info(got, nt, d_ship, bound))
-
-    # The runtime's construct: reported, not asserted. See the file header.
-    report_omp_reduction(got, ref, nt, bound)
-  }
-})
+skip_on_cran_budget()
 
 test_that("a parallel likelihood reduction is independent of the thread count", {
+  skip_on_cran_budget()
   set.seed(6)
   n <- 500L
   mu <- runif(n, 0.2, 6)
@@ -136,6 +106,7 @@ test_that("a parallel likelihood reduction is independent of the thread count", 
 })
 
 test_that("independent per-element writes are identical at any thread count", {
+  skip_on_cran_budget()
   n <- 1000L
   ref <- cpp_test_parallel_independent(n, 1L)
   i <- seq_len(n) - 1
@@ -143,5 +114,41 @@ test_that("independent per-element writes are identical at any thread count", {
   for (nt in c(2L, 4L, 8L)) {
     expect_identical(cpp_test_parallel_independent(n, nt), ref,
                      info = paste("threads", nt))
+  }
+})
+
+skip_on_cran()
+
+test_that("a parallel dot-product reduction is independent of the thread count", {
+  skip_on_cran()
+  set.seed(5)
+  X <- matrix(rnorm(200 * 8), 200, 8)
+  b <- rnorm(8)
+
+  ref <- cpp_test_parallel_dot_products(X, b, 1L)
+  expect_equal(ref$results, as.numeric(X %*% b), tolerance = 1e-12)
+  expect_equal(ref$total_sum, sum(as.numeric(X %*% b)), tolerance = 1e-10)
+  # One thread takes the plain loop on both constructs, so they are the same
+  # sum in the same order.
+  expect_identical(ref$sum_shipped, ref$sum_omp_red)
+  expect_identical(ref$n_threads_used, 1L)
+
+  bound <- reorder_bound(ref$results)
+  for (nt in c(2L, 4L, 8L)) {
+    got <- cpp_test_parallel_dot_products(X, b, nt)
+    expect_identical(got$n_threads_requested, nt)
+    # Per-row results are written independently: identical, not merely close.
+    expect_identical(got$results, ref$results, info = paste("threads", nt))
+
+    # The engine's construct. Reproducible at a team size, so a repeat call is
+    # bit-identical, and across team sizes it moves only by the chunking.
+    again <- cpp_test_parallel_dot_products(X, b, nt)
+    expect_identical(again$sum_shipped, got$sum_shipped,
+                     info = paste("threads", nt))
+    d_ship <- got$sum_shipped - ref$sum_shipped
+    expect_true(abs(d_ship) < bound, info = thread_info(got, nt, d_ship, bound))
+
+    # The runtime's construct: reported, not asserted. See the file header.
+    report_omp_reduction(got, ref, nt, bound)
   }
 })

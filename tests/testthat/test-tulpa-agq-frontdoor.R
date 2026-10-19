@@ -14,12 +14,45 @@ make_agq_re_data <- function(seed = 401L, G = 40L, npg = 8L,
   data.frame(y = rbinom(N, 1L, plogis(eta)), x = x, g = g)
 }
 
+skip_on_cran_budget()
+
 
 test_that("agq is registered, reachable, and a valid front-door backend", {
+  skip_on_cran_budget()
   expect_true("agq" %in% ALL_BACKENDS)
   expect_true(backend_is_reachable("agq"))
   expect_equal(get_backend_tier("agq")$tier, 2L)
 })
+
+
+test_that("mode='agq' rejects random slopes, multiple terms, and bad families", {
+  skip_on_cran_budget()
+  d <- make_agq_re_data(G = 20L, npg = 6L)
+  d$g2 <- factor(rep(seq_len(5L), length.out = nrow(d)))
+
+  expect_error(
+    tulpa(y ~ x + (1 + x | g), data = d, family = "binomial", mode = "agq"),
+    "exactly one random-intercept")
+  expect_error(
+    tulpa(y ~ x + (1 | g) + (1 | g2), data = d, family = "binomial",
+          mode = "agq"),
+    "exactly one random-intercept")
+  expect_error(
+    tulpa(y ~ x + (1 | g), data = d, family = "neg_binomial_2", mode = "agq"),
+    "AGQ supports family")
+})
+
+
+test_that("mode='agq' rejects a fixed-effect prior (marginal-likelihood fit)", {
+  skip_on_cran_budget()
+  d <- make_agq_re_data(G = 20L, npg = 6L)
+  expect_error(
+    tulpa(y ~ x + (1 | g), data = d, family = "binomial", mode = "agq",
+          beta_prior = list(mean = 0, sd = 2.5)),
+    "not supported on the AGQ path")
+})
+
+skip_on_cran()
 
 
 test_that("mode='agq' routes a (1 | g) model to agq_fit and matches a direct call", {
@@ -46,7 +79,7 @@ test_that("mode='agq' routes a (1 | g) model to agq_fit and matches a direct cal
   expect_length(coef(fit), 2L)
   expect_equal(dim(vcov(fit)), c(2L, 2L))
   expect_equal(nrow(confint(fit)), 2L)
-  expect_true(all(is.finite(summary(fit)$std.error)))
+  expect_true(all(is.finite(coef(summary(fit))$std.error)))
 })
 
 
@@ -82,30 +115,4 @@ test_that("gaussian agq maps phi to the residual sd (sigma_eps = sqrt(phi))", {
 
   expect_equal(fit$backend, "agq")
   expect_equal(unname(fit$means), unname(direct$means), tolerance = 1e-8)
-})
-
-
-test_that("mode='agq' rejects random slopes, multiple terms, and bad families", {
-  d <- make_agq_re_data(G = 20L, npg = 6L)
-  d$g2 <- factor(rep(seq_len(5L), length.out = nrow(d)))
-
-  expect_error(
-    tulpa(y ~ x + (1 + x | g), data = d, family = "binomial", mode = "agq"),
-    "exactly one random-intercept")
-  expect_error(
-    tulpa(y ~ x + (1 | g) + (1 | g2), data = d, family = "binomial",
-          mode = "agq"),
-    "exactly one random-intercept")
-  expect_error(
-    tulpa(y ~ x + (1 | g), data = d, family = "neg_binomial_2", mode = "agq"),
-    "AGQ supports family")
-})
-
-
-test_that("mode='agq' rejects a fixed-effect prior (marginal-likelihood fit)", {
-  d <- make_agq_re_data(G = 20L, npg = 6L)
-  expect_error(
-    tulpa(y ~ x + (1 | g), data = d, family = "binomial", mode = "agq",
-          beta_prior = list(mean = 0, sd = 2.5)),
-    "not supported on the AGQ path")
 })

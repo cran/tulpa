@@ -11,6 +11,8 @@
 # diagonal, the joint Hessian wires the (beta_0, beta_1) and
 # (beta_0, z[c]), (beta_1, z[c]) cross-arm cells.
 
+skip_on_cran()
+
 .chain_adj <- function(n_s) {
     nbr <- lapply(seq_len(n_s),
                   function(s) setdiff(c(s - 1L, s + 1L), c(0L, n_s + 1L)))
@@ -462,7 +464,7 @@ test_that("coupled field private to one arm: rank-1 s2z pattern matches densify 
             control = list(max_iter = 200L, tol = 1e-9, diagnose_k = FALSE))
     }
     dns <- fit_at("100000")   # store the full 1 1' (dense densify path)
-    r1  <- fit_at("0")        # fold 1 1' in at solve time (the > 256-node path)
+    r1  <- fit_at("0")        # fold 1 1' in at solve time (the large-field path)
 
     expect_equal(r1$log_marginal, dns$log_marginal, tolerance = 1e-6)
     expect_equal(as.numeric(r1$modes), as.numeric(dns$modes), tolerance = 1e-6)

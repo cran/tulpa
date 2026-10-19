@@ -352,7 +352,7 @@ test_that("nested Laplace SPDE runs with 2D hyperparameter grid", {
   )
 
   expect_equal(length(result$log_marginal), 9L)
-  expect_true(all(is.finite(result$log_marginal)))
+  expect_cells_solved(result)
   expect_true(all(result$n_iter > 0))
 
   # Log-marginals should vary across grid
@@ -397,7 +397,7 @@ test_that("nested Laplace SPDE warm-start reduces iterations", {
     max_iter = 50L, tol = 1e-6, n_threads = 1L
   )
 
-  expect_true(all(is.finite(result$log_marginal)))
+  expect_cells_solved(result)
 
   # Later grid points should converge faster due to warm-start
   expect_true(any(result$n_iter[2:5] <= result$n_iter[1]))
@@ -438,7 +438,10 @@ make_synthetic_spde_spec <- function(n_obs = 30, seed = 7) {
   )
 }
 
+skip_on_cran_budget()
+
 test_that("dispatch_laplace_spatial routes SPDE specs (no longer errors)", {
+  skip_on_cran_budget()
   ss <- make_synthetic_spde_spec()
   X <- matrix(1.0, nrow = ss$n_obs, ncol = 1)
   y <- rbinom(ss$n_obs, 1, 0.5)
@@ -461,6 +464,8 @@ test_that("dispatch_laplace_spatial routes SPDE specs (no longer errors)", {
   expect_false(isTRUE(grepl("not yet supported", msg, fixed = TRUE)))
   if (is.na(msg)) expect_true(is.list(res))
 })
+
+skip_on_cran()
 
 test_that("SPDE Laplace threads an additional iid RE block (issue #74)", {
   skip_on_cran()

@@ -21,27 +21,11 @@ sd_laplace <- function(d, ...) {
   tulpa_laplace(d$y, d$n_trials, d$X, re_list = d$re, family = "binomial", ...)
 }
 
-
-test_that("the band table resolves gamma_3 and the inner k-hat per probed index", {
-  skip_on_cran()
-  d <- sd_fixture()
-  f <- sd_laplace(d, compute_skew = TRUE, skew_idx = 1:2)
-  b <- tulpa:::.subspace_bands(f)
-
-  expect_identical(b$idx, 1:2)
-  expect_true(all(is.finite(b$gamma3)))
-  # The band is the WORSE of the two inner scores, so it can never be better
-  # than what gamma_3 alone says.
-  g_band <- vapply(b$gamma3, tulpa:::.tulpa_gamma3_band, character(1))
-  expect_true(all(tulpa:::.subspace_band_rank(b$band) >=
-                    tulpa:::.subspace_band_rank(g_band)))
-  # This fixture is the known-skewed one, so the intercept is flagged.
-  expect_gt(abs(b$gamma3[1]), tulpa:::.nl_diag("gamma3_ok"))
-  expect_identical(b$band[1], "unreliable")
-})
+skip_on_cran_budget()
 
 
 test_that("an index whose cubic term declines is banded by its inner k-hat", {
+  skip_on_cran_budget()
   # The #303 dependency the selector is built on: a coordinate gamma_3 cannot
   # score (a coupled likelihood ships no per-observation third derivative) must
   # still be banded, from the importance curve, rather than skipped -- otherwise
@@ -66,12 +50,123 @@ test_that("an index whose cubic term declines is banded by its inner k-hat", {
 
 
 test_that("a fit with no inner-layer material bands nothing", {
+  skip_on_cran_budget()
   d <- sd_fixture()
   f <- sd_laplace(d)                      # compute_skew not requested
   b <- tulpa:::.subspace_bands(f)
   expect_identical(nrow(b), 0L)
   cfg <- tulpa:::.subspace_debias_config(TRUE)
   expect_length(tulpa:::.subspace_select(f, cfg)$idx, 0L)
+})
+
+
+test_that("sigma_ss is the inner Laplace's own marginal covariance of x_S", {
+  skip_on_cran_budget()
+  d <- sd_fixture()
+  f <- sd_laplace(d, return_joint_hessian = TRUE,
+                  debias = list(idx = c(1L, 3L), n_iter = 200L, warmup = 100L))
+  Sig <- solve(as.matrix(f$H_joint))
+  expect_equal(f$debias_sigma_ss, Sig[c(1L, 3L), c(1L, 3L)],
+               tolerance = 1e-6, ignore_attr = TRUE)
+})
+
+
+test_that("an empty or absent index set leaves the solve bit-for-bit unchanged", {
+  skip_on_cran_budget()
+  d <- sd_fixture()
+  set.seed(1); a <- sd_laplace(d)
+  set.seed(1); b <- sd_laplace(d, debias = list(idx = integer(0)))
+  expect_identical(a, b)
+
+  # ... and the RNG stream is untouched, so anything drawn afterwards matches.
+  set.seed(1); invisible(sd_laplace(d)); ra <- stats::rnorm(3)
+  set.seed(1); invisible(sd_laplace(d, debias = list(idx = integer(0))))
+  rb <- stats::rnorm(3)
+  expect_identical(ra, rb)
+})
+
+
+test_that("the closure grows S by coupling strength and never duplicates a member", {
+  skip_on_cran_budget()
+  d <- sd_fixture()
+  f <- sd_laplace(d, return_joint_hessian = TRUE)
+  H <- as.matrix(f$H_joint)
+  n_x <- nrow(H)
+
+  # An unreachable threshold adds nothing; a zero threshold takes everything
+  # exactly once.
+  expect_identical(tulpa:::.subspace_closure(H, 1:2, threshold = 10)$idx, 1:2)
+  all_in <- tulpa:::.subspace_closure(H, 1:2, threshold = 0)$idx
+  expect_identical(all_in, seq_len(n_x))
+  expect_false(anyDuplicated(all_in) > 0L)
+
+  # Lowering the threshold is monotone in the selected set.
+  a <- tulpa:::.subspace_closure(H, 1:2, threshold = 0.2)$idx
+  b <- tulpa:::.subspace_closure(H, 1:2, threshold = 0.1)$idx
+  expect_true(all(a %in% b))
+
+  # The cap keeps the strongest couplings.
+  cap <- tulpa:::.subspace_closure(H, 1:2, threshold = 0, max_add = 3L)
+  expect_length(cap$added, 3L)
+  dd <- sqrt(abs(diag(H)))
+  strength <- apply(abs(H[1:2, ] / outer(dd[1:2], dd)), 2L, max)
+  strength[1:2] <- -Inf
+  expect_setequal(cap$added, order(strength, decreasing = TRUE)[1:3])
+})
+
+
+test_that("the control knob validates its settings", {
+  skip_on_cran_budget()
+  expect_null(tulpa:::.subspace_debias_config(NULL))
+  expect_null(tulpa:::.subspace_debias_config(FALSE))
+  expect_identical(tulpa:::.subspace_debias_config(TRUE)$band,
+                   tulpa:::.nl_diag("debias_select_band"))
+  expect_error(tulpa:::.subspace_debias_config(list(nonsense = 1)),
+               "Unknown .*subspace_debias.* setting")
+  expect_error(tulpa:::.subspace_debias_config(list(band = "great")),
+               "must be one of")
+  expect_error(tulpa:::.subspace_debias_config("on"),
+               "must be TRUE, FALSE, or a list")
+  d <- sd_fixture()
+  expect_error(
+    tulpa_re_cov_nested(d$y, d$n_trials, d$X, d$rt, family = "binomial",
+                        control = list(subspace = TRUE)),
+    "Unknown control knob")
+})
+
+
+test_that("the spatial Laplace path refuses the correction rather than ignoring it", {
+  skip_on_cran_budget()
+  d <- sd_fixture()
+  expect_error(
+    tulpa_laplace(d$y, d$n_trials, d$X, re_list = d$re, family = "binomial",
+                  spatial = list(type = "gp"), debias = list(idx = 1L)),
+    "non-spatial")
+  expect_error(
+    tulpa_laplace(d$y, d$n_trials, d$X, re_list = d$re, family = "binomial",
+                  spatial = list(type = "gp"), compute_skew = TRUE),
+    "non-spatial")
+})
+
+skip_on_cran()
+
+
+test_that("the band table resolves gamma_3 and the inner k-hat per probed index", {
+  skip_on_cran()
+  d <- sd_fixture()
+  f <- sd_laplace(d, compute_skew = TRUE, skew_idx = 1:2)
+  b <- tulpa:::.subspace_bands(f)
+
+  expect_identical(b$idx, 1:2)
+  expect_true(all(is.finite(b$gamma3)))
+  # The band is the WORSE of the two inner scores, so it can never be better
+  # than what gamma_3 alone says.
+  g_band <- vapply(b$gamma3, tulpa:::.tulpa_gamma3_band, character(1))
+  expect_true(all(tulpa:::.subspace_band_rank(b$band) >=
+                    tulpa:::.subspace_band_rank(g_band)))
+  # This fixture is the known-skewed one, so the intercept is flagged.
+  expect_gt(abs(b$gamma3[1]), tulpa:::.nl_diag("gamma3_ok"))
+  expect_identical(b$band[1], "unreliable")
 })
 
 
@@ -101,30 +196,6 @@ test_that("the sampler reproduces the exact conditional when the target IS Gauss
 })
 
 
-test_that("sigma_ss is the inner Laplace's own marginal covariance of x_S", {
-  d <- sd_fixture()
-  f <- sd_laplace(d, return_joint_hessian = TRUE,
-                  debias = list(idx = c(1L, 3L), n_iter = 200L, warmup = 100L))
-  Sig <- solve(as.matrix(f$H_joint))
-  expect_equal(f$debias_sigma_ss, Sig[c(1L, 3L), c(1L, 3L)],
-               tolerance = 1e-6, ignore_attr = TRUE)
-})
-
-
-test_that("an empty or absent index set leaves the solve bit-for-bit unchanged", {
-  d <- sd_fixture()
-  set.seed(1); a <- sd_laplace(d)
-  set.seed(1); b <- sd_laplace(d, debias = list(idx = integer(0)))
-  expect_identical(a, b)
-
-  # ... and the RNG stream is untouched, so anything drawn afterwards matches.
-  set.seed(1); invisible(sd_laplace(d)); ra <- stats::rnorm(3)
-  set.seed(1); invisible(sd_laplace(d, debias = list(idx = integer(0))))
-  rb <- stats::rnorm(3)
-  expect_identical(ra, rb)
-})
-
-
 test_that("the front door records S and leaves an empty S bit-for-bit identical", {
   skip_on_cran()
   d <- sd_fixture()
@@ -150,64 +221,4 @@ test_that("the front door records S and leaves an empty S bit-for-bit identical"
   expect_true(all(rk >= fl))
   # The corrected coefficient's interval moved; the fit is not silently inert.
   expect_false(isTRUE(all.equal(confint(f0), confint(f2))))
-})
-
-
-test_that("the closure grows S by coupling strength and never duplicates a member", {
-  d <- sd_fixture()
-  f <- sd_laplace(d, return_joint_hessian = TRUE)
-  H <- as.matrix(f$H_joint)
-  n_x <- nrow(H)
-
-  # An unreachable threshold adds nothing; a zero threshold takes everything
-  # exactly once.
-  expect_identical(tulpa:::.subspace_closure(H, 1:2, threshold = 10)$idx, 1:2)
-  all_in <- tulpa:::.subspace_closure(H, 1:2, threshold = 0)$idx
-  expect_identical(all_in, seq_len(n_x))
-  expect_false(anyDuplicated(all_in) > 0L)
-
-  # Lowering the threshold is monotone in the selected set.
-  a <- tulpa:::.subspace_closure(H, 1:2, threshold = 0.2)$idx
-  b <- tulpa:::.subspace_closure(H, 1:2, threshold = 0.1)$idx
-  expect_true(all(a %in% b))
-
-  # The cap keeps the strongest couplings.
-  cap <- tulpa:::.subspace_closure(H, 1:2, threshold = 0, max_add = 3L)
-  expect_length(cap$added, 3L)
-  dd <- sqrt(abs(diag(H)))
-  strength <- apply(abs(H[1:2, ] / outer(dd[1:2], dd)), 2L, max)
-  strength[1:2] <- -Inf
-  expect_setequal(cap$added, order(strength, decreasing = TRUE)[1:3])
-})
-
-
-test_that("the control knob validates its settings", {
-  expect_null(tulpa:::.subspace_debias_config(NULL))
-  expect_null(tulpa:::.subspace_debias_config(FALSE))
-  expect_identical(tulpa:::.subspace_debias_config(TRUE)$band,
-                   tulpa:::.nl_diag("debias_select_band"))
-  expect_error(tulpa:::.subspace_debias_config(list(nonsense = 1)),
-               "Unknown .*subspace_debias.* setting")
-  expect_error(tulpa:::.subspace_debias_config(list(band = "great")),
-               "must be one of")
-  expect_error(tulpa:::.subspace_debias_config("on"),
-               "must be TRUE, FALSE, or a list")
-  d <- sd_fixture()
-  expect_error(
-    tulpa_re_cov_nested(d$y, d$n_trials, d$X, d$rt, family = "binomial",
-                        control = list(subspace = TRUE)),
-    "Unknown control knob")
-})
-
-
-test_that("the spatial Laplace path refuses the correction rather than ignoring it", {
-  d <- sd_fixture()
-  expect_error(
-    tulpa_laplace(d$y, d$n_trials, d$X, re_list = d$re, family = "binomial",
-                  spatial = list(type = "gp"), debias = list(idx = 1L)),
-    "non-spatial")
-  expect_error(
-    tulpa_laplace(d$y, d$n_trials, d$X, re_list = d$re, family = "binomial",
-                  spatial = list(type = "gp"), compute_skew = TRUE),
-    "non-spatial")
 })

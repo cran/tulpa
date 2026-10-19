@@ -29,7 +29,10 @@ grid_warnings <- function(expr) {
   w
 }
 
+skip_on_cran_budget()
+
 test_that(".nl_internal_batch() is off by default and restores (#614)", {
+  skip_on_cran_budget()
   expect_false(.nl_internal_batch())
   inner <- .nl_with_internal_batch({
     expect_true(.nl_internal_batch())
@@ -52,6 +55,35 @@ test_that(".nl_internal_batch() is off by default and restores (#614)", {
   .joint_with_quiet_opts(expect_true(.nl_internal_batch()))
   expect_false(.nl_internal_batch())
 })
+
+test_that(".nl_multi_grid_warn() fires on measured elapsed time, gated by .nl_internal_batch() (gcol33/tulpa#820, #614)", {
+  skip_on_cran_budget()
+  over <- tulpa:::.NL_MULTI_GRID_WARN_SECONDS + 1
+
+  # A grid the caller DID choose still warns once it crosses the measured
+  # wall-clock threshold, and the message names its own cell count.
+  w <- grid_warnings(
+    tulpa:::.nl_multi_grid_warn(elapsed = over, n_cells = 60L,
+                                remedy = "Reduce per-block grid sizes."))
+  expect_length(w, 1L)
+  expect_match(w, "60 cells", fixed = TRUE)
+  expect_match(w, "Reduce per-block grid sizes.", fixed = TRUE)
+  expect_false(any(grepl("200 cells", w, fixed = TRUE)))
+
+  # Below the threshold: silent regardless of cell count.
+  w0 <- grid_warnings(
+    tulpa:::.nl_multi_grid_warn(elapsed = 0.01, n_cells = 60L, remedy = "x"))
+  expect_identical(w0, character(0))
+
+  # An internal re-dispatch (the Pareto-k diagnostic's own re-evaluation) is
+  # exempt even when IT is the slow one -- #614's whole point.
+  w2 <- grid_warnings(
+    tulpa:::.nl_with_internal_batch(
+      tulpa:::.nl_multi_grid_warn(elapsed = over, n_cells = 200L, remedy = "x")))
+  expect_identical(w2, character(0))
+})
+
+skip_on_cran()
 
 test_that("the Pareto-k re-evaluation does not warn about the caller's grid (#614)", {
   skip_on_cran()
@@ -76,30 +108,4 @@ test_that("the Pareto-k re-evaluation does not warn about the caller's grid (#61
   # The diagnostic really ran -- otherwise the silence proves nothing.
   expect_true(is.finite(fit$pareto_k) || !is.na(fit$pareto_k_declined))
   expect_length(fit$weights, 7L)
-})
-
-test_that(".nl_multi_grid_warn() fires on measured elapsed time, gated by .nl_internal_batch() (gcol33/tulpa#820, #614)", {
-  over <- tulpa:::.NL_MULTI_GRID_WARN_SECONDS + 1
-
-  # A grid the caller DID choose still warns once it crosses the measured
-  # wall-clock threshold, and the message names its own cell count.
-  w <- grid_warnings(
-    tulpa:::.nl_multi_grid_warn(elapsed = over, n_cells = 60L,
-                                remedy = "Reduce per-block grid sizes."))
-  expect_length(w, 1L)
-  expect_match(w, "60 cells", fixed = TRUE)
-  expect_match(w, "Reduce per-block grid sizes.", fixed = TRUE)
-  expect_false(any(grepl("200 cells", w, fixed = TRUE)))
-
-  # Below the threshold: silent regardless of cell count.
-  w0 <- grid_warnings(
-    tulpa:::.nl_multi_grid_warn(elapsed = 0.01, n_cells = 60L, remedy = "x"))
-  expect_identical(w0, character(0))
-
-  # An internal re-dispatch (the Pareto-k diagnostic's own re-evaluation) is
-  # exempt even when IT is the slow one -- #614's whole point.
-  w2 <- grid_warnings(
-    tulpa:::.nl_with_internal_batch(
-      tulpa:::.nl_multi_grid_warn(elapsed = over, n_cells = 200L, remedy = "x")))
-  expect_identical(w2, character(0))
 })

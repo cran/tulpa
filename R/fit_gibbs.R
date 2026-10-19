@@ -217,19 +217,14 @@ adjacency_to_list_tulpa <- function(adj) {
 }
 
 # The projection `spatial_rsr()` declares, attached to the spec at the field's
-# own resolution. One builder for both field shapes: the RSR modifier is
-# binomial-Gibbs-only whichever field it restricts, and `restrict_to` is the
-# design it orthogonalises against -- the spec's own formula, not the full model
-# design.
-.attach_rsr_projection <- function(spatial_spec, data, family,
-                                   obs_to_field, n_field) {
-  if (!identical(family, "binomial")) {
-    stop("An RSR spatial field is fit by the binomial Polya-Gamma Gibbs ",
-         "sampler; `family` must be 'binomial' (got '", family, "').",
-         call. = FALSE)
-  }
-  if (is.null(spatial_spec$rsr_formula)) return(spatial_spec)
-  X_rsr <- stats::model.matrix(spatial_spec$rsr_formula, data = data)
+# own resolution. One builder for both field shapes and every backend that
+# applies it: `restrict_to` is the design it orthogonalises against -- the
+# spec's own formula, not the full model design. A spec without one (a bare
+# `type = "rsr"` list) is restricted against `X_default`, the model design.
+.attach_rsr_projection <- function(spatial_spec, data, obs_to_field, n_field,
+                                   X_default) {
+  X_rsr <- if (is.null(spatial_spec$rsr_formula)) X_default
+           else stats::model.matrix(spatial_spec$rsr_formula, data = data)
   spatial_spec$rsr_projection <-
     .rsr_unit_projection(X_rsr, obs_to_field, n_field)
   spatial_spec
@@ -244,7 +239,7 @@ adjacency_to_list_tulpa <- function(adj) {
 #' multiscale_gp) family; `neg_binomial_2` is backed by the single areal ICAR
 #' negbin sampler (`cpp_pg_negbin_gibbs_spatial`), the only negbin spatial kernel.
 #' @return The one-chain list [tulpa_gibbs()] finalizes (see its Value).
-#' @keywords internal
+#' @noRd
 dispatch_gibbs_spatial <- function(y, n_trials, X, re_group, n_re_groups,
                                    spatial, family,
                                    iter, warmup, thin = 1L,
@@ -326,14 +321,15 @@ dispatch_gibbs_spatial <- function(y, n_trials, X, re_group, n_re_groups,
   } else if (spatial_type == "bym2") {
     .pg_as_chain(do.call(cpp_pg_binomial_gibbs_bym2, c(common, areal, list(
       scale_factor              = spatial$scale_factor %||% 1.0,
+      node_prec_nullable        = spatial$node_prec,
       prior_sigma_spatial_scale = spatial$prior_sigma_spatial_scale %||% 2.5,
       prior_rho_alpha           = spatial$prior_rho_alpha %||% 0.5,
       prior_rho_beta            = spatial$prior_rho_beta  %||% 0.5
     ))), "bym2", X)
   } else if (spatial_type == "rsr") {
     # Restricted spatial regression: an ICAR field projected orthogonal to the
-    # covariates each sweep. Reuse a caller-supplied projector if validate_rsr()
-    # built one, else assemble the unit-level P_perp from the model design.
+    # covariates each sweep. Reuse the projector .attach_rsr_projection()
+    # built, else assemble the unit-level P_perp from the model design.
     rsr_n  <- areal$n_spatial_units
     P_perp <- spatial$rsr_projection %||%
       .rsr_unit_projection(X, areal$spatial_group, rsr_n)
@@ -445,7 +441,7 @@ dispatch_gibbs_spatial <- function(y, n_trials, X, re_group, n_re_groups,
 #' only. The C++ kernel implements an RW1 trend (rw2 is rejected here rather than
 #' silently downgraded).
 #' @return The one-chain list [tulpa_gibbs()] finalizes (see its Value).
-#' @keywords internal
+#' @noRd
 dispatch_gibbs_temporal <- function(y, n_trials, X, re_group, n_re_groups,
                                     temporal, family,
                                     iter, warmup, thin = 1L,
@@ -499,13 +495,15 @@ dispatch_gibbs_temporal <- function(y, n_trials, X, re_group, n_re_groups,
 #' and for those the y-free expected form is a different function
 #' (gcol33/tulpa#824).
 #'
-#' `neg_binomial_2` is the one family where that bites: its compiled branch
-#' returns `(y + phi) phi mu / (mu + phi)^2` while the registry's y-free
-#' `weight` is the expected `mu phi / (mu + phi)`, which at a response away
-#' from the mean differ by tens of percent. Every other family either has no
-#' separate observed form or is one the compiled side answers with the expected
-#' weight, so `y` changes nothing and may be omitted.
-#' @keywords internal
+#' `neg_binomial_2` and `beta` are the families where that bites: the compiled
+#' neg_binomial_2 branch returns `(y + phi) phi mu / (mu + phi)^2` while the
+#' registry's y-free `weight` is the expected `mu phi / (mu + phi)`, which at a
+#' response away from the mean differ by tens of percent; the beta Newton
+#' weight carries the score term `(1 - 2 mu) dmu g_mu` the expected form does
+#' not. Every other family either has no separate observed form or is one the
+#' compiled side answers with the expected weight, so `y` changes nothing and
+#' may be omitted.
+#' @noRd
 glmm_weights <- function(eta, family, n_trials = NULL, phi = 1.0, phi2 = NULL,
                          y = NULL) {
   # Resolution (including the `<family>_<link>` forms) belongs to .family_ops();
@@ -572,7 +570,7 @@ glmm_weights <- function(eta, family, n_trials = NULL, phi = 1.0, phi2 = NULL,
 #'   priors define.
 #'
 #' @param spatial Optional spatial spec. When supplied the fit routes to the
-#'   matching spatial Polya-Gamma Gibbs sampler via [dispatch_gibbs_spatial()];
+#'   matching spatial Polya-Gamma Gibbs sampler via `dispatch_gibbs_spatial()`;
 #'   `group`/`n_groups` are the iid random-effect block carried alongside the
 #'   field. The full areal + continuous family is available for
 #'   `family = "binomial"`; `family = "neg_binomial_2"` is backed by the areal
@@ -588,7 +586,7 @@ glmm_weights <- function(eta, family, n_trials = NULL, phi = 1.0, phi2 = NULL,
 #'     observation per unique location in coordinate order.
 #' @param temporal Optional temporal spec: a validated [temporal_multiscale()]
 #'   object. Routes to the multiscale temporal Polya-Gamma sampler via
-#'   [dispatch_gibbs_temporal()] (binomial only; RW1 trend + cyclic seasonal +
+#'   `dispatch_gibbs_temporal()` (binomial only; RW1 trend + cyclic seasonal +
 #'   AR1/IID short-term). Cannot be combined with `spatial`.
 #' @param control A named list of numerical / tuning knobs (statistical
 #'   arguments stay in the signature above): `n_iter` (default 2000), `warmup`
@@ -640,6 +638,7 @@ tulpa_gibbs <- function(y, n_trials, X, group, n_groups,
   family        <- .canonical_family(family)
   n_iter        <- as.integer(control$n_iter %||% 2000L)
   warmup        <- as.integer(control$warmup %||% 1000L)
+  .check_run_length(n_iter, warmup, "tulpa_gibbs")
   thin          <- as.integer(control$thin %||% 1L)
   verbose       <- isTRUE(control$verbose)
   n_threads     <- as.integer(control$n_threads %||% 1L)

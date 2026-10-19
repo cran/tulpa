@@ -103,6 +103,7 @@ agq_fit <- function(y, X, group,
   storage.mode(X) <- "double"
   n_obs <- length(y)
   p <- ncol(X)
+  .require_fixed_effects(X, "agq_fit")
   if (nrow(X) != n_obs) {
     stop(sprintf("nrow(X) (%d) must equal length(y) (%d).",
                  nrow(X), n_obs), call. = FALSE)
@@ -112,16 +113,46 @@ agq_fit <- function(y, X, group,
                  length(group), n_obs), call. = FALSE)
   }
   group <- as.integer(group)
+  if (anyNA(group)) {
+    stop(sprintf(paste0(
+      "`group` has missing value(s) (first at row %d). tulpa does not drop ",
+      "incomplete cases; remove those rows or give them a group."),
+      which(is.na(group))[1L]), call. = FALSE)
+  }
   if (any(group < 1L) || any(group > n_groups)) {
     stop("`group` indices must lie in 1..n_groups.", call. = FALSE)
   }
-  if (n_quad < 1L) stop("`n_quad` must be >= 1.", call. = FALSE)
-  if (is.null(n_trials)) n_trials <- rep(1L, n_obs)
-  if (is.null(beta_init)) beta_init <- rep(0, p)
+  n_quad <- .check_n_quad(n_quad)
+  # The scales reach log() and the oracle's density: a non-positive
+  # `sigma_init` was "non-finite value supplied by optim", and a negative
+  # `sigma_eps` was squared into a valid variance without a word
+  # (gcol33/tulpa#886).
+  for (arg in list(list(v = sigma_init, nm = "sigma_init"),
+                   list(v = sigma_eps, nm = "sigma_eps"))) {
+    if (!is.numeric(arg$v) || length(arg$v) != 1L || !is.finite(arg$v) ||
+        arg$v <= 0) {
+      stop(sprintf("`%s` must be a single positive number; got %s.",
+                   arg$nm, paste(format(arg$v), collapse = ", ")),
+           call. = FALSE)
+    }
+  }
+  n_trials <- .normalize_n_trials(family, n_trials, n_obs)
   if (is.null(offset)) offset <- rep(0, n_obs)
   if (length(offset) != n_obs) {
     stop(sprintf("length(offset) (%d) must equal length(y) (%d).",
                  length(offset), n_obs), call. = FALSE)
+  }
+  # The finite guard and the support rules every other door applies: an NA
+  # response and a binomial y > n_trials both surfaced as a per-group solve
+  # failure advising a different beta_init / sigma_init (gcol33/tulpa#886).
+  .assert_finite_model_inputs(X, y, n_trials = n_trials, offset = offset,
+                              where = "agq_fit")
+  .validate_family_support(family, y, n_trials = n_trials)
+  if (is.null(n_trials)) n_trials <- rep(1L, n_obs)
+  if (is.null(beta_init)) beta_init <- rep(0, p)
+  if (length(beta_init) != p) {
+    stop(sprintf("length(beta_init) (%d) must equal ncol(X) (%d).",
+                 length(beta_init), p), call. = FALSE)
   }
 
   # Intercept-only RE: route through the shared compiled GLMM oracle, so the
@@ -176,9 +207,10 @@ agq_fit <- function(y, X, group,
 
   sigma_hat <- exp(opt$par[p + 1L])
 
-  cov_par <- tryCatch(solve(opt$hessian),
+  cov_par <- tryCatch(.spd_inverse(opt$hessian),
                       error = function(e) {
-                        warning("AGQ Hessian singular; covariance set to NA.",
+                        warning("AGQ Hessian not positive definite; ",
+                                "covariance set to NA.",
                                 call. = FALSE)
                         matrix(NA_real_, p + 1L, p + 1L)
                       })
@@ -223,7 +255,7 @@ agq_fit <- function(y, X, group,
       "effects. Use mode = 're_cov_gibbs' or 're_cov_nested' for ranef()."),
     n_fixed = p
   )
-  .finalize_fit(fit, extra_class = "tulpa_agq_fit",
+  .finalize_fit(fit,
                data = list(y = y, n_trials = n_trials, model_matrix = X,
                           family = family, offset = offset,
                           phi = if (identical(family, "gaussian")) sigma_eps^2 else NULL))
@@ -238,7 +270,7 @@ agq_fit <- function(y, X, group,
 #'
 #' @param n Number of quadrature nodes.
 #' @return List with `nodes` and `weights` (each length `n`).
-#' @keywords internal
+#' @noRd
 gauss_hermite_prob <- function(n) {
   n <- as.integer(n)
   if (n < 1L) stop("n must be >= 1.", call. = FALSE)

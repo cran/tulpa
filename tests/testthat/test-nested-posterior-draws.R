@@ -38,85 +38,6 @@ nl_fixture <- function() {
   )
 }
 
-test_that("the mixture sampler reproduces the retained moments and bounds", {
-  fit <- nl_fixture()
-  mom <- tulpa:::.nested_fixed_moments(fit)
-
-  set.seed(11)
-  dr <- tulpa_posterior_draws(fit, n = 400000L)
-
-  expect_equal(dim(dr), c(400000L, 2L))
-  expect_identical(attr(dr, "draws_kind"), "iid")
-  expect_identical(attr(dr, "scope"), "fixed")
-  expect_equal(attr(dr, "retained_mass"), 1)
-  expect_identical(colnames(dr), c("b1", "b2"))
-
-  # Moments: the Monte-Carlo standard error of a mean is sd / sqrt(n), so a
-  # tolerance of 0.02 marginal SDs is ~12 MC standard errors at n = 4e5.
-  sd_m <- sqrt(diag(mom$cov))
-  expect_lt(max(abs(colMeans(dr) - mom$mean) / sd_m), 0.02)
-  expect_lt(max(abs(stats::cov(dr) - mom$cov) / tcrossprod(sd_m)), 0.02)
-
-  # Bounds: the sampled quantiles must reproduce the mixture-CDF inversion the
-  # fit reports, at more than one level.
-  for (lev in c(0.95, 0.80)) {
-    a <- (1 - lev) / 2
-    ci <- confint(fit, level = lev)
-    sq <- t(apply(dr, 2L, stats::quantile, c(a, 1 - a)))
-    expect_lt(max(abs(sq - ci) / sd_m), 0.02)
-  }
-  expect_identical(attr(confint(fit), "interval_source"), "mixture_cdf")
-})
-
-test_that("a single-component grid samples that component's Gaussian", {
-  fit <- nl_mixture_fit(mu = rbind(c(2, -1)),
-                        V = list(matrix(c(0.4, 0.1, 0.1, 0.25), 2, 2)),
-                        w = 1)
-  set.seed(12)
-  dr <- tulpa_posterior_draws(fit, n = 200000L)
-  expect_equal(colMeans(dr), c(b1 = 2, b2 = -1), tolerance = 0.02)
-  expect_equal(as.numeric(stats::cov(dr)), c(0.4, 0.1, 0.1, 0.25),
-               tolerance = 0.02)
-  expect_true(all(attr(dr, "cells") == 1L))
-})
-
-test_that("a grid that dropped a positive-weight cell samples the rest", {
-  fit <- nl_mixture_fit(
-    mu = rbind(c(-0.4, 1.2), c(0.1, 0.9), c(0.7, 1.5)),
-    V = list(matrix(c(0.30, 0.05, 0.05, 0.20), 2, 2),
-             matrix(c(0.12, -0.03, -0.03, 0.45), 2, 2),
-             matrix(c(0.50, 0.00, 0.00, 0.10), 2, 2)),
-    w = c(2, 5, 3), drop = 2L)
-
-  mom <- tulpa:::.nested_fixed_moments(fit)
-  expect_equal(mom$mass, 0.5)
-  expect_identical(mom$keep, c(1L, 3L))
-
-  set.seed(13)
-  dr <- tulpa_posterior_draws(fit, n = 100000L)
-  # The provenance travels with the draws, exactly as it does with confint().
-  expect_equal(attr(dr, "retained_mass"), 0.5)
-  expect_equal(attr(dr, "retained_mass"), attr(confint(fit), "retained_mass"))
-  # No row came from the dropped cell, and the retained cells appear in their
-  # renormalized proportion (2:3).
-  expect_setequal(unique(attr(dr, "cells")), c(1L, 3L))
-  expect_equal(mean(attr(dr, "cells") == 1L), 0.4, tolerance = 0.02)
-  sd_m <- sqrt(diag(mom$cov))
-  expect_lt(max(abs(colMeans(dr) - mom$mean) / sd_m), 0.03)
-})
-
-test_that("what a draw covers is stated, and asking past it says why", {
-  fit <- nl_fixture()
-  expect_equal(dim(tulpa_posterior_draws(fit, idx = 2L, n = 7L)), c(7L, 1L))
-  expect_identical(colnames(tulpa_posterior_draws(fit, idx = 2L, n = 7L)), "b2")
-  # The reason names the retained representation rather than the bare bound.
-  expect_error(tulpa_posterior_draws(fit, idx = 3L),
-               "fixed-effect block")
-  expect_error(tulpa_posterior_draws(fit, idx = 3L),
-               "releases the cell precision")
-  expect_error(tulpa_posterior_draws(fit, n = 0), "positive integer")
-})
-
 test_that("a fit with no retained mixture, and a non-nested object, say why", {
   bare <- structure(list(backend = "nested_laplace"),
                     class = c("tulpa_nested_laplace", "list", "tulpa_fit"))
@@ -130,34 +51,6 @@ test_that("a non-PD retained component is named, not silently sampled", {
   fit$grid_hessians[[2]] <- matrix(c(1, 2, 2, 1), 2, 2)   # indefinite
   expect_error(tulpa_posterior_draws(fit), "positive definite")
   expect_error(tulpa_posterior_draws(fit), "grid_hessians")
-})
-
-test_that(".nl_mixture_draw allocates rows by weight and tags their cells", {
-  set.seed(14)
-  out <- tulpa:::.nl_mixture_draw(
-    w = c(0.2, 0.8), cell_id = c(4L, 9L), n = 20000L, p = 1L,
-    draw_cell = function(i, n_i) matrix(i, n_i, 1L))
-  expect_equal(dim(out), c(20000L, 1L))
-  expect_setequal(unique(attr(out, "cells")), c(4L, 9L))
-  expect_equal(mean(attr(out, "cells") == 4L), 0.2, tolerance = 0.02)
-  # Every row carries the value its own component produced.
-  expect_true(all(out[attr(out, "cells") == 4L, 1L] == 1))
-  expect_true(all(out[attr(out, "cells") == 9L, 1L] == 2))
-})
-
-# --- gcol33/tulpa#349 -------------------------------------------------------
-
-test_that("the draws accessors name the backend and what the fit carries", {
-  fit <- nl_fixture()
-  expect_message(res <- posterior_sample(fit), "nested_laplace")
-  expect_null(res)
-  expect_message(posterior_sample(fit), "carries no posterior draws")
-  expect_message(posterior_sample(fit), "tulpa_posterior_draws")
-  expect_message(posterior_sample(fit), "grid_modes")
-
-  expect_message(arr <- tulpa_draws_array(fit), "tulpa_draws_array")
-  expect_null(arr)
-  expect_message(tulpa_draws_array(fit), "tulpa_posterior_draws")
 })
 
 test_that("the note describes each posterior representation it can meet", {
@@ -202,7 +95,131 @@ nl_diag_fixture <- function() {
   fit
 }
 
+test_that("a fit with neither draws nor a band still gets NULL, and says so", {
+  # A plain Laplace fit has no outer grid to score, so both layers are empty and
+  # a table would be a report about the absence of a report.
+  fit <- structure(
+    list(backend = "laplace", draws_kind = "iid",
+         mode = c(0.2, 0.5), H_beta = diag(2)),
+    class = c("tulpa_fit", "list"))
+  expect_message(res <- diagnostics(fit), "no posterior draws")
+  expect_message(diagnostics(fit), "nothing to report")
+  expect_null(res)
+})
+
+test_that("draws without a mixture stamp keep the draw moments (#949)", {
+  fit <- nl_fixture()
+  set.seed(5)
+  dr <- tulpa_posterior_draws(fit, n = 300L)
+  attr(dr, "grid_mixture") <- NULL
+  fit$draws <- dr
+  d <- diagnostics(fit)
+  expect_identical(d$moment_source, c("draws", "draws"))
+  expect_equal(d$mean, unname(colMeans(dr)), tolerance = 1e-12)
+  expect_equal(d$mcse_mean, d$sd / sqrt(300), tolerance = 1e-12)
+})
+
+test_that("a mixture stamp covers its leading columns; the tail joins $means / $sds by name (#949)", {
+  set.seed(6)
+  dr <- cbind(a = rnorm(200), b = rnorm(200), h = rnorm(200, 2, 0.5))
+  attr(dr, "grid_mixture") <- list(
+    weights = c(1, 3), modes = rbind(c(0, 1), c(2, 1)),
+    covs = list(diag(c(1, 4)), NULL))
+  fit <- list(means = c(a = 9, h = 2), sds = c(a = 9, h = 0.5))
+  ex <- tulpa:::.tulpa_exact_moments(dr, colnames(dr), fit)
+  # Cell 2 is drawn at its mode: within variance 0.
+  w <- c(0.25, 0.75)
+  m_a <- sum(w * c(0, 2)); v_a <- sum(w * (c(1, 0) + c(0, 2)^2)) - m_a^2
+  expect_equal(ex$mean, c(m_a, 1, 2))
+  expect_equal(ex$sd, c(sqrt(v_a), sqrt(0.25 * 4), 0.5))
+})
+
+skip_on_cran_budget()
+
+test_that("a single-component grid samples that component's Gaussian", {
+  skip_on_cran_budget()
+  fit <- nl_mixture_fit(mu = rbind(c(2, -1)),
+                        V = list(matrix(c(0.4, 0.1, 0.1, 0.25), 2, 2)),
+                        w = 1)
+  set.seed(12)
+  dr <- tulpa_posterior_draws(fit, n = 200000L)
+  expect_equal(colMeans(dr), c(b1 = 2, b2 = -1), tolerance = 0.02)
+  expect_equal(as.numeric(stats::cov(dr)), c(0.4, 0.1, 0.1, 0.25),
+               tolerance = 0.02)
+  expect_true(all(attr(dr, "cells") == 1L))
+})
+
+test_that("a grid that dropped a positive-weight cell samples the rest", {
+  skip_on_cran_budget()
+  fit <- nl_mixture_fit(
+    mu = rbind(c(-0.4, 1.2), c(0.1, 0.9), c(0.7, 1.5)),
+    V = list(matrix(c(0.30, 0.05, 0.05, 0.20), 2, 2),
+             matrix(c(0.12, -0.03, -0.03, 0.45), 2, 2),
+             matrix(c(0.50, 0.00, 0.00, 0.10), 2, 2)),
+    w = c(2, 5, 3), drop = 2L)
+
+  mom <- tulpa:::.nested_fixed_moments(fit)
+  expect_equal(mom$mass, 0.5)
+  expect_identical(mom$keep, c(1L, 3L))
+
+  set.seed(13)
+  dr <- tulpa_posterior_draws(fit, n = 100000L)
+  # The provenance travels with the draws, exactly as it does with confint().
+  expect_equal(attr(dr, "retained_mass"), 0.5)
+  expect_equal(attr(dr, "retained_mass"), attr(confint(fit), "retained_mass"))
+  # No row came from the dropped cell, and the retained cells appear in their
+  # renormalized proportion (2:3).
+  expect_setequal(unique(attr(dr, "cells")), c(1L, 3L))
+  expect_equal(mean(attr(dr, "cells") == 1L), 0.4, tolerance = 0.02)
+  sd_m <- sqrt(diag(mom$cov))
+  expect_lt(max(abs(colMeans(dr) - mom$mean) / sd_m), 0.03)
+})
+
+test_that("what a draw covers is stated, and asking past it says why", {
+  skip_on_cran_budget()
+  fit <- nl_fixture()
+  expect_equal(dim(tulpa_posterior_draws(fit, idx = 2L, n = 7L)), c(7L, 1L))
+  expect_identical(colnames(tulpa_posterior_draws(fit, idx = 2L, n = 7L)), "b2")
+  # The reason names the retained representation rather than the bare bound.
+  expect_error(tulpa_posterior_draws(fit, idx = 3L),
+               "fixed-effect block")
+  expect_error(tulpa_posterior_draws(fit, idx = 3L),
+               "releases the cell precision")
+  expect_error(tulpa_posterior_draws(fit, n = 0), "positive integer")
+})
+
+test_that(".nl_mixture_draw allocates rows by weight and tags their cells", {
+  skip_on_cran_budget()
+  set.seed(14)
+  out <- tulpa:::.nl_mixture_draw(
+    w = c(0.2, 0.8), cell_id = c(4L, 9L), n = 20000L, p = 1L,
+    draw_cell = function(i, n_i) matrix(i, n_i, 1L))
+  expect_equal(dim(out), c(20000L, 1L))
+  expect_setequal(unique(attr(out, "cells")), c(4L, 9L))
+  expect_equal(mean(attr(out, "cells") == 4L), 0.2, tolerance = 0.02)
+  # Every row carries the value its own component produced.
+  expect_true(all(out[attr(out, "cells") == 4L, 1L] == 1))
+  expect_true(all(out[attr(out, "cells") == 9L, 1L] == 2))
+})
+
+# --- gcol33/tulpa#349 -------------------------------------------------------
+
+test_that("the draws accessors name the backend and what the fit carries", {
+  skip_on_cran_budget()
+  fit <- nl_fixture()
+  expect_message(res <- posterior_sample(fit), "nested_laplace")
+  expect_null(res)
+  expect_message(posterior_sample(fit), "carries no posterior draws")
+  expect_message(posterior_sample(fit), "tulpa_posterior_draws")
+  expect_message(posterior_sample(fit), "grid_modes")
+
+  expect_message(arr <- tulpa_draws_array(fit), "tulpa_draws_array")
+  expect_null(arr)
+  expect_message(tulpa_draws_array(fit), "tulpa_posterior_draws")
+})
+
 test_that("diagnostics() reports the band on a fit with no draws", {
+  skip_on_cran_budget()
   fit <- nl_diag_fixture()
   d <- diagnostics(fit)
 
@@ -212,7 +229,7 @@ test_that("diagnostics() reports the band on a fit with no draws", {
   # non-chain fit, and this table is where it dispatches instead
   # (gcol33/tulpa#713).
   expect_identical(names(d), c("parameter", "mean", "sd", "n_draws",
-                               "mcse_mean"))
+                               "mcse_mean", "moment_source"))
 
   # The headline the guard used to withhold: a k-hat past the escalation
   # threshold is reported, banded, and folded into the verdict.
@@ -234,6 +251,7 @@ test_that("diagnostics() reports the band on a fit with no draws", {
 })
 
 test_that("the printed band survives an absent posterior sample", {
+  skip_on_cran_budget()
   out <- capture.output(print(diagnostics(nl_diag_fixture())))
   expect_true(any(grepl("pareto_k = 1.016", out, fixed = TRUE)))
   expect_true(any(grepl("unreliable", out, fixed = TRUE)))
@@ -243,6 +261,7 @@ test_that("the printed band survives an absent posterior sample", {
 })
 
 test_that("the same fit WITH draws reports the same band plus the body", {
+  skip_on_cran_budget()
   fit <- nl_diag_fixture()
   bare <- diagnostics(fit)
   set.seed(15)
@@ -256,23 +275,70 @@ test_that("the same fit WITH draws reports the same band plus the body", {
   expect_null(attr(with_draws, "param_table_declined"))
 })
 
-test_that("a fit with neither draws nor a band still gets NULL, and says so", {
-  # A plain Laplace fit has no outer grid to score, so both layers are empty and
-  # a table would be a report about the absence of a report.
-  fit <- structure(
-    list(backend = "laplace", draws_kind = "iid",
-         mode = c(0.2, 0.5), H_beta = diag(2)),
-    class = c("tulpa_fit", "list"))
-  expect_message(res <- diagnostics(fit), "no posterior draws")
-  expect_message(diagnostics(fit), "nothing to report")
-  expect_null(res)
-})
-
 test_that("a bad `pars` selector on a fit WITH draws is still an empty answer", {
+  skip_on_cran_budget()
   fit <- nl_diag_fixture()
   set.seed(16)
   fit$draws <- tulpa_posterior_draws(fit, n = 100L)
   expect_null(diagnostics(fit, pars = "not_a_parameter"))
+})
+
+test_that("diagnostics() reports the mixture's exact moments, not the draws' (#949)", {
+  skip_on_cran_budget()
+  fit <- nl_fixture()
+  mom <- tulpa:::.nested_fixed_moments(fit)
+
+  set.seed(3)
+  fit$draws <- tulpa_posterior_draws(fit, n = 500L)
+  d1 <- diagnostics(fit)
+  set.seed(4)
+  fit$draws <- tulpa_posterior_draws(fit, n = 500L)
+  d2 <- diagnostics(fit)
+
+  expect_equal(d1$mean, mom$mean, tolerance = 1e-12)
+  expect_equal(d1$sd, sqrt(diag(mom$cov)), tolerance = 1e-12)
+  expect_identical(d1$moment_source, c("mixture_moments", "mixture_moments"))
+  expect_equal(d1$mcse_mean, c(0, 0))
+  # The same fit read twice reports the same table whatever the RNG state.
+  expect_identical(d1[, c("mean", "sd")], d2[, c("mean", "sd")])
+
+  # summary()'s estimate and SE make the same read of the same draws.
+  tab <- tulpa:::.fit_fixed_table(fit)
+  expect_equal(unname(tab$estimate), mom$mean, tolerance = 1e-12)
+  expect_equal(unname(tab$std.error), sqrt(diag(mom$cov)), tolerance = 1e-12)
+})
+
+skip_on_cran()
+
+test_that("the mixture sampler reproduces the retained moments and bounds", {
+  skip_on_cran()
+  fit <- nl_fixture()
+  mom <- tulpa:::.nested_fixed_moments(fit)
+
+  set.seed(11)
+  dr <- tulpa_posterior_draws(fit, n = 400000L)
+
+  expect_equal(dim(dr), c(400000L, 2L))
+  expect_identical(attr(dr, "draws_kind"), "iid")
+  expect_identical(attr(dr, "scope"), "fixed")
+  expect_equal(attr(dr, "retained_mass"), 1)
+  expect_identical(colnames(dr), c("b1", "b2"))
+
+  # Moments: the Monte-Carlo standard error of a mean is sd / sqrt(n), so a
+  # tolerance of 0.02 marginal SDs is ~12 MC standard errors at n = 4e5.
+  sd_m <- sqrt(diag(mom$cov))
+  expect_lt(max(abs(colMeans(dr) - mom$mean) / sd_m), 0.02)
+  expect_lt(max(abs(stats::cov(dr) - mom$cov) / tcrossprod(sd_m)), 0.02)
+
+  # Bounds: the sampled quantiles must reproduce the mixture-CDF inversion the
+  # fit reports, at more than one level.
+  for (lev in c(0.95, 0.80)) {
+    a <- (1 - lev) / 2
+    ci <- confint(fit, level = lev)
+    sq <- t(apply(dr, 2L, stats::quantile, c(a, 1 - a)))
+    expect_lt(max(abs(sq - ci) / sd_m), 0.02)
+  }
+  expect_identical(attr(confint(fit), "interval_source"), "mixture_cdf")
 })
 
 # --- tier 2: the same gate on a real fit ------------------------------------

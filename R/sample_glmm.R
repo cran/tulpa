@@ -59,7 +59,13 @@
 #'   `batch_size`, `alpha`, `n_particles`, `n_mcmc_steps`, `ess_threshold`,
 #'   `vi_variant`, `vi_mc_samples`, `vi_max_iter`, `vi_max_grad_norm`,
 #'   `vi_tol_grad`, `vi_tol_rel_elbo`, `vi_patience`,
-#'   `n_draws`, `verbose`, `mass_matrix`, `checkpoint`).
+#'   `n_draws`, `verbose`, `mass_matrix`, `checkpoint`, `wbic`).
+#'
+#'   `wbic = TRUE` (SMC only) routes the tempering path through the posterior
+#'   tempered at `1 / log(n)`, `p(theta) L(theta)^(1 / log n)`, and stores the
+#'   equally weighted population there as `$tempered_draws` (with
+#'   `$tempered_beta`), which [wbic()] reads. The run then continues to the
+#'   posterior, so `$draws` are posterior draws as without it.
 #'
 #'   `checkpoint = list(path =, resume =)` is per-chain checkpoint/resume on
 #'   the NUTS/HMC kernel only (a chain is the checkpoint unit, deterministic
@@ -117,15 +123,27 @@
 #'   inert on other backends. Note that `ess_threshold` above is SMC's
 #'   resampling threshold and not one of them -- the two unrelated senses of
 #'   "ESS" are why these carry the prefix.
-#'   `ess_adapt_during_warmup` (default `FALSE`) adapts the random-walk
-#'   proposal SDs on the non-Gaussian parameters during warmup and
-#'   `ess_adapt_interval` (default 50) is how many sweeps sit between those
-#'   updates, so it **acts only while adapting**.
-#'   `ess_joint_sigma_re` toggles the joint `(log_sigma_re, re)` rescaling move,
-#'   which defaults to on whenever a random-effect term is present because the
-#'   two are strongly anti-correlated under the centered parameterization and
-#'   mix poorly when moved separately; forcing it off is how one demonstrates
-#'   that. `ess_joint_proposal_sd` (default 0.1) is that move's step.
+#'   `ess_adapt_during_warmup` (default `TRUE`) adapts during warmup: the
+#'   random-walk proposal SDs on the non-Gaussian parameters, the widths of the
+#'   one-dimensional slice moves, and each Gaussian block's ellipse, which is
+#'   refitted to the block's own warmup draws (mean and SD per coordinate) in
+#'   place of its prior. Every adaptation stops at the end of warmup.
+#'   `ess_adapt_interval` (default 50) is how many sweeps sit between the
+#'   proposal-SD and width updates, so it **acts only while adapting**.
+#'   `ess_joint_sigma_re` toggles the slice updates of each random-effect
+#'   log-SD, one holding the latent block fixed and one holding the effects
+#'   themselves fixed (the other parameterization's update), which default to
+#'   on whenever a random-effect term is present: a scale and its effects are
+#'   strongly dependent under either parameterization alone, and forcing them
+#'   off is how one demonstrates that. `ess_joint_proposal_sd` (default 0.1) is
+#'   those moves' initial slice width.
+#'
+#'   Two further moves run whenever the model has a random-effect term and a
+#'   single linear predictor, with no knob: an exact draw of the level a fixed
+#'   effect shares with a random-effect coefficient whose design column repeats
+#'   it (the intercept against `(1 | g)`), and a slice update moving every other
+#'   fixed effect together with the between-group part of it the group effects
+#'   carry (gcol33/tulpa#877).
 #'
 #'   The elliptical-slice kernel draws from R's own RNG, so `control$seed` does
 #'   not reach it: `set.seed()` before the call is what reproduces an ESS run.
@@ -134,7 +152,7 @@
 #' @return A `tulpa_fit` with `draws`, `means`, `param_names`, the kernel's
 #'   diagnostics, and (for `"hmc"`) `chain_id` / `n_chains` so chain diagnostics
 #'   apply.
-#' @keywords internal
+#' @noRd
 tulpa_sample_glmm <- function(y, n_trials, X, family, backend, phi = 1.0,
                               phi2 = NULL,
                               offset = NULL, fixed_names = NULL,
@@ -177,6 +195,25 @@ tulpa_sample_glmm <- function(y, n_trials, X, family, backend, phi = 1.0,
          backend, "' has no per-chain state to checkpoint. Drop it, or use ",
          "backend = 'hmc'.", call. = FALSE)
   }
+  # WBIC (Watanabe 2013) averages the log-likelihood over the posterior
+  # tempered at 1 / log(n). The SMC path passes through that distribution on
+  # its way to the posterior and records the population there; no other kernel
+  # visits it.
+  smc_bridge_end <- 1.0
+  if (!is.null(control$wbic)) {
+    if (!is.logical(control$wbic) || length(control$wbic) != 1L ||
+        is.na(control$wbic)) {
+      stop("`control$wbic` must be TRUE or FALSE.", call. = FALSE)
+    }
+    if (isTRUE(control$wbic)) {
+      if (!identical(backend, "smc")) {
+        stop("`control$wbic` is only read by the SMC kernel; backend '",
+             backend, "' does not visit the tempered posterior. Use ",
+             "backend = 'smc'.", call. = FALSE)
+      }
+      smc_bridge_end <- .wbic_temperature(N)
+    }
+  }
   .ckpt <- .nl_checkpoint_args(control, use_option = FALSE)
   if (nzchar(.ckpt$path) && !isTRUE(.ckpt$resume) && file.exists(.ckpt$path)) {
     file.remove(.ckpt$path)
@@ -184,6 +221,14 @@ tulpa_sample_glmm <- function(y, n_trials, X, family, backend, phi = 1.0,
 
   n_iter  <- control$n_iter %||% 2000L
   warmup  <- control$warmup %||% (n_iter %/% 2L)
+  # SMC and VI read neither knob (particles / optimizer iterations instead);
+  # MCLMC runs its warmup on top of `n_iter` kept draws, every other kernel
+  # counts it inside (gcol33/tulpa#872).
+  if (!backend %in% c("smc", "vi")) {
+    .check_run_length(n_iter, warmup,
+                      sprintf("tulpa_sample_glmm[backend = '%s']", backend),
+                      counts = if (identical(backend, "mclmc")) "post" else "total")
+  }
   vi_max_iter   <- as.integer(control$vi_max_iter %||% 10000L)
   vi_mc_samples <- as.integer(control$vi_mc_samples %||% 10L)
   if (is.na(vi_max_iter) || vi_max_iter < 1L) {
@@ -267,14 +312,16 @@ tulpa_sample_glmm <- function(y, n_trials, X, family, backend, phi = 1.0,
     mass_matrix = match.arg(control$mass_matrix %||% "diag",
                             c("diag", "dense", "block_diag", "auto")),
     # ESS kernel knobs; inert on every other backend.
-    ess_adapt_during_warmup = isTRUE(control$ess_adapt_during_warmup %||% FALSE),
+    ess_adapt_during_warmup = isTRUE(control$ess_adapt_during_warmup %||% TRUE),
     ess_adapt_interval = as.integer(control$ess_adapt_interval %||% 50L),
     # -1 keeps the layout-driven rule (on whenever an RE term is present).
     ess_joint_sigma_re = if (is.null(control$ess_joint_sigma_re)) -1L
                          else as.integer(isTRUE(control$ess_joint_sigma_re)),
     ess_joint_proposal_sd = as.numeric(control$ess_joint_proposal_sd %||% 0.1),
-    checkpoint_path = .ckpt$path
+    checkpoint_path = .ckpt$path,
+    smc_bridge_end  = smc_bridge_end
   )
+  if (is.null(res$tempered_draws)) res$tempered_beta <- NULL
 
   # The C++ kernel names every column of the full parameter vector (fixed effects
   # + latent effects + variance-component hyperparameters) via the ParamLayout,
@@ -304,6 +351,5 @@ tulpa_sample_glmm <- function(y, n_trials, X, family, backend, phi = 1.0,
   # had diagnostics() computing Rhat and ESS on SMC particles and VI draws
   # (gcol33/tulpa#693) -- the quantities the gate exists to withhold.
   .finalize_fit(res, backend = backend,
-                param_names = nm,
-                extra_class = "tulpa_sample_fit")
+                param_names = nm)
 }

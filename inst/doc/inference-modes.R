@@ -14,6 +14,19 @@ set.seed(20260529)
 EVAL_FITS <- identical(Sys.getenv("NOT_CRAN"), "true")
 knitr::opts_chunk$set(eval = EVAL_FITS)
 
+## ----eval = FALSE-------------------------------------------------------------
+# # Current release, built for Windows and macOS
+# install.packages("tulpa",
+#                  repos = c("https://gcol33.r-universe.dev",
+#                            "https://cloud.r-project.org"))
+# 
+# # Development version from GitHub
+# install.packages("pak")
+# pak::pak("gcol33/tulpa")
+# 
+# # Pin a release
+# pak::pak("gcol33/tulpa@v0.6.0")
+
 ## ----load, message = FALSE----------------------------------------------------
 # library(tulpa)
 
@@ -33,8 +46,7 @@ knitr::opts_chunk$set(eval = EVAL_FITS)
 ## ----auto-spatial-------------------------------------------------------------
 # fit_auto <- tulpa(y ~ x + spatial(region), data = ds, family = "binomial",
 #                   spatial = list(type = "icar", adjacency = W), mode = "auto")
-# c(backend = fit_auto$backend, tier = fit_auto$inference_tier)
-# fit_auto$selection_reason
+# summary(fit_auto)$inference[c("backend", "inference_tier", "selection_reason")]
 
 ## ----auto-large---------------------------------------------------------------
 # nL <- 60000L
@@ -42,8 +54,7 @@ knitr::opts_chunk$set(eval = EVAL_FITS)
 # dL <- data.frame(y = 0.5 + 1.2 * xL + rnorm(nL, sd = 0.8), x = xL)
 # fit_big <- tulpa(y ~ x, data = dL, family = "gaussian", mode = "auto",
 #                  phi = 0.8^2)
-# c(backend = fit_big$backend, tier = fit_big$inference_tier)
-# fit_big$selection_reason
+# summary(fit_big)$inference[c("backend", "inference_tier", "selection_reason")]
 
 ## ----auto-large-coef----------------------------------------------------------
 # coef(fit_big)
@@ -63,26 +74,27 @@ knitr::opts_chunk$set(eval = EVAL_FITS)
 #                 mode = "pathfinder", sigma_re = 0.6,
 #                 control = list(n_draws = 450))
 # coef(fit_pf)
-# fit_pf$elbo
+# summary(fit_pf)$reliability$elbo
 
 ## ----mala-fit-----------------------------------------------------------------
 # fit_mala <- tulpa(y ~ x + (1 | g), data = db, family = "binomial",
 #                   mode = "mala", sigma_re = 0.6,
 #                   control = list(n_iter = 450, warmup = 150))
 # coef(fit_mala)
-# fit_mala$mean_accept
+# summary(fit_mala)$reliability$mean_accept
 
 ## ----imh-fit------------------------------------------------------------------
 # fit_imh <- tulpa(y ~ x + (1 | g), data = db, family = "binomial",
 #                  mode = "imh_laplace", sigma_re = 0.6,
 #                  control = list(n_iter = 450, warmup = 150))
 # coef(fit_imh)
-# fit_imh$mean_accept
+# summary(fit_imh)$reliability$mean_accept
 
 ## ----gibbs-fields-------------------------------------------------------------
 # round(coef(fit_auto), 3)
-# tail(fit_auto$param_names, 3)
-# round(fit_auto$means[c("log_tau_spatial", "phi_spatial[1]")], 3)
+# draws_auto <- posterior_sample(fit_auto)
+# tail(colnames(draws_auto), 3)
+# round(colMeans(draws_auto)[c("log_tau_spatial", "phi_spatial[1]")], 3)
 
 ## ----re-cov-slope-------------------------------------------------------------
 # set.seed(20260531)
@@ -98,13 +110,13 @@ knitr::opts_chunk$set(eval = EVAL_FITS)
 # 
 # fit_rc <- tulpa(y ~ x + (1 + x | g), data = dsl,
 #                 family = "binomial", mode = "laplace")
-# fit_rc$backend
+# summary(fit_rc)$inference$backend
 
 ## ----re-cov-sigma-------------------------------------------------------------
-# round(fit_rc$Sigma_mean, 3)
+# round(attr(VarCorr(fit_rc), "cov")$g, 3)
 
 ## ----re-cov-k-----------------------------------------------------------------
-# round(fit_rc$pareto_k, 2)
+# round(attr(diagnostics(fit_rc), "pareto_k"), 2)
 
 ## ----ep-fit, eval = FALSE-----------------------------------------------------
 # fit_ep <- tulpa(y ~ x, data = d, family = "binomial", mode = "ep")
@@ -124,11 +136,13 @@ knitr::opts_chunk$set(eval = EVAL_FITS)
 #                   control = list(n_draws = 450)))[["elapsed"]]
 
 ## ----timing-table-------------------------------------------------------------
-# slope_se <- function(f) summary(f)["x", "std.error"]
+# slope_se <- function(f) coef(summary(f))["x", "std.error"]
 # data.frame(
-#   backend  = c(f_lap$backend, f_mala$backend, f_pf$backend),
-#   tier     = c(f_lap$inference_tier, f_mala$inference_tier,
-#                f_pf$inference_tier),
+#   backend  = vapply(list(f_lap, f_mala, f_pf),
+#                     function(f) summary(f)$inference$backend, character(1)),
+#   tier     = vapply(list(f_lap, f_mala, f_pf),
+#                     function(f) summary(f)$inference$inference_tier,
+#                     numeric(1)),
 #   slope    = round(c(coef(f_lap)["x"], coef(f_mala)["x"],
 #                      coef(f_pf)["x"]), 3),
 #   slope_se = round(c(slope_se(f_lap), slope_se(f_mala),

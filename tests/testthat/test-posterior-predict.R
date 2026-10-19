@@ -1,3 +1,10 @@
+
+test_that("posterior_predict rejects fits without a builtin family", {
+  bad <- structure(list(family = list(name = "custom")), class = "tulpa_fit")
+  expect_error(posterior_predict(bad), "single built-in family")
+})
+
+skip_on_cran()
 # posterior_predict() / simulate.tulpa_fit (gcol33/tulpa C3): replicates are
 # drawn from the family's sampling distribution at the per-draw linear
 # predictor, so their moments must track the fitted mean and the family
@@ -5,6 +12,7 @@
 # must fall back to generated replicates when no y_rep is stored.
 
 test_that("family_sample draws match the family mean and variance", {
+  skip_on_cran()
   set.seed(42)
   n <- 20000L
   eta <- rep(0.4, n)
@@ -160,11 +168,6 @@ test_that("pp_check falls back to posterior_predict when no y_rep is stored", {
 
   p <- pp_check(fit, type = "dens_overlay")
   expect_s3_class(p, "ggplot")
-})
-
-test_that("posterior_predict rejects fits without a builtin family", {
-  bad <- structure(list(family = list(name = "custom")), class = "tulpa_fit")
-  expect_error(posterior_predict(bad), "single built-in family")
 })
 
 test_that("the in-sample eta carries the spatial field on conditional-Laplace, Gibbs and inline-field icar fits (gcol33/tulpa#795)", {

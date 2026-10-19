@@ -28,8 +28,51 @@ ws_layout <- function(d, zi = NULL) {
     zi_spec = zi)
 }
 
+# The EB source fit of the default data set and the sampler layout it is
+# placed into. Every block that builds a warm start from it reads the same fit,
+# so it is fitted once, on first use.
+ws_source <- local({
+  src <- NULL
+  function() {
+    if (is.null(src)) {
+      d <- ws_data()
+      re_terms <- list(list(idx = as.integer(d$g), n_groups = nlevels(d$g),
+                            n_coefs = 1L))
+      src <<- list(
+        lay = ws_layout(d), re_terms = re_terms,
+        fit = tulpa_eb(y = d$y, n_trials = NULL,
+                       X = stats::model.matrix(~ x, d), re_terms = re_terms,
+                       family = "poisson"))
+    }
+    src
+  }
+})
+
+
+test_that("a fit from a backend with no mode is refused as a warm-start source", {
+  d <- ws_data()
+  lay <- ws_layout(d)
+  re_terms <- list(list(idx = as.integer(d$g), n_groups = nlevels(d$g),
+                        n_coefs = 1L))
+
+  fake <- structure(list(backend = "smc", mode = c(0, 0), n_fixed = 2L,
+                         fixed_names = c("(Intercept)", "x")),
+                    class = c("tulpa_fit", "list"))
+  # `args = list()` is deliberately empty: the source fit must be rejected on
+  # its own terms, before anything is built for it. Reaching the engine with
+  # empty arguments would report this as a C++ error about a model the caller
+  # never described.
+  expect_error(
+    .resolve_warm_start(fake, args = list(), re_terms = re_terms,
+                        sigma_re = NULL, beta_prior = NULL, n_chains = 1L),
+    "carries no mode and curvature")
+})
+
+skip_on_cran_budget()
+
 
 test_that("the layout probe reports the sampler's own parameter vector", {
+  skip_on_cran_budget()
   d <- ws_data()
   lay <- ws_layout(d)
 
@@ -53,16 +96,62 @@ test_that("the layout probe reports the sampler's own parameter vector", {
 })
 
 
+test_that("chains are dispersed rather than stacked on the mode", {
+  skip_on_cran_budget()
+  s <- ws_source()
+  lay <- s$lay
+  re_terms <- s$re_terms
+  src <- s$fit
+
+  set.seed(4)
+  ws <- .build_warm_start(src, lay, re_terms = re_terms, n_chains = 4L)
+  expect_equal(dim(ws$init), c(4L, lay$total_params))
+
+  # Chain 1 is the mode itself; the rest are drawn around it. Identical starts
+  # would leave Rhat comparing chains that began at the same point.
+  expect_gt(max(abs(ws$init[2, ] - ws$init[1, ])), 0)
+  expect_false(isTRUE(all.equal(ws$init[2, ], ws$init[3, ])))
+
+  # jitter = 0 is the opt-out, and must genuinely stack them.
+  ws0 <- .build_warm_start(src, lay, re_terms = re_terms, n_chains = 3L,
+                           jitter = 0)
+  expect_equal(ws0$init[1, ], ws0$init[2, ])
+  expect_equal(ws0$init[1, ], ws0$init[3, ])
+})
+
+
+test_that("a source fit with the wrong number of SDs per term is refused", {
+  skip_on_cran_budget()
+  s <- ws_source()
+  lay <- s$lay
+  re_terms <- s$re_terms
+  src <- s$fit
+
+  # Three SDs against a term the sampler lays out with one coefficient. The
+  # term COUNT agrees, so the check upstream passes and this is the first place
+  # the disagreement shows. Taking the first SD here would set every
+  # coefficient's mass and starting value from one coefficient's scale and
+  # report that as a warm start.
+  src$map$sigma <- c(0.5, 1.0, 1.5)
+  expect_error(
+    .build_warm_start(src, lay, re_terms = re_terms, n_chains = 1L),
+    "standard deviation")
+
+  # One SD is the scalar case and broadcasts, so it stays accepted.
+  src$map$sigma <- 0.7
+  expect_silent(
+    .build_warm_start(src, lay, re_terms = re_terms, n_chains = 1L))
+})
+
+skip_on_cran()
+
+
 test_that("the warm start places the source fit's estimates in the right slots", {
   skip_on_cran()
-  d <- ws_data()
-  lay <- ws_layout(d)
-  re_terms <- list(list(idx = as.integer(d$g), n_groups = nlevels(d$g),
-                        n_coefs = 1L))
-  X <- stats::model.matrix(~ x, d)
-
-  src <- tulpa_eb(y = d$y, n_trials = NULL, X = X, re_terms = re_terms,
-                  family = "poisson")
+  s <- ws_source()
+  lay <- s$lay
+  re_terms <- s$re_terms
+  src <- s$fit
 
   ws <- .build_warm_start(src, lay, re_terms = re_terms, n_chains = 1L,
                           jitter = 0)
@@ -88,13 +177,10 @@ test_that("the warm start places the source fit's estimates in the right slots",
 
 test_that("the inverse-mass diagonal is withheld unless asked for", {
   skip_on_cran()
-  d <- ws_data()
-  lay <- ws_layout(d)
-  re_terms <- list(list(idx = as.integer(d$g), n_groups = nlevels(d$g),
-                        n_coefs = 1L))
-  X <- stats::model.matrix(~ x, d)
-  src <- tulpa_eb(y = d$y, n_trials = NULL, X = X, re_terms = re_terms,
-                  family = "poisson")
+  s <- ws_source()
+  lay <- s$lay
+  re_terms <- s$re_terms
+  src <- s$fit
 
   # Default: position only. A metric that is right for the fixed effects and
   # wrong for the random effects and variance components is worse than none,
@@ -109,32 +195,6 @@ test_that("the inverse-mass diagonal is withheld unless asked for", {
   expect_length(with_m$inv_metric_diag, lay$total_params)
   expect_true(all(is.finite(with_m$inv_metric_diag)))
   expect_true(all(with_m$inv_metric_diag > 0))
-})
-
-
-test_that("chains are dispersed rather than stacked on the mode", {
-  d <- ws_data()
-  lay <- ws_layout(d)
-  re_terms <- list(list(idx = as.integer(d$g), n_groups = nlevels(d$g),
-                        n_coefs = 1L))
-  X <- stats::model.matrix(~ x, d)
-  src <- tulpa_eb(y = d$y, n_trials = NULL, X = X, re_terms = re_terms,
-                  family = "poisson")
-
-  set.seed(4)
-  ws <- .build_warm_start(src, lay, re_terms = re_terms, n_chains = 4L)
-  expect_equal(dim(ws$init), c(4L, lay$total_params))
-
-  # Chain 1 is the mode itself; the rest are drawn around it. Identical starts
-  # would leave Rhat comparing chains that began at the same point.
-  expect_gt(max(abs(ws$init[2, ] - ws$init[1, ])), 0)
-  expect_false(isTRUE(all.equal(ws$init[2, ], ws$init[3, ])))
-
-  # jitter = 0 is the opt-out, and must genuinely stack them.
-  ws0 <- .build_warm_start(src, lay, re_terms = re_terms, n_chains = 3L,
-                           jitter = 0)
-  expect_equal(ws0$init[1, ], ws0$init[2, ])
-  expect_equal(ws0$init[1, ], ws0$init[3, ])
 })
 
 
@@ -183,35 +243,12 @@ test_that("a warm start is refused where it cannot be honoured", {
 })
 
 
-test_that("a fit from a backend with no mode is refused as a warm-start source", {
-  d <- ws_data()
-  lay <- ws_layout(d)
-  re_terms <- list(list(idx = as.integer(d$g), n_groups = nlevels(d$g),
-                        n_coefs = 1L))
-
-  fake <- structure(list(backend = "smc", mode = c(0, 0), n_fixed = 2L,
-                         fixed_names = c("(Intercept)", "x")),
-                    class = c("tulpa_fit", "list"))
-  # `args = list()` is deliberately empty: the source fit must be rejected on
-  # its own terms, before anything is built for it. Reaching the engine with
-  # empty arguments would report this as a C++ error about a model the caller
-  # never described.
-  expect_error(
-    .resolve_warm_start(fake, args = list(), re_terms = re_terms,
-                        sigma_re = NULL, beta_prior = NULL, n_chains = 1L),
-    "carries no mode and curvature")
-})
-
-
 test_that("a source fit for a different model is refused", {
   skip_on_cran()
-  d <- ws_data()
-  lay <- ws_layout(d)
-  X <- stats::model.matrix(~ x, d)
-  re_terms <- list(list(idx = as.integer(d$g), n_groups = nlevels(d$g),
-                        n_coefs = 1L))
-  src <- tulpa_eb(y = d$y, n_trials = NULL, X = X, re_terms = re_terms,
-                  family = "poisson")
+  s <- ws_source()
+  lay <- s$lay
+  re_terms <- s$re_terms
+  src <- s$fit
 
   # Two RE terms claimed against a one-term layout: the counts disagree, and
   # silently filling one term would seed the sampler from the wrong model.
@@ -242,30 +279,4 @@ test_that("the warm start carries zero-inflation coefficients across", {
                 mode = "hmc", warm_start = "laplace", control = ctl)
 
   expect_equal(unname(coef(cold)), unname(coef(warm)), tolerance = 0.1)
-})
-
-
-test_that("a source fit with the wrong number of SDs per term is refused", {
-  d <- ws_data()
-  lay <- ws_layout(d)
-  X <- stats::model.matrix(~ x, d)
-  re_terms <- list(list(idx = as.integer(d$g), n_groups = nlevels(d$g),
-                        n_coefs = 1L))
-  src <- tulpa_eb(y = d$y, n_trials = NULL, X = X, re_terms = re_terms,
-                  family = "poisson")
-
-  # Three SDs against a term the sampler lays out with one coefficient. The
-  # term COUNT agrees, so the check upstream passes and this is the first place
-  # the disagreement shows. Taking the first SD here would set every
-  # coefficient's mass and starting value from one coefficient's scale and
-  # report that as a warm start.
-  src$map$sigma <- c(0.5, 1.0, 1.5)
-  expect_error(
-    .build_warm_start(src, lay, re_terms = re_terms, n_chains = 1L),
-    "standard deviation")
-
-  # One SD is the scalar case and broadcasts, so it stays accepted.
-  src$map$sigma <- 0.7
-  expect_silent(
-    .build_warm_start(src, lay, re_terms = re_terms, n_chains = 1L))
 })

@@ -360,11 +360,26 @@
       dmu <- mu * (1 - mu)
       phi * (log(y) - log1p(-y) - digamma(a) + digamma(b)) * dmu
     },
+    # The expected (Fisher) weight phi^2 (psi'(a) + psi'(b)) dmu^2.
     weight = function(eta, n_trials, phi) {
       mu <- .mean_beta(eta)
       dmu <- mu * (1 - mu)
       tg <- trigamma(mu * phi) + trigamma((1 - mu) * phi)
       phi * phi * tg * dmu * dmu
+    },
+    # Observed curvature -d^2 loglik / d eta^2 at the realized y: the expected
+    # weight minus the score term (1 - 2 mu) dmu g_mu, with g_mu the mu-score.
+    # Averaging it over y returns `weight`. This is the weight the engine's
+    # Newton builds H from for this family, so it is what a Hessian rebuilt in
+    # R has to carry.
+    obs_weight = function(eta, y, n_trials, phi) {
+      mu <- .mean_beta(eta)
+      a <- mu * phi
+      b <- (1 - mu) * phi
+      dmu <- mu * (1 - mu)
+      g_mu <- phi * (log(y) - log1p(-y) - digamma(a) + digamma(b))
+      phi * phi * (trigamma(a) + trigamma(b)) * dmu * dmu -
+        (1 - 2 * mu) * dmu * g_mu
     },
     sample = function(eta, n_trials, phi) {
       mu <- .mean_beta(eta)
@@ -632,13 +647,15 @@
 .STUDENT_T_DF <- 4
 
 
-#' Supported R-level family names.
+#' Supported R-level family names
 #'
 #' The response families `family = ` accepts on the engine's front doors, in
 #' their canonical (default-link) spelling. A family's `*_<link>` variants
-#' (e.g. `"gamma_inverse"`) are listed separately by [linked_family_names()].
+#' (e.g. `"gamma_inverse"`) are accepted as well and not listed here.
 #'
 #' @return A character vector of family names.
+#' @examples
+#' family_names()
 #' @export
 family_names <- function() names(.FAMILY_OPS)
 
@@ -710,9 +727,9 @@ family_names <- function() names(.FAMILY_OPS)
 # to the registry alone fails loudly rather than fitting the wrong likelihood.
 .R_ONLY_FAMILIES <- character(0)
 
-#' Reject families the compiled kernels do not implement.
+#' Reject families the compiled kernels do not implement
 #'
-#' @keywords internal
+#' @noRd
 .validate_family_compiled <- function(family) {
   if (!(.family_base(family) %in% .R_ONLY_FAMILIES)) return(invisible(TRUE))
   stop(sprintf(paste0(
@@ -757,14 +774,40 @@ family_names <- function() names(.FAMILY_OPS)
   .family_base(family) %in% c("binomial", "beta_binomial")
 }
 
-#' Validate the dispersion parameter `phi` for a family.
+# One R-side reading of `n_trials`, so every door answers the same
+# (gcol33/tulpa#677): NULL stays NULL; otherwise the family must read a
+# denominator, a scalar is recycled to `n_obs`, and the result is a length-
+# `n_obs` integer vector of positive counts (NA passes to the finite guard).
+#' @keywords internal
+.normalize_n_trials <- function(family, n_trials, n_obs) {
+  if (is.null(n_trials)) return(NULL)
+  if (!.family_reads_trials(family)) {
+    stop(sprintf(paste0(
+      "`n_trials` is the binomial denominator and is not read by ",
+      "family = '%s'. Drop it, or use family = 'binomial'."), family),
+      call. = FALSE)
+  }
+  n_trials <- as.integer(n_trials)
+  if (length(n_trials) == 1L) n_trials <- rep(n_trials, n_obs)
+  if (length(n_trials) != n_obs) {
+    stop(sprintf(paste0(
+      "`n_trials` must have length 1 (recycled) or nrow(data) (%d); got %d."),
+      n_obs, length(n_trials)), call. = FALSE)
+  }
+  if (any(!is.na(n_trials) & n_trials < 1L)) {
+    stop("`n_trials` must be a positive integer count.", call. = FALSE)
+  }
+  n_trials
+}
+
+#' Validate the dispersion parameter `phi` for a family
 #'
 #' Errors when `family` carries a dispersion / precision parameter and `phi` is
 #' not a positive finite scalar. A no-op for families without dispersion
 #' (binomial, poisson) and for unknown / model-package families. Shared by the
 #' [tulpa()] front door and [tulpa_laplace()] so the rule lives in one place
 #'.
-#' @keywords internal
+#' @noRd
 .validate_family_phi <- function(family, phi) {
   if (!(.family_base(family) %in% .PHI_FAMILIES)) return(invisible(TRUE))
   if (!is.numeric(phi) || length(phi) != 1L || !is.finite(phi) || phi <= 0) {
@@ -774,7 +817,7 @@ family_names <- function() names(.FAMILY_OPS)
   invisible(TRUE)
 }
 
-#' Validate the response `y` for a count family.
+#' Validate the response `y` for a count family
 #'
 #' Errors when `family` is a count family and `y` carries negative or
 #' non-integer values, which the integer-casting kernels would silently floor
@@ -784,7 +827,7 @@ family_names <- function() names(.FAMILY_OPS)
 #'   family. With a zero-truncated family this is the hurdle model, where the
 #'   zeros belong to the zero component rather than to the truncated count
 #'   density, so the `y >= 1` requirement does not apply to them.
-#' @keywords internal
+#' @noRd
 .validate_family_counts <- function(family, y, zi = FALSE) {
   base <- .family_base(family)
   if (!(base %in% .COUNT_FAMILIES)) return(invisible(TRUE))
@@ -807,7 +850,7 @@ family_names <- function() names(.FAMILY_OPS)
 }
 
 
-#' Validate the response against a family's support.
+#' Validate the response against a family's support
 #'
 #' The one support rule set, shared by the [tulpa()] front door and by the
 #' engine fitters ([tulpa_laplace()], [tulpa_laplace_beta()],
@@ -825,7 +868,7 @@ family_names <- function() names(.FAMILY_OPS)
 #'   rule is `0 <= y <= n_trials`; absent, the response is the 0/1 form.
 #' @param zi Whether a zero-inflation component is fitted alongside the family,
 #'   passed through to the count rule for the hurdle case.
-#' @keywords internal
+#' @noRd
 .validate_family_support <- function(family, y, n_trials = NULL, zi = FALSE) {
   if (is.null(y)) return(invisible(TRUE))
   base <- .family_base(family)
@@ -887,7 +930,7 @@ family_names <- function() names(.FAMILY_OPS)
 }
 
 
-#' Reject non-finite fitting inputs.
+#' Reject non-finite fitting inputs
 #'
 #' The design is built with `na.action = na.pass`, so a missing predictor or
 #' response survives into `X` / `y`. No fitter drops incomplete cases, so an
@@ -907,7 +950,7 @@ family_names <- function() names(.FAMILY_OPS)
 #' @param n_trials,offset Per-observation binomial denominators and offset, or
 #'   `NULL` to skip that arm.
 #' @param where Caller name for the message prefix, or `NULL` for none.
-#' @keywords internal
+#' @noRd
 .assert_finite_model_inputs <- function(X, y, n_trials = NULL, offset = NULL,
                                         where = NULL) {
   pre <- if (is.null(where)) "" else paste0(where, ": ")
@@ -946,6 +989,75 @@ family_names <- function() names(.FAMILY_OPS)
   invisible(TRUE)
 }
 
+#' The response as the numeric vector the kernels read
+#'
+#' A logical response is the binary idiom `glm()` accepts for a binomial
+#' family, `TRUE` a success; it is read as 0/1 there. Anywhere else, and for
+#' any other non-numeric response (a factor, a character vector), the family
+#' has no reading of it, so it is refused by name rather than left to fail
+#' inside a backend in that backend's words -- `is.numeric(y) is not TRUE` on
+#' the Laplace door, a failed inner solve on EB, non-finite integration nodes
+#' on the structured tier (gcol33/tulpa#880).
+#'
+#' @param family Family identifier, canonical or aliased.
+#' @param y The response, or `NULL`.
+#' @noRd
+.numeric_response <- function(family, y) {
+  if (is.null(y) || is.numeric(y)) return(y)
+  if (is.logical(y) && .family_reads_trials(family)) {
+    return(as.integer(y))
+  }
+  hint <- if (is.logical(y)) {
+    "Use family = 'binomial' for a binary response, or convert it with as.numeric()."
+  } else if (is.factor(y) || is.character(y)) {
+    paste0("Code a binary response as 0/1 (e.g. as.integer(y == \"<level>\")), ",
+           "or use family = 'multinomial' / 'ordinal' for a categorical one.")
+  } else {
+    "Convert it to a numeric vector."
+  }
+  stop(sprintf("The response is %s, which family = '%s' does not read. %s",
+               if (is.logical(y)) "logical" else paste0("a ", class(y)[1L]),
+               family, hint), call. = FALSE)
+}
+
+#' Reject an incomplete random-effect design
+#'
+#' The formula's grouping factors and random-slope covariates are built with
+#' `na.action = na.pass` as the fixed design is, so an NA group or slope value
+#' survives into `re_terms`. There it reached each backend in its own words --
+#' an `re_idx_list` index message on the Laplace door, "NAs are not allowed in
+#' subscripted assignments" on the samplers (gcol33/tulpa#880). Refused here
+#' with the message `.assert_finite_model_inputs()` gives the predictors.
+#'
+#' @param re_terms The `re_terms` of [tulpa_build_model_data()].
+#' @param where Caller name for the message prefix, or `NULL` for none.
+#' @noRd
+.assert_complete_groups <- function(re_terms, where = NULL) {
+  pre <- if (is.null(where)) "" else paste0(where, ": ")
+  for (rt in re_terms) {
+    bad <- which(is.na(rt$group_idx))
+    if (length(bad)) {
+      stop(sprintf(paste0(
+        "%sMissing value(s) in the grouping variable `%s` (%d row(s), first ",
+        "at row %d). tulpa does not drop incomplete cases; remove those rows ",
+        "or give them a group before fitting."),
+        pre, rt$group_var %||% "?", length(bad), bad[1L]), call. = FALSE)
+    }
+    if (!is.null(rt$slope_matrix)) {
+      ok <- .all_finite_rows(as.matrix(rt$slope_matrix))
+      if (!all(ok)) {
+        bad <- which(!ok)
+        stop(sprintf(paste0(
+          "%sNon-finite value(s) in the random-slope covariate(s) of `%s` ",
+          "(%d row(s), first at row %d). tulpa does not drop incomplete ",
+          "cases; remove or impute NA/NaN/Inf before fitting."),
+          pre, rt$group_var %||% "?", length(bad), bad[1L]), call. = FALSE)
+      }
+    }
+  }
+  invisible(TRUE)
+}
+
 # Row-wise all-finite test for a numeric matrix.
 .all_finite_rows <- function(X) {
   fin <- is.finite(X)
@@ -954,8 +1066,8 @@ family_names <- function() names(.FAMILY_OPS)
 }
 
 
-#' Look up a family's operation set, with a clear error for unknown families.
-#' @keywords internal
+#' Look up a family's operation set, with a clear error for unknown families
+#' @noRd
 .family_ops <- function(family) {
   ops <- .FAMILY_OPS[[family]]
   # A `<base>_<link>` code resolves through the link layer (family_link.R),
@@ -994,22 +1106,42 @@ family_names <- function() names(.FAMILY_OPS)
 # length > 1" (gcol33/tulpa#679). The link rides the name in this engine's own
 # `<base>_<link>` convention, so a non-canonical link is carried rather than
 # silently fitted at the canonical one.
+#
+# The suffix is decided against THIS engine's default link (`.LINK_DEFAULTS`),
+# not against stats' canonical one: the two differ for gamma and inverse
+# gaussian, where stats defaults to the inverse / 1/mu^2 link and tulpa's bare
+# name means log. Comparing against stats' table mapped `Gamma()` to the bare
+# `"gamma"` and fitted a log link with no warning (gcol33/tulpa#873). stats'
+# spellings of the family (`inverse.gaussian`) and of a link (`1/mu^2`) are
+# translated to the registry's before either is compared, and a link the base
+# does not admit is refused here, naming the object the user wrote.
+.STATS_FAMILY_NAMES <- c(inverse.gaussian = "inverse_gaussian")
+.STATS_LINK_NAMES   <- c(`1/mu^2` = "1mu2")
+
 #' @keywords internal
 .family_object_to_name <- function(fam) {
   nm <- tolower(fam$family %||% "")
   if (!nzchar(nm)) {
     stop("`family` object carries no $family name.", call. = FALSE)
   }
-  canon <- c(binomial = "logit", poisson = "log", gaussian = "identity",
-             gamma = "inverse", inverse.gaussian = "1/mu^2")
+  base <- unname(.STATS_FAMILY_NAMES[nm])
+  if (is.na(base)) base <- nm
   lk <- fam$link
-  if (!is.null(lk) && nm %in% names(canon) && !identical(lk, unname(canon[nm]))) {
-    return(paste0(nm, "_", lk))
+  if (is.null(lk) || !(base %in% names(.LINK_DEFAULTS))) return(base)
+  link <- unname(.STATS_LINK_NAMES[lk])
+  if (is.na(link)) link <- lk
+  if (!(link %in% .OK_LINKS[[base]])) {
+    stop(sprintf(
+      "`family = %s(link = \"%s\")`: the %s link is not available for %s. ",
+      fam$family, lk, lk, base),
+      "Supported links: ", paste(.OK_LINKS[[base]], collapse = ", "), ".",
+      call. = FALSE)
   }
-  nm
+  if (identical(link, unname(.LINK_DEFAULTS[[base]]))) base
+  else paste0(base, "_", link)
 }
 
-#' Resolve a family spelling to its canonical registry name.
+#' Resolve a family spelling to its canonical registry name
 #'
 #' A no-op for a canonical name, for a `<family>_<link>` code, and for anything
 #' unrecognized, which reaches `.family_or_stop()` and errors there against the
@@ -1025,7 +1157,7 @@ family_names <- function() names(.FAMILY_OPS)
 #' recognized as it stands -- so a registry name that happens to collide
 #' case-insensitively with another spelling is never silently rewritten.
 #' @param family Family identifier as supplied by the caller.
-#' @keywords internal
+#' @noRd
 .canonical_family <- function(family) {
   if (!is.character(family) || length(family) != 1L || is.na(family)) {
     return(family)
@@ -1118,16 +1250,18 @@ family_names <- function() names(.FAMILY_OPS)
 }
 
 
-#' Inverse-link mean for a family. `phi` reaches entries whose response mean
-#' depends on the dispersion (lognormal); the others ignore it via `...`.
-#' @keywords internal
+#' Inverse-link mean for a family
+#'
+#' `phi` reaches entries whose response mean depends on the dispersion
+#' (lognormal); the others ignore it via `...`.
+#' @noRd
 family_mean <- function(eta, family, phi = 1.0) {
   .family_ops(family)$mean(eta, phi)
 }
 
 
-#' Elementwise log-likelihood for a family.
-#' @keywords internal
+#' Elementwise log-likelihood for a family
+#' @noRd
 family_loglik <- function(eta, y, family, n_trials = NULL, phi = 1.0,
                           phi2 = NULL) {
   ops <- .family_ops(family)
@@ -1138,8 +1272,8 @@ family_loglik <- function(eta, y, family, n_trials = NULL, phi = 1.0,
 }
 
 
-#' Score (d log-likelihood / d eta), elementwise.
-#' @keywords internal
+#' Score (d log-likelihood / d eta), elementwise
+#' @noRd
 family_score_eta <- function(eta, y, family, n_trials = NULL, phi = 1.0,
                              phi2 = NULL) {
   ops <- .family_ops(family)
@@ -1150,8 +1284,8 @@ family_score_eta <- function(eta, y, family, n_trials = NULL, phi = 1.0,
 }
 
 
-#' Laplace/IRLS working weight (-d^2 log-lik / d eta^2), elementwise.
-#' @keywords internal
+#' Laplace/IRLS working weight (-d^2 log-lik / d eta^2), elementwise
+#' @noRd
 family_weight <- function(eta, family, n_trials = NULL, phi = 1.0,
                           phi2 = NULL) {
   ops <- .family_ops(family)
@@ -1162,8 +1296,8 @@ family_weight <- function(eta, family, n_trials = NULL, phi = 1.0,
 }
 
 
-#' One response draw per element of `eta` (posterior predictive), elementwise.
-#' @keywords internal
+#' One response draw per element of `eta` (posterior predictive), elementwise
+#' @noRd
 family_sample <- function(eta, family, n_trials = NULL, phi = 1.0,
                           phi2 = NULL) {
   ops <- .family_ops(family)
@@ -1178,8 +1312,8 @@ family_sample <- function(eta, family, n_trials = NULL, phi = 1.0,
 }
 
 
-#' Response variance Var(y | eta) for a family, elementwise.
-#' @keywords internal
+#' Response variance Var(y | eta) for a family, elementwise
+#' @noRd
 family_variance <- function(eta, family, n_trials = NULL, phi = 1.0,
                             phi2 = NULL) {
   ops <- .family_ops(family)
@@ -1194,7 +1328,7 @@ family_variance <- function(eta, family, n_trials = NULL, phi = 1.0,
 }
 
 
-#' Observed curvature (-d^2 log-lik / d eta^2 at the realized `y`), elementwise.
+#' Observed curvature (-d^2 log-lik / d eta^2 at the realized `y`), elementwise
 #'
 #' One path, the compiled dispatch (`obs_grad_hess_for_family`), for every
 #' family. It used to answer from the registry's `obs_weight` closure where a
@@ -1208,9 +1342,10 @@ family_variance <- function(eta, family, n_trials = NULL, phi = 1.0,
 #' zero-inflation mixture in `R/family_zi.R` differentiated through the wrong
 #' one (gcol33/tulpa#824).
 #'
-#' The registry's three `obs_weight` closures stay as the R oracle the compiled
-#' dispatch is pinned against in `test-family-registry-compiled.R`.
-#' @keywords internal
+#' The registry's `obs_weight` closures (neg_binomial_2, neg_binomial_1,
+#' truncated_neg_binomial_2, beta) stay as the R oracle the compiled dispatch
+#' is pinned against in `test-family-registry-compiled.R`.
+#' @noRd
 .family_obs_weight <- function(eta, y, family, n_trials = NULL, phi = 1.0,
                                phi2 = NULL) {
   .family_or_stop(family)
@@ -1225,8 +1360,8 @@ family_variance <- function(eta, family, n_trials = NULL, phi = 1.0,
 }
 
 
-#' Response-scale mean of y given eta for a family (trial-scaled where relevant).
-#' @keywords internal
+#' Response-scale mean of y given eta for a family (trial-scaled where relevant)
+#' @noRd
 family_response_mean <- function(eta, family, n_trials = NULL, phi = 1.0) {
   ops <- .family_ops(family)
   if (!is.null(ops$response_mean)) return(ops$response_mean(eta, n_trials, phi))

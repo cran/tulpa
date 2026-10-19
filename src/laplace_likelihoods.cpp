@@ -12,24 +12,12 @@
 
 namespace tulpa {
 
-double log_lik_gaussian(double y, double eta, double phi) {
-  double resid = y - eta;
-  return -0.5 * std::log(2.0 * M_PI * phi * phi) - resid * resid / (2.0 * phi * phi);
-}
-
 double grad_log_lik_gaussian(double y, double eta, double phi) {
   return (y - eta) / (phi * phi);
 }
 
 double neg_hess_log_lik_gaussian(double y, double eta, double phi) {
   return 1.0 / (phi * phi);
-}
-
-double log_lik_binomial_kernel(int y, int n, double eta) {
-  if (eta > 0) {
-    return y * eta - n * eta - n * std::log(1.0 + std::exp(-eta));
-  }
-  return y * eta - n * std::log(1.0 + std::exp(eta));
 }
 
 // lchoose is eta-independent, so it never moves the mode, the gradient, or a
@@ -44,30 +32,6 @@ double log_lik_binomial_const(int y, int n) {
 
 double log_lik_binomial(int y, int n, double eta) {
   return log_lik_binomial_kernel(y, n, eta) + log_lik_binomial_const(y, n);
-}
-
-double grad_log_lik_binomial(int y, int n, double eta) {
-  double p;
-  if (eta > 0) {
-    double exp_neg_eta = std::exp(-eta);
-    p = 1.0 / (1.0 + exp_neg_eta);
-  } else {
-    double exp_eta = std::exp(eta);
-    p = exp_eta / (1.0 + exp_eta);
-  }
-  return y - n * p;
-}
-
-double neg_hess_log_lik_binomial(int y, int n, double eta) {
-  double p;
-  if (eta > 0) {
-    double exp_neg_eta = std::exp(-eta);
-    p = 1.0 / (1.0 + exp_neg_eta);
-  } else {
-    double exp_eta = std::exp(eta);
-    p = exp_eta / (1.0 + exp_eta);
-  }
-  return n * p * (1.0 - p);
 }
 
 double log_lik_negbin(int y, double eta, double phi) {
@@ -90,10 +54,6 @@ double neg_hess_log_lik_negbin(int y, double eta, double phi) {
   return (y + phi) * mu * phi / (denom * denom);
 }
 
-double log_lik_poisson_kernel(int y, double eta) {
-  return y * eta - tulpa_linalg::safe_exp(eta);
-}
-
 // -lgamma(y + 1), eta-independent and precomputed per observation for the same
 // reason log_lik_binomial_const is. Negated here so the full density below is
 // `kernel + const` like the binomial one, which is the same floating-point
@@ -104,14 +64,6 @@ double log_lik_poisson_const(int y) {
 
 double log_lik_poisson(int y, double eta) {
   return log_lik_poisson_kernel(y, eta) + log_lik_poisson_const(y);
-}
-
-double grad_log_lik_poisson(int y, double eta) {
-  return y - tulpa_linalg::safe_exp(eta);
-}
-
-double neg_hess_log_lik_poisson(int y, double eta) {
-  return tulpa_linalg::safe_exp(eta);
 }
 
 } // namespace tulpa

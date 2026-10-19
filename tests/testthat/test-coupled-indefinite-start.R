@@ -42,8 +42,11 @@ fit_344 <- function(d, ...) {
         control = ctl))
 }
 
+skip_on_cran_budget()
+
 
 test_that("the sparse-detection fixture reaches the indefinite-start regime", {
+    skip_on_cran_budget()
     d  <- data_344(TRUE)
     lp <- coupled_occ_log_post(d, PREC_344)
     cur <- coupled_occ_curvature(lp)
@@ -59,6 +62,33 @@ test_that("the sparse-detection fixture reaches the indefinite-start regime", {
                                                        PREC_344))
     expect_gt(ctrl$lambda_min, 0)
 })
+
+
+test_that("the convergence predicates read the cells the weights put mass on", {
+    skip_on_cran_budget()
+    ok <- tulpa:::.nested_converged_cells(
+        list(converged = c(TRUE, FALSE, NA)), 3L)
+    expect_identical(ok, c(TRUE, FALSE, FALSE))
+
+    # No flag at all is a backend that does not report one, not a stalled solve.
+    expect_identical(tulpa:::.nested_converged_cells(list(), 2L),
+                     c(TRUE, TRUE))
+    expect_true(tulpa:::.nested_any_weighted_converged(list()))
+
+    # A converged cell carrying no weight does not rescue the fit.
+    expect_false(tulpa:::.nested_any_weighted_converged(
+        list(converged = c(TRUE, FALSE), weights = c(0, 1))))
+    expect_true(tulpa:::.nested_any_weighted_converged(
+        list(converged = c(TRUE, FALSE), weights = c(1, 0))))
+
+    # Weights that name no cell leave every cell readable rather than none.
+    expect_true(tulpa:::.nested_any_weighted_converged(
+        list(converged = c(TRUE, FALSE), weights = c(NA, NA))))
+    expect_false(tulpa:::.nested_any_weighted_converged(
+        list(converged = c(FALSE, FALSE), weights = c(NA, NA))))
+})
+
+skip_on_cran()
 
 
 test_that("the coupled joint Newton steps from an indefinite start Hessian", {
@@ -100,6 +130,37 @@ test_that("the dense and sparse joint loops agree from an indefinite start", {
         expect_equal(as.numeric(a$log_marginal)[1L],
                      as.numeric(b$log_marginal)[1L], tolerance = 1e-10)
         expect_identical(as.integer(a$n_iter)[1L], as.integer(b$n_iter)[1L])
+    }
+})
+
+
+test_that("every step curvature reaches the one mode from an indefinite start", {
+    skip_on_cran()
+    coupled_occ_register()
+
+    # The step curvature steers only the path to the mode: the stationary point
+    # and the final observed-Hessian pass are the same under each, so the mode
+    # and the log marginal agree across "auto", "lm", "fisher" and "psd", on
+    # both joint loops. "auto" takes the expected step where the observed
+    # Hessian does not factor and the Newton step where it does, so it needs
+    # no more iterations than Fisher scoring, which converges linearly.
+    d <- data_344(TRUE)
+    ref <- coupled_occ_ref_mode(coupled_occ_log_post(d, PREC_344))
+    for (sparse in c(FALSE, TRUE)) {
+        fits <- lapply(c(auto = "auto", lm = "lm", fisher = "fisher", psd = "psd"),
+                       function(h) fit_344(d, hessian = h, force_sparse = sparse))
+        for (h in names(fits)) {
+            f <- fits[[h]]
+            info <- paste(h, if (sparse) "sparse" else "dense")
+            expect_true(as.logical(f$converged)[1L], info = info)
+            expect_equal(as.numeric(f$modes[1L, 1:2]), ref, tolerance = 1e-5,
+                         info = info)
+            expect_equal(as.numeric(f$log_marginal)[1L],
+                         as.numeric(fits$lm$log_marginal)[1L],
+                         tolerance = 1e-8, info = info)
+        }
+        expect_lte(as.integer(fits$auto$n_iter)[1L],
+                   as.integer(fits$fisher$n_iter)[1L])
     }
 })
 
@@ -163,28 +224,4 @@ test_that("a non-converged fit reports no coefficient read off its start vector"
     ci <- confint(f)
     expect_true(all(is.na(ci)))
     expect_identical(attr(ci, "interval_declined"), "not_converged")
-})
-
-
-test_that("the convergence predicates read the cells the weights put mass on", {
-    ok <- tulpa:::.nested_converged_cells(
-        list(converged = c(TRUE, FALSE, NA)), 3L)
-    expect_identical(ok, c(TRUE, FALSE, FALSE))
-
-    # No flag at all is a backend that does not report one, not a stalled solve.
-    expect_identical(tulpa:::.nested_converged_cells(list(), 2L),
-                     c(TRUE, TRUE))
-    expect_true(tulpa:::.nested_any_weighted_converged(list()))
-
-    # A converged cell carrying no weight does not rescue the fit.
-    expect_false(tulpa:::.nested_any_weighted_converged(
-        list(converged = c(TRUE, FALSE), weights = c(0, 1))))
-    expect_true(tulpa:::.nested_any_weighted_converged(
-        list(converged = c(TRUE, FALSE), weights = c(1, 0))))
-
-    # Weights that name no cell leave every cell readable rather than none.
-    expect_true(tulpa:::.nested_any_weighted_converged(
-        list(converged = c(TRUE, FALSE), weights = c(NA, NA))))
-    expect_false(tulpa:::.nested_any_weighted_converged(
-        list(converged = c(FALSE, FALSE), weights = c(NA, NA))))
 })

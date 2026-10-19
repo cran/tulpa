@@ -341,7 +341,26 @@ code > span.er { color: #a61717; background-color: #e3d2d2; }
 
 
 
-<div class="sourceCode" id="cb1"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb1-1"><a href="#cb1-1" tabindex="-1"></a><span class="fu">library</span>(tulpa)</span></code></pre></div>
+<div id="installation" class="section level2">
+<h2>Installation</h2>
+<div class="sourceCode" id="cb1"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb1-1"><a href="#cb1-1" tabindex="-1"></a><span class="co"># Current release, built for Windows and macOS</span></span>
+<span id="cb1-2"><a href="#cb1-2" tabindex="-1"></a><span class="fu">install.packages</span>(<span class="st">&quot;tulpa&quot;</span>,</span>
+<span id="cb1-3"><a href="#cb1-3" tabindex="-1"></a>                 <span class="at">repos =</span> <span class="fu">c</span>(<span class="st">&quot;https://gcol33.r-universe.dev&quot;</span>,</span>
+<span id="cb1-4"><a href="#cb1-4" tabindex="-1"></a>                           <span class="st">&quot;https://cloud.r-project.org&quot;</span>))</span>
+<span id="cb1-5"><a href="#cb1-5" tabindex="-1"></a></span>
+<span id="cb1-6"><a href="#cb1-6" tabindex="-1"></a><span class="co"># Development version from GitHub</span></span>
+<span id="cb1-7"><a href="#cb1-7" tabindex="-1"></a><span class="fu">install.packages</span>(<span class="st">&quot;pak&quot;</span>)</span>
+<span id="cb1-8"><a href="#cb1-8" tabindex="-1"></a>pak<span class="sc">::</span><span class="fu">pak</span>(<span class="st">&quot;gcol33/tulpa&quot;</span>)</span>
+<span id="cb1-9"><a href="#cb1-9" tabindex="-1"></a></span>
+<span id="cb1-10"><a href="#cb1-10" tabindex="-1"></a><span class="co"># Pin a release</span></span>
+<span id="cb1-11"><a href="#cb1-11" tabindex="-1"></a>pak<span class="sc">::</span><span class="fu">pak</span>(<span class="st">&quot;gcol33/tulpa@v0.6.0&quot;</span>)</span></code></pre></div>
+<p><code>pak</code> resolves the dependency tree, including
+<code>tulpaMesh</code> (on CRAN, used for SPDE mesh construction).
+<code>tulpa</code> compiles its C++ backend on first install, so a C++17
+toolchain is required: Rtools on Windows, Xcode CLI tools on macOS,
+<code>r-base-dev</code> on Linux.</p>
+<div class="sourceCode" id="cb2"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb2-1"><a href="#cb2-1" tabindex="-1"></a><span class="fu">library</span>(tulpa)</span></code></pre></div>
+</div>
 <div id="why-a-spatial-field" class="section level2">
 <h2>Why a spatial field</h2>
 <p>Regions that sit next to each other tend to look alike. Two adjacent
@@ -497,12 +516,12 @@ and has an obvious smooth field on it. A regular graph keeps every
 region with the same neighbour count, so no region is privileged by the
 topology, and a ring’s single loop gives the field one clean wavelength
 to recover.</p>
-<div class="sourceCode" id="cb2"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb2-1"><a href="#cb2-1" tabindex="-1"></a>K <span class="ot">&lt;-</span> <span class="dv">25</span></span>
-<span id="cb2-2"><a href="#cb2-2" tabindex="-1"></a>W <span class="ot">&lt;-</span> <span class="fu">matrix</span>(<span class="dv">0</span>, K, K)</span>
-<span id="cb2-3"><a href="#cb2-3" tabindex="-1"></a><span class="cf">for</span> (i <span class="cf">in</span> <span class="dv">1</span><span class="sc">:</span>K) {</span>
-<span id="cb2-4"><a href="#cb2-4" tabindex="-1"></a>  j <span class="ot">&lt;-</span> <span class="cf">if</span> (i <span class="sc">&lt;</span> K) i <span class="sc">+</span> <span class="dv">1</span> <span class="cf">else</span> <span class="dv">1</span></span>
-<span id="cb2-5"><a href="#cb2-5" tabindex="-1"></a>  W[i, j] <span class="ot">&lt;-</span> W[j, i] <span class="ot">&lt;-</span> <span class="dv">1</span></span>
-<span id="cb2-6"><a href="#cb2-6" tabindex="-1"></a>}</span></code></pre></div>
+<div class="sourceCode" id="cb3"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb3-1"><a href="#cb3-1" tabindex="-1"></a>K <span class="ot">&lt;-</span> <span class="dv">25</span></span>
+<span id="cb3-2"><a href="#cb3-2" tabindex="-1"></a>W <span class="ot">&lt;-</span> <span class="fu">matrix</span>(<span class="dv">0</span>, K, K)</span>
+<span id="cb3-3"><a href="#cb3-3" tabindex="-1"></a><span class="cf">for</span> (i <span class="cf">in</span> <span class="dv">1</span><span class="sc">:</span>K) {</span>
+<span id="cb3-4"><a href="#cb3-4" tabindex="-1"></a>  j <span class="ot">&lt;-</span> <span class="cf">if</span> (i <span class="sc">&lt;</span> K) i <span class="sc">+</span> <span class="dv">1</span> <span class="cf">else</span> <span class="dv">1</span></span>
+<span id="cb3-5"><a href="#cb3-5" tabindex="-1"></a>  W[i, j] <span class="ot">&lt;-</span> W[j, i] <span class="ot">&lt;-</span> <span class="dv">1</span></span>
+<span id="cb3-6"><a href="#cb3-6" tabindex="-1"></a>}</span></code></pre></div>
 <p>The true field is one smooth wave around the ring, centred and scaled
 so its values run from roughly <span class="math inline">\(-1.5\)</span>
 to <span class="math inline">\(1.5\)</span>. A wave is a fair test on
@@ -513,18 +532,18 @@ other, that no single intercept can capture, so the random effect has to
 do genuine work. A pattern of pure noise would be the opposite test, one
 an ICAR prior is designed to smooth away, and recovering it would say
 little.</p>
-<div class="sourceCode" id="cb3"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb3-1"><a href="#cb3-1" tabindex="-1"></a>field_true <span class="ot">&lt;-</span> <span class="fu">as.numeric</span>(<span class="fu">scale</span>(<span class="fu">sin</span>(<span class="dv">2</span> <span class="sc">*</span> pi <span class="sc">*</span> (<span class="dv">1</span><span class="sc">:</span>K) <span class="sc">/</span> K)))</span>
-<span id="cb3-2"><a href="#cb3-2" tabindex="-1"></a>beta0 <span class="ot">&lt;-</span> <span class="sc">-</span><span class="fl">0.2</span></span>
-<span id="cb3-3"><a href="#cb3-3" tabindex="-1"></a>beta1 <span class="ot">&lt;-</span>  <span class="fl">0.8</span></span></code></pre></div>
+<div class="sourceCode" id="cb4"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb4-1"><a href="#cb4-1" tabindex="-1"></a>field_true <span class="ot">&lt;-</span> <span class="fu">as.numeric</span>(<span class="fu">scale</span>(<span class="fu">sin</span>(<span class="dv">2</span> <span class="sc">*</span> pi <span class="sc">*</span> (<span class="dv">1</span><span class="sc">:</span>K) <span class="sc">/</span> K)))</span>
+<span id="cb4-2"><a href="#cb4-2" tabindex="-1"></a>beta0 <span class="ot">&lt;-</span> <span class="sc">-</span><span class="fl">0.2</span></span>
+<span id="cb4-3"><a href="#cb4-3" tabindex="-1"></a>beta1 <span class="ot">&lt;-</span>  <span class="fl">0.8</span></span></code></pre></div>
 <p>Draw <code>n</code> observations, assign each to a region, and build
 a binomial response on the logit scale. The intercept is <span class="math inline">\(-0.2\)</span>, the covariate slope <span class="math inline">\(0.8\)</span>, and the region’s field value adds to
 the linear predictor.</p>
-<div class="sourceCode" id="cb4"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb4-1"><a href="#cb4-1" tabindex="-1"></a>n      <span class="ot">&lt;-</span> <span class="dv">800</span></span>
-<span id="cb4-2"><a href="#cb4-2" tabindex="-1"></a>x      <span class="ot">&lt;-</span> <span class="fu">rnorm</span>(n)</span>
-<span id="cb4-3"><a href="#cb4-3" tabindex="-1"></a>region <span class="ot">&lt;-</span> <span class="fu">sample</span>(<span class="dv">1</span><span class="sc">:</span>K, n, <span class="at">replace =</span> <span class="cn">TRUE</span>)</span>
-<span id="cb4-4"><a href="#cb4-4" tabindex="-1"></a>eta    <span class="ot">&lt;-</span> beta0 <span class="sc">+</span> beta1 <span class="sc">*</span> x <span class="sc">+</span> field_true[region]</span>
-<span id="cb4-5"><a href="#cb4-5" tabindex="-1"></a>y      <span class="ot">&lt;-</span> <span class="fu">rbinom</span>(n, <span class="at">size =</span> <span class="dv">1</span>, <span class="at">prob =</span> <span class="fu">plogis</span>(eta))</span>
-<span id="cb4-6"><a href="#cb4-6" tabindex="-1"></a>ds     <span class="ot">&lt;-</span> <span class="fu">data.frame</span>(<span class="at">y =</span> y, <span class="at">x =</span> x, <span class="at">region =</span> <span class="fu">factor</span>(region))</span></code></pre></div>
+<div class="sourceCode" id="cb5"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb5-1"><a href="#cb5-1" tabindex="-1"></a>n      <span class="ot">&lt;-</span> <span class="dv">800</span></span>
+<span id="cb5-2"><a href="#cb5-2" tabindex="-1"></a>x      <span class="ot">&lt;-</span> <span class="fu">rnorm</span>(n)</span>
+<span id="cb5-3"><a href="#cb5-3" tabindex="-1"></a>region <span class="ot">&lt;-</span> <span class="fu">sample</span>(<span class="dv">1</span><span class="sc">:</span>K, n, <span class="at">replace =</span> <span class="cn">TRUE</span>)</span>
+<span id="cb5-4"><a href="#cb5-4" tabindex="-1"></a>eta    <span class="ot">&lt;-</span> beta0 <span class="sc">+</span> beta1 <span class="sc">*</span> x <span class="sc">+</span> field_true[region]</span>
+<span id="cb5-5"><a href="#cb5-5" tabindex="-1"></a>y      <span class="ot">&lt;-</span> <span class="fu">rbinom</span>(n, <span class="at">size =</span> <span class="dv">1</span>, <span class="at">prob =</span> <span class="fu">plogis</span>(eta))</span>
+<span id="cb5-6"><a href="#cb5-6" tabindex="-1"></a>ds     <span class="ot">&lt;-</span> <span class="fu">data.frame</span>(<span class="at">y =</span> y, <span class="at">x =</span> x, <span class="at">region =</span> <span class="fu">factor</span>(region))</span></code></pre></div>
 <p>The slope we want back is <code>beta1</code>; the field we want back
 is <code>field_true</code>. Eight hundred observations spread across
 twenty-five regions average to thirty-two rows each, but the sampling is
@@ -542,10 +561,10 @@ field <code>type</code> and the adjacency matrix. A
 <code>spatial(region)</code> term in the formula names the column that
 maps each row to its region. Drop either piece and <code>tulpa()</code>
 stops with a message rather than guessing.</p>
-<div class="sourceCode" id="cb5"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb5-1"><a href="#cb5-1" tabindex="-1"></a>fit <span class="ot">&lt;-</span> <span class="fu">tulpa</span>(y <span class="sc">~</span> x <span class="sc">+</span> <span class="fu">spatial</span>(region), <span class="at">data =</span> ds, <span class="at">family =</span> <span class="st">&quot;binomial&quot;</span>,</span>
-<span id="cb5-2"><a href="#cb5-2" tabindex="-1"></a>             <span class="at">spatial =</span> <span class="fu">list</span>(<span class="at">type =</span> <span class="st">&quot;icar&quot;</span>, <span class="at">adjacency =</span> W),</span>
-<span id="cb5-3"><a href="#cb5-3" tabindex="-1"></a>             <span class="at">mode =</span> <span class="st">&quot;nested_laplace&quot;</span>)</span>
-<span id="cb5-4"><a href="#cb5-4" tabindex="-1"></a>fit<span class="sc">$</span>backend</span></code></pre></div>
+<div class="sourceCode" id="cb6"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb6-1"><a href="#cb6-1" tabindex="-1"></a>fit <span class="ot">&lt;-</span> <span class="fu">tulpa</span>(y <span class="sc">~</span> x <span class="sc">+</span> <span class="fu">spatial</span>(region), <span class="at">data =</span> ds, <span class="at">family =</span> <span class="st">&quot;binomial&quot;</span>,</span>
+<span id="cb6-2"><a href="#cb6-2" tabindex="-1"></a>             <span class="at">spatial =</span> <span class="fu">list</span>(<span class="at">type =</span> <span class="st">&quot;icar&quot;</span>, <span class="at">adjacency =</span> W),</span>
+<span id="cb6-3"><a href="#cb6-3" tabindex="-1"></a>             <span class="at">mode =</span> <span class="st">&quot;nested_laplace&quot;</span>)</span>
+<span id="cb6-4"><a href="#cb6-4" tabindex="-1"></a><span class="fu">summary</span>(fit)<span class="sc">$</span>inference<span class="sc">$</span>backend</span></code></pre></div>
 <p><code>mode = &quot;nested_laplace&quot;</code> runs the Tier-2 path that
 integrates the field’s precision <span class="math inline">\(\tau\)</span> over a grid rather than fixing it.
 The path lays a grid of <span class="math inline">\(\tau\)</span>
@@ -567,7 +586,7 @@ the way the nested path arranges them. This vignette requests
 and check. For a routine binomial areal model where only the slopes
 matter, <code>mode = &quot;auto&quot;</code> is the lighter call.</p>
 <p>The fixed effects come back from <code>coef()</code>.</p>
-<div class="sourceCode" id="cb6"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb6-1"><a href="#cb6-1" tabindex="-1"></a><span class="fu">coef</span>(fit)</span></code></pre></div>
+<div class="sourceCode" id="cb7"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb7-1"><a href="#cb7-1" tabindex="-1"></a><span class="fu">coef</span>(fit)</span></code></pre></div>
 <p>The slope lands near the simulated <span class="math inline">\(0.8\)</span>. With the regional wave absorbed into
 the field, the covariate reports its own effect rather than a blend of
 effect and location. <code>summary()</code> adds the posterior standard
@@ -583,32 +602,31 @@ across the grid. tulpa retains the per-grid covariance
 (<code>control$keep_grid_hessians</code> defaults to on for precisely
 this reason) and combines both terms, so the reported error absorbs the
 cost of not knowing how smooth the surface is.</p>
-<div class="sourceCode" id="cb7"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb7-1"><a href="#cb7-1" tabindex="-1"></a><span class="fu">summary</span>(fit)</span></code></pre></div>
+<div class="sourceCode" id="cb8"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb8-1"><a href="#cb8-1" tabindex="-1"></a><span class="fu">summary</span>(fit)</span></code></pre></div>
 <div id="extracting-the-field-per-region" class="section level3">
 <h3>Extracting the field per region</h3>
 <p>The slopes are only half the story. Often the field itself is the
 quantity of interest, the smoothed map you wanted in the first place,
-and the nested fit carries it on the object. <code>$modes</code> is an
+and the nested fit carries it on its outer grid, which
+<code>tulpa_outer_grid()</code> returns. Its <code>modes</code> is an
 <code>n_grid</code> by <code>n_latent</code> matrix. Each row is one
 grid point’s inner-Laplace mode, and the columns run
 <code>[fixed effects, field]</code>, so the first <code>n_fixed</code>
 columns are the intercept and slopes and the rest are the per-region
-effects. <code>$weights</code> are the integration weights over the
-grid, one per row, and they sum to one after normalising.</p>
+effects. Its <code>weights</code> are the integration weights over the
+grid, one per row, normalised to sum to one.</p>
 <p>The grid-marginalised value for region <span class="math inline">\(u\)</span> is the weighted average of its own
 column across grid points: take column <code>n_fixed + u</code>, weight
 each grid point’s entry by its integration weight, and sum. This is the
 same marginalisation the slopes get, applied to the latent field instead
 of the fixed effects.</p>
-<div class="sourceCode" id="cb8"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb8-1"><a href="#cb8-1" tabindex="-1"></a>w     <span class="ot">&lt;-</span> fit<span class="sc">$</span>weights <span class="sc">/</span> <span class="fu">sum</span>(fit<span class="sc">$</span>weights)</span>
-<span id="cb8-2"><a href="#cb8-2" tabindex="-1"></a>nf    <span class="ot">&lt;-</span> fit<span class="sc">$</span>n_fixed</span>
-<span id="cb8-3"><a href="#cb8-3" tabindex="-1"></a>field_hat <span class="ot">&lt;-</span> <span class="fu">vapply</span>(<span class="fu">seq_len</span>(K), <span class="cf">function</span>(u) <span class="fu">sum</span>(w <span class="sc">*</span> fit<span class="sc">$</span>modes[, nf <span class="sc">+</span> u]),</span>
-<span id="cb8-4"><a href="#cb8-4" tabindex="-1"></a>                    <span class="fu">numeric</span>(<span class="dv">1</span>))</span>
-<span id="cb8-5"><a href="#cb8-5" tabindex="-1"></a><span class="fu">round</span>(<span class="fu">head</span>(field_hat), <span class="dv">3</span>)</span></code></pre></div>
+<div class="sourceCode" id="cb9"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb9-1"><a href="#cb9-1" tabindex="-1"></a>g         <span class="ot">&lt;-</span> <span class="fu">tulpa_outer_grid</span>(fit)</span>
+<span id="cb9-2"><a href="#cb9-2" tabindex="-1"></a>field_hat <span class="ot">&lt;-</span> <span class="fu">colSums</span>(g<span class="sc">$</span>weights <span class="sc">*</span> g<span class="sc">$</span>modes)[g<span class="sc">$</span>n_fixed <span class="sc">+</span> <span class="fu">seq_len</span>(K)]</span>
+<span id="cb9-3"><a href="#cb9-3" tabindex="-1"></a><span class="fu">round</span>(<span class="fu">head</span>(field_hat), <span class="dv">3</span>)</span></code></pre></div>
 <p>That recipe is the same one the temporal path uses for a random-walk
 field, since an RW1 chain is an ICAR on a line: time <span class="math inline">\(t\)</span> neighbours <span class="math inline">\(t-1\)</span> and <span class="math inline">\(t+1\)</span>, the chain adjacency’s Laplacian is
 the RW1 precision, and the field-extraction step reads the same
-<code>$modes</code> columns. One marginalisation serves both areal maps
+<code>modes</code> columns. One marginalisation serves both areal maps
 and time series.</p>
 </div>
 </div>
@@ -619,12 +637,12 @@ smoothing precision sits where the data put it.</p>
 <p>Plot the fitted values against the simulated ones. The intrinsic
 prior identifies the field only up to an additive constant, so centre
 both sequences before comparing.</p>
-<div class="sourceCode" id="cb9"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb9-1"><a href="#cb9-1" tabindex="-1"></a><span class="fu">plot</span>(field_true <span class="sc">-</span> <span class="fu">mean</span>(field_true),</span>
-<span id="cb9-2"><a href="#cb9-2" tabindex="-1"></a>     field_hat  <span class="sc">-</span> <span class="fu">mean</span>(field_hat),</span>
-<span id="cb9-3"><a href="#cb9-3" tabindex="-1"></a>     <span class="at">xlab =</span> <span class="st">&quot;true field (centred)&quot;</span>, <span class="at">ylab =</span> <span class="st">&quot;estimated field (centred)&quot;</span>,</span>
-<span id="cb9-4"><a href="#cb9-4" tabindex="-1"></a>     <span class="at">pch =</span> <span class="dv">19</span>, <span class="at">col =</span> <span class="st">&quot;steelblue&quot;</span>)</span>
-<span id="cb9-5"><a href="#cb9-5" tabindex="-1"></a><span class="fu">abline</span>(<span class="dv">0</span>, <span class="dv">1</span>, <span class="at">lwd =</span> <span class="dv">2</span>, <span class="at">col =</span> <span class="st">&quot;grey40&quot;</span>)</span></code></pre></div>
-<div class="sourceCode" id="cb10"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb10-1"><a href="#cb10-1" tabindex="-1"></a><span class="fu">cor</span>(field_true, field_hat)</span></code></pre></div>
+<div class="sourceCode" id="cb10"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb10-1"><a href="#cb10-1" tabindex="-1"></a><span class="fu">plot</span>(field_true <span class="sc">-</span> <span class="fu">mean</span>(field_true),</span>
+<span id="cb10-2"><a href="#cb10-2" tabindex="-1"></a>     field_hat  <span class="sc">-</span> <span class="fu">mean</span>(field_hat),</span>
+<span id="cb10-3"><a href="#cb10-3" tabindex="-1"></a>     <span class="at">xlab =</span> <span class="st">&quot;true field (centred)&quot;</span>, <span class="at">ylab =</span> <span class="st">&quot;estimated field (centred)&quot;</span>,</span>
+<span id="cb10-4"><a href="#cb10-4" tabindex="-1"></a>     <span class="at">pch =</span> <span class="dv">19</span>, <span class="at">col =</span> <span class="st">&quot;steelblue&quot;</span>)</span>
+<span id="cb10-5"><a href="#cb10-5" tabindex="-1"></a><span class="fu">abline</span>(<span class="dv">0</span>, <span class="dv">1</span>, <span class="at">lwd =</span> <span class="dv">2</span>, <span class="at">col =</span> <span class="st">&quot;grey40&quot;</span>)</span></code></pre></div>
+<div class="sourceCode" id="cb11"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb11-1"><a href="#cb11-1" tabindex="-1"></a><span class="fu">cor</span>(field_true, field_hat)</span></code></pre></div>
 <p>The points fall along the identity line and the correlation is high.
 The fit has recovered the wave from binary data spread thin across
 twenty-five regions, which is exactly what neighbour borrowing buys. A
@@ -637,11 +655,11 @@ overall level even when their shapes match perfectly. Subtracting each
 mean removes that free constant and leaves the contrasts, which are what
 the model actually identifies.</p>
 <p>The precision <span class="math inline">\(\tau\)</span> is summarised
-on the object. <code>$theta_mean</code> is the posterior mean over the
-grid, on the natural precision scale, and <code>$theta_ci_lo</code> /
-<code>$theta_ci_hi</code> give a credible interval.</p>
-<div class="sourceCode" id="cb11"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb11-1"><a href="#cb11-1" tabindex="-1"></a><span class="fu">c</span>(<span class="at">tau_mean =</span> fit<span class="sc">$</span>theta_mean,</span>
-<span id="cb11-2"><a href="#cb11-2" tabindex="-1"></a>  <span class="at">lo =</span> fit<span class="sc">$</span>theta_ci_lo, <span class="at">hi =</span> fit<span class="sc">$</span>theta_ci_hi)</span></code></pre></div>
+in the <code>hyperparameters</code> table of <code>summary()</code>:
+<code>mean</code> is the posterior mean over the grid, on the natural
+precision scale, and <code>ci_lo</code> / <code>ci_hi</code> give a
+credible interval.</p>
+<div class="sourceCode" id="cb12"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb12-1"><a href="#cb12-1" tabindex="-1"></a><span class="fu">summary</span>(fit)<span class="sc">$</span>hyperparameters[, <span class="fu">c</span>(<span class="st">&quot;parameter&quot;</span>, <span class="st">&quot;mean&quot;</span>, <span class="st">&quot;ci_lo&quot;</span>, <span class="st">&quot;ci_hi&quot;</span>)]</span></code></pre></div>
 <p>A larger <span class="math inline">\(\tau\)</span> would mean a
 stiffer penalty on neighbour differences and a flatter surface; in the
 limit of very large <span class="math inline">\(\tau\)</span> the effect
@@ -663,7 +681,7 @@ marginalised over the grid of <span class="math inline">\(\tau\)</span>
 values, so it already includes the cost of not knowing how smooth the
 field is. <code>confint()</code> returns the same bounds as a matrix,
 and <code>vcov()</code> the fixed-effect covariance.</p>
-<div class="sourceCode" id="cb12"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb12-1"><a href="#cb12-1" tabindex="-1"></a><span class="fu">confint</span>(fit)</span></code></pre></div>
+<div class="sourceCode" id="cb13"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb13-1"><a href="#cb13-1" tabindex="-1"></a><span class="fu">confint</span>(fit)</span></code></pre></div>
 <p>The second point is the intercept, and it follows directly from the
 rank-deficiency of the ICAR precision. Under an intrinsic field the
 overall level of <span class="math inline">\(\phi\)</span> and the
@@ -678,7 +696,7 @@ summary above. The slopes are unaffected, because a covariate’s effect
 does not live on that ridge. Read the slopes, which are identified, and
 treat the intercept as a nuisance level rather than a quantity to
 interpret.</p>
-<div class="sourceCode" id="cb13"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb13-1"><a href="#cb13-1" tabindex="-1"></a><span class="fu">summary</span>(fit)[<span class="st">&quot;(Intercept)&quot;</span>, <span class="st">&quot;std.error&quot;</span>]</span></code></pre></div>
+<div class="sourceCode" id="cb14"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb14-1"><a href="#cb14-1" tabindex="-1"></a><span class="fu">coef</span>(<span class="fu">summary</span>(fit))[<span class="st">&quot;(Intercept)&quot;</span>, <span class="st">&quot;std.error&quot;</span>]</span></code></pre></div>
 <p>The wide value here is by design, not a fitting failure. A proper CAR
 or a BYM2 field with its IID part tamed will narrow it, at the cost of
 an extra estimated parameter. Whenever you report results from an
@@ -699,14 +717,14 @@ in region 7”, which needs that region’s field value added back.
 <code>se.fit = TRUE</code> adds the link-scale standard error and
 credible bounds, drawn from the same grid-marginalised fixed-effect
 covariance the summary uses.</p>
-<div class="sourceCode" id="cb14"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb14-1"><a href="#cb14-1" tabindex="-1"></a>nd <span class="ot">&lt;-</span> <span class="fu">data.frame</span>(<span class="at">x =</span> <span class="fu">seq</span>(<span class="sc">-</span><span class="fl">2.5</span>, <span class="fl">2.5</span>, <span class="at">length.out =</span> <span class="dv">50</span>))</span>
-<span id="cb14-2"><a href="#cb14-2" tabindex="-1"></a>pr <span class="ot">&lt;-</span> <span class="fu">predict</span>(fit, <span class="at">newdata =</span> nd, <span class="at">type =</span> <span class="st">&quot;link&quot;</span>, <span class="at">se.fit =</span> <span class="cn">TRUE</span>)</span>
-<span id="cb14-3"><a href="#cb14-3" tabindex="-1"></a><span class="fu">head</span>(pr, <span class="dv">3</span>)</span></code></pre></div>
+<div class="sourceCode" id="cb15"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb15-1"><a href="#cb15-1" tabindex="-1"></a>nd <span class="ot">&lt;-</span> <span class="fu">data.frame</span>(<span class="at">x =</span> <span class="fu">seq</span>(<span class="sc">-</span><span class="fl">2.5</span>, <span class="fl">2.5</span>, <span class="at">length.out =</span> <span class="dv">50</span>))</span>
+<span id="cb15-2"><a href="#cb15-2" tabindex="-1"></a>pr <span class="ot">&lt;-</span> <span class="fu">predict</span>(fit, <span class="at">newdata =</span> nd, <span class="at">type =</span> <span class="st">&quot;link&quot;</span>, <span class="at">se.fit =</span> <span class="cn">TRUE</span>)</span>
+<span id="cb15-3"><a href="#cb15-3" tabindex="-1"></a><span class="fu">head</span>(pr, <span class="dv">3</span>)</span></code></pre></div>
 <p>Plot the trend on the link scale with its credible band.</p>
-<div class="sourceCode" id="cb15"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb15-1"><a href="#cb15-1" tabindex="-1"></a><span class="fu">plot</span>(nd<span class="sc">$</span>x, pr<span class="sc">$</span>fit, <span class="at">type =</span> <span class="st">&quot;n&quot;</span>, <span class="at">xlab =</span> <span class="st">&quot;x&quot;</span>, <span class="at">ylab =</span> <span class="st">&quot;predicted logit&quot;</span>)</span>
-<span id="cb15-2"><a href="#cb15-2" tabindex="-1"></a><span class="fu">polygon</span>(<span class="fu">c</span>(nd<span class="sc">$</span>x, <span class="fu">rev</span>(nd<span class="sc">$</span>x)), <span class="fu">c</span>(pr<span class="sc">$</span>lower, <span class="fu">rev</span>(pr<span class="sc">$</span>upper)),</span>
-<span id="cb15-3"><a href="#cb15-3" tabindex="-1"></a>        <span class="at">col =</span> <span class="fu">adjustcolor</span>(<span class="st">&quot;steelblue&quot;</span>, <span class="fl">0.25</span>), <span class="at">border =</span> <span class="cn">NA</span>)</span>
-<span id="cb15-4"><a href="#cb15-4" tabindex="-1"></a><span class="fu">lines</span>(nd<span class="sc">$</span>x, pr<span class="sc">$</span>fit, <span class="at">lwd =</span> <span class="dv">2</span>)</span></code></pre></div>
+<div class="sourceCode" id="cb16"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb16-1"><a href="#cb16-1" tabindex="-1"></a><span class="fu">plot</span>(nd<span class="sc">$</span>x, pr<span class="sc">$</span>fit, <span class="at">type =</span> <span class="st">&quot;n&quot;</span>, <span class="at">xlab =</span> <span class="st">&quot;x&quot;</span>, <span class="at">ylab =</span> <span class="st">&quot;predicted logit&quot;</span>)</span>
+<span id="cb16-2"><a href="#cb16-2" tabindex="-1"></a><span class="fu">polygon</span>(<span class="fu">c</span>(nd<span class="sc">$</span>x, <span class="fu">rev</span>(nd<span class="sc">$</span>x)), <span class="fu">c</span>(pr<span class="sc">$</span>lower, <span class="fu">rev</span>(pr<span class="sc">$</span>upper)),</span>
+<span id="cb16-3"><a href="#cb16-3" tabindex="-1"></a>        <span class="at">col =</span> <span class="fu">adjustcolor</span>(<span class="st">&quot;steelblue&quot;</span>, <span class="fl">0.25</span>), <span class="at">border =</span> <span class="cn">NA</span>)</span>
+<span id="cb16-4"><a href="#cb16-4" tabindex="-1"></a><span class="fu">lines</span>(nd<span class="sc">$</span>x, pr<span class="sc">$</span>fit, <span class="at">lwd =</span> <span class="dv">2</span>)</span></code></pre></div>
 <p>For a probability instead of a logit, pass
 <code>type = &quot;response&quot;</code>; the prediction and its bounds then pass
 through the inverse-logit and stay inside <span class="math inline">\([0, 1]\)</span>. Region-specific predictions come
@@ -735,10 +753,10 @@ taking logs again. <code>logLik()</code> returns that sum. The
 non-spatial Laplace fit has no grid, and its scalar log marginal
 likelihood is already the evidence of a model with nothing left to
 integrate.</p>
-<div class="sourceCode" id="cb16"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb16-1"><a href="#cb16-1" tabindex="-1"></a>m0 <span class="ot">&lt;-</span> <span class="fu">tulpa</span>(y <span class="sc">~</span> x, <span class="at">data =</span> ds, <span class="at">family =</span> <span class="st">&quot;binomial&quot;</span>, <span class="at">mode =</span> <span class="st">&quot;laplace&quot;</span>)</span>
-<span id="cb16-2"><a href="#cb16-2" tabindex="-1"></a>cmp <span class="ot">&lt;-</span> <span class="fu">compare_models</span>(<span class="at">nonspatial =</span> m0, <span class="at">spatial =</span> fit, <span class="at">criterion =</span> <span class="st">&quot;loglik&quot;</span>)</span>
-<span id="cb16-3"><a href="#cb16-3" tabindex="-1"></a>cmp</span></code></pre></div>
-<div class="sourceCode" id="cb17"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb17-1"><a href="#cb17-1" tabindex="-1"></a><span class="fu">diff</span>(cmp<span class="sc">$</span>logLik)</span></code></pre></div>
+<div class="sourceCode" id="cb17"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb17-1"><a href="#cb17-1" tabindex="-1"></a>m0 <span class="ot">&lt;-</span> <span class="fu">tulpa</span>(y <span class="sc">~</span> x, <span class="at">data =</span> ds, <span class="at">family =</span> <span class="st">&quot;binomial&quot;</span>, <span class="at">mode =</span> <span class="st">&quot;laplace&quot;</span>)</span>
+<span id="cb17-2"><a href="#cb17-2" tabindex="-1"></a>cmp <span class="ot">&lt;-</span> <span class="fu">compare_models</span>(<span class="at">nonspatial =</span> m0, <span class="at">spatial =</span> fit, <span class="at">criterion =</span> <span class="st">&quot;loglik&quot;</span>)</span>
+<span id="cb17-3"><a href="#cb17-3" tabindex="-1"></a>cmp</span></code></pre></div>
+<div class="sourceCode" id="cb18"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb18-1"><a href="#cb18-1" tabindex="-1"></a><span class="fu">diff</span>(cmp<span class="sc">$</span>logLik)</span></code></pre></div>
 <p>The spatial fit carries the higher evidence by a wide margin,
 matching how the data were built. The difference is the log Bayes factor
 for the field, and a value this large is decisive: the data are vastly
@@ -823,8 +841,8 @@ moderate ranges.</li>
 through the SPDE representation on a mesh, routed to the dedicated
 <code>spde</code> backend.</li>
 </ul>
-<div class="sourceCode" id="cb18"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb18-1"><a href="#cb18-1" tabindex="-1"></a>gp_spec <span class="ot">&lt;-</span> <span class="fu">spatial_gp</span>(<span class="sc">~</span> lon <span class="sc">+</span> lat)</span>
-<span id="cb18-2"><a href="#cb18-2" tabindex="-1"></a>gp_spec<span class="sc">$</span>type</span></code></pre></div>
+<div class="sourceCode" id="cb19"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb19-1"><a href="#cb19-1" tabindex="-1"></a>gp_spec <span class="ot">&lt;-</span> <span class="fu">spatial_gp</span>(<span class="sc">~</span> lon <span class="sc">+</span> lat)</span>
+<span id="cb19-2"><a href="#cb19-2" tabindex="-1"></a>gp_spec<span class="sc">$</span>type</span></code></pre></div>
 <p>The call shape mirrors the areal path: pass the spec through
 <code>spatial=</code>, choose a mode, read the same accessors off the
 result. What changes is the smoothing geometry. An areal field penalises
@@ -841,34 +859,35 @@ the response, a design matrix, and the <code>spatial_spde</code> spec
 directly, builds the Matern precision on the mesh, and solves the field
 by sparse Laplace. Simulate a smooth Poisson surface on scattered
 coordinates and fit it with the range and marginal SD held fixed:</p>
-<div class="sourceCode" id="cb19"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb19-1"><a href="#cb19-1" tabindex="-1"></a><span class="fu">set.seed</span>(<span class="dv">20260531</span>)</span>
-<span id="cb19-2"><a href="#cb19-2" tabindex="-1"></a>n      <span class="ot">&lt;-</span> <span class="dv">300</span></span>
-<span id="cb19-3"><a href="#cb19-3" tabindex="-1"></a>coords <span class="ot">&lt;-</span> <span class="fu">data.frame</span>(<span class="at">lon =</span> <span class="fu">runif</span>(n), <span class="at">lat =</span> <span class="fu">runif</span>(n))</span>
-<span id="cb19-4"><a href="#cb19-4" tabindex="-1"></a>field  <span class="ot">&lt;-</span> <span class="fl">1.4</span> <span class="sc">*</span> (<span class="fu">sin</span>(<span class="fl">2.5</span> <span class="sc">*</span> coords<span class="sc">$</span>lon) <span class="sc">+</span> <span class="fu">cos</span>(<span class="fl">2.5</span> <span class="sc">*</span> coords<span class="sc">$</span>lat))</span>
-<span id="cb19-5"><a href="#cb19-5" tabindex="-1"></a>field  <span class="ot">&lt;-</span> field <span class="sc">-</span> <span class="fu">mean</span>(field)</span>
-<span id="cb19-6"><a href="#cb19-6" tabindex="-1"></a>xcov   <span class="ot">&lt;-</span> <span class="fu">rnorm</span>(n)</span>
-<span id="cb19-7"><a href="#cb19-7" tabindex="-1"></a>y      <span class="ot">&lt;-</span> <span class="fu">rpois</span>(n, <span class="fu">exp</span>(<span class="fl">1.0</span> <span class="sc">+</span> <span class="fl">0.5</span> <span class="sc">*</span> xcov <span class="sc">+</span> field))</span>
-<span id="cb19-8"><a href="#cb19-8" tabindex="-1"></a></span>
-<span id="cb19-9"><a href="#cb19-9" tabindex="-1"></a>spde <span class="ot">&lt;-</span> <span class="fu">spatial_spde</span>(<span class="sc">~</span> lon <span class="sc">+</span> lat, <span class="at">data =</span> coords, <span class="at">max_edge =</span> <span class="fu">c</span>(<span class="fl">0.2</span>, <span class="fl">0.5</span>))</span>
-<span id="cb19-10"><a href="#cb19-10" tabindex="-1"></a>fit  <span class="ot">&lt;-</span> <span class="fu">fit_spde</span>(<span class="at">y =</span> y, <span class="at">X =</span> <span class="fu">model.matrix</span>(<span class="sc">~</span> xcov), <span class="at">spatial =</span> spde,</span>
-<span id="cb19-11"><a href="#cb19-11" tabindex="-1"></a>                 <span class="at">family =</span> <span class="st">&quot;poisson&quot;</span>, <span class="at">range =</span> <span class="fl">0.4</span>, <span class="at">sigma =</span> <span class="fl">0.9</span>)</span>
-<span id="cb19-12"><a href="#cb19-12" tabindex="-1"></a><span class="fu">round</span>(fit<span class="sc">$</span>beta, <span class="dv">3</span>)</span></code></pre></div>
+<div class="sourceCode" id="cb20"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb20-1"><a href="#cb20-1" tabindex="-1"></a><span class="fu">set.seed</span>(<span class="dv">20260531</span>)</span>
+<span id="cb20-2"><a href="#cb20-2" tabindex="-1"></a>n      <span class="ot">&lt;-</span> <span class="dv">300</span></span>
+<span id="cb20-3"><a href="#cb20-3" tabindex="-1"></a>coords <span class="ot">&lt;-</span> <span class="fu">data.frame</span>(<span class="at">lon =</span> <span class="fu">runif</span>(n), <span class="at">lat =</span> <span class="fu">runif</span>(n))</span>
+<span id="cb20-4"><a href="#cb20-4" tabindex="-1"></a>field  <span class="ot">&lt;-</span> <span class="fl">1.4</span> <span class="sc">*</span> (<span class="fu">sin</span>(<span class="fl">2.5</span> <span class="sc">*</span> coords<span class="sc">$</span>lon) <span class="sc">+</span> <span class="fu">cos</span>(<span class="fl">2.5</span> <span class="sc">*</span> coords<span class="sc">$</span>lat))</span>
+<span id="cb20-5"><a href="#cb20-5" tabindex="-1"></a>field  <span class="ot">&lt;-</span> field <span class="sc">-</span> <span class="fu">mean</span>(field)</span>
+<span id="cb20-6"><a href="#cb20-6" tabindex="-1"></a>xcov   <span class="ot">&lt;-</span> <span class="fu">rnorm</span>(n)</span>
+<span id="cb20-7"><a href="#cb20-7" tabindex="-1"></a>y      <span class="ot">&lt;-</span> <span class="fu">rpois</span>(n, <span class="fu">exp</span>(<span class="fl">1.0</span> <span class="sc">+</span> <span class="fl">0.5</span> <span class="sc">*</span> xcov <span class="sc">+</span> field))</span>
+<span id="cb20-8"><a href="#cb20-8" tabindex="-1"></a></span>
+<span id="cb20-9"><a href="#cb20-9" tabindex="-1"></a>spde <span class="ot">&lt;-</span> <span class="fu">spatial_spde</span>(<span class="sc">~</span> lon <span class="sc">+</span> lat, <span class="at">data =</span> coords, <span class="at">max_edge =</span> <span class="fu">c</span>(<span class="fl">0.2</span>, <span class="fl">0.5</span>))</span>
+<span id="cb20-10"><a href="#cb20-10" tabindex="-1"></a>fit  <span class="ot">&lt;-</span> <span class="fu">fit_spde</span>(<span class="at">y =</span> y, <span class="at">X =</span> <span class="fu">model.matrix</span>(<span class="sc">~</span> xcov), <span class="at">spatial =</span> spde,</span>
+<span id="cb20-11"><a href="#cb20-11" tabindex="-1"></a>                 <span class="at">family =</span> <span class="st">&quot;poisson&quot;</span>, <span class="at">range =</span> <span class="fl">0.4</span>, <span class="at">sigma =</span> <span class="fl">0.9</span>)</span>
+<span id="cb20-12"><a href="#cb20-12" tabindex="-1"></a><span class="fu">round</span>(<span class="fu">coef</span>(fit), <span class="dv">3</span>)</span></code></pre></div>
 <p>The fixed-effect estimates land on the generating intercept and
-slope; the mesh-node field effects sit in
-<code>fit$spatial_effects</code>, ready to project onto a prediction
-grid. Leaving <code>range</code> and <code>sigma</code> at their default
+slope; <code>field_effects(fit)</code> returns the field at each mesh
+node, ready to project onto a prediction grid. Leaving
+<code>range</code> and <code>sigma</code> at their default
 <code>NULL</code> switches <code>fit_spde()</code> to nested Laplace
-over the two hyperparameters and adds an outer Pareto-k-hat to the
-result (<code>fit$pareto_k</code>), the same accuracy diagnostic the
-areal nested integration reports.</p>
+over the two hyperparameters and adds an outer Pareto-k-hat, which
+<code>diagnostics()</code> reports as it does for the areal nested
+integration.</p>
 </div>
 <div id="see-also" class="section level2">
 <h2>See also</h2>
 <ul>
-<li><code>vignettes/quickstart.Rmd</code> for the engine basics:
-families, tiers, random effects, prediction.</li>
-<li><code>vignettes/tgmrf.Rmd</code> for user-defined GMRF latent
-blocks, the general form behind the built-in fields.</li>
+<li><code>vignette(&quot;quickstart&quot;, package = &quot;tulpa&quot;)</code> for the
+engine basics: families, tiers, random effects, prediction.</li>
+<li>The <a href="https://gillescolling.com/tulpa/articles/tgmrf.html">custom-process
+article</a> for user-defined GMRF latent blocks, the general form behind
+the built-in fields.</li>
 <li><code>?spatial_car</code>, <code>?spatial_bym2</code>,
 <code>?spatial_gp</code> for the spec constructors and their
 references.</li>

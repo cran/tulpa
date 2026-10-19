@@ -1,9 +1,54 @@
+
+test_that("the borrowed default is registered, not exported", {
+  # An exported pp_check.default would win dispatch inside bayesplot's own
+  # generic too, and a forwarding one would then call itself forever.
+  skip_if_not_installed("bayesplot")
+  tbl <- get(".__S3MethodsTable__.", envir = asNamespace("tulpa"))
+  expect_true(exists("pp_check.default", envir = tbl, inherits = FALSE))
+  expect_false(exists("pp_check.default", envir = asNamespace("tulpa"),
+                      inherits = FALSE))
+  expect_false("pp_check.default" %in% getNamespaceExports("tulpa"))
+})
+
+skip_on_cran_budget()
+
+test_that("bayesplot's own pp_check still reaches its default method", {
+  skip_on_cran_budget()
+  skip_if_not_installed("bayesplot")
+  # tulpa's generic masks bayesplot's on attach, and a registered S3 method is
+  # not an exported object, so without the borrowed default every
+  # bayesplot-style pp_check(y, yrep, fun) call in the session fails with "no
+  # applicable method ... for class numeric".
+  set.seed(1)
+  y <- rnorm(30)
+  yrep <- matrix(rnorm(150), 5, 30)
+  expect_no_error(bayesplot::pp_check(y, yrep, bayesplot::ppc_dens_overlay))
+  # And through the masking generic, which is what a user's session sees.
+  expect_no_error(pp_check(y, yrep, bayesplot::ppc_dens_overlay))
+})
+
+test_that("rstantools' generics keep their default behaviour under tulpa", {
+  skip_on_cran_budget()
+  skip_if_not_installed("rstantools")
+  tbl <- get(".__S3MethodsTable__.", envir = asNamespace("tulpa"))
+  for (gen in c("bayes_R2", "posterior_predict")) {
+    owner <- get(".__S3MethodsTable__.", envir = asNamespace("rstantools"))
+    if (!exists(paste0(gen, ".default"), envir = owner, inherits = FALSE)) next
+    expect_true(exists(paste0(gen, ".default"), envir = tbl, inherits = FALSE),
+                info = gen)
+    expect_identical(get(paste0(gen, ".default"), envir = tbl),
+                     get(paste0(gen, ".default"), envir = owner), info = gen)
+  }
+})
+
+skip_on_cran()
 # tulpa declares generics other packages own, so that they work with nothing
 # else attached. Registering the tulpa_fit methods on the other packages'
 # generics as well is what keeps dispatch from depending on attach order in
 # either direction.
 
 test_that("every borrowed generic carries a registered tulpa_fit method", {
+  skip_on_cran()
   borrowed <- list(
     c("lme4", "fixef"), c("lme4", "ranef"), c("lme4", "VarCorr"),
     c("nlme", "ranef"), c("nlme", "VarCorr"),
@@ -21,44 +66,6 @@ test_that("every borrowed generic carries a registered tulpa_fit method", {
     tbl <- get(".__S3MethodsTable__.", envir = ns)
     expect_true(exists(paste0(gen, ".tulpa_fit"), envir = tbl, inherits = FALSE),
                 info = paste0(pkg, "::", gen))
-  }
-})
-
-test_that("bayesplot's own pp_check still reaches its default method", {
-  skip_if_not_installed("bayesplot")
-  # tulpa's generic masks bayesplot's on attach, and a registered S3 method is
-  # not an exported object, so without the borrowed default every
-  # bayesplot-style pp_check(y, yrep, fun) call in the session fails with "no
-  # applicable method ... for class numeric".
-  set.seed(1)
-  y <- rnorm(30)
-  yrep <- matrix(rnorm(150), 5, 30)
-  expect_no_error(bayesplot::pp_check(y, yrep, bayesplot::ppc_dens_overlay))
-  # And through the masking generic, which is what a user's session sees.
-  expect_no_error(pp_check(y, yrep, bayesplot::ppc_dens_overlay))
-})
-
-test_that("the borrowed default is registered, not exported", {
-  # An exported pp_check.default would win dispatch inside bayesplot's own
-  # generic too, and a forwarding one would then call itself forever.
-  skip_if_not_installed("bayesplot")
-  tbl <- get(".__S3MethodsTable__.", envir = asNamespace("tulpa"))
-  expect_true(exists("pp_check.default", envir = tbl, inherits = FALSE))
-  expect_false(exists("pp_check.default", envir = asNamespace("tulpa"),
-                      inherits = FALSE))
-  expect_false("pp_check.default" %in% getNamespaceExports("tulpa"))
-})
-
-test_that("rstantools' generics keep their default behaviour under tulpa", {
-  skip_if_not_installed("rstantools")
-  tbl <- get(".__S3MethodsTable__.", envir = asNamespace("tulpa"))
-  for (gen in c("bayes_R2", "posterior_predict")) {
-    owner <- get(".__S3MethodsTable__.", envir = asNamespace("rstantools"))
-    if (!exists(paste0(gen, ".default"), envir = owner, inherits = FALSE)) next
-    expect_true(exists(paste0(gen, ".default"), envir = tbl, inherits = FALSE),
-                info = gen)
-    expect_identical(get(paste0(gen, ".default"), envir = tbl),
-                     get(paste0(gen, ".default"), envir = owner), info = gen)
   }
 })
 

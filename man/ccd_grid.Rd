@@ -2,7 +2,7 @@
 % Please edit documentation in R/ccd_grid.R
 \name{ccd_grid}
 \alias{ccd_grid}
-\title{Central Composite Design (CCD) grid for nested-Laplace integration}
+\title{Central composite design (CCD) grid for nested-Laplace integration}
 \usage{
 ccd_grid(k, f_0 = sqrt(k))
 }
@@ -49,6 +49,11 @@ while preserving Resolution V.
 Used by \code{\link[=tulpa_nested_laplace]{tulpa_nested_laplace()}} for higher-dimensional hyperparameter
 blocks. The standardised z-coordinates are mapped to physical
 hyperparameters \eqn{\theta} via \code{\link[=ccd_to_theta]{ccd_to_theta()}}.
+}
+\examples{
+g <- ccd_grid(3)
+g$n_points
+table(g$kind)
 }
 \seealso{
 \code{\link[=ccd_to_theta]{ccd_to_theta()}} to map z-coordinates to physical theta.

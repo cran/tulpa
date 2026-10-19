@@ -1,3 +1,26 @@
+
+test_that("the compiled entry refuses an out-of-domain request", {
+  expect_error(tulpa:::.spde_rational_roots(0L, 1.25, 0.1), "order must be")
+  expect_error(tulpa:::.spde_rational_roots(2L, 1.25, 0), "spectrum_ratio")
+  expect_error(tulpa:::.spde_rational_roots(2L, 1.25, 1), "spectrum_ratio")
+})
+
+skip_on_cran_budget()
+
+test_that("the compiled search equioscillates to its tolerance", {
+  skip_on_cran_budget()
+  # `converged` means the local error maxima agree to `tol` -- the
+  # equioscillation property that defines the minimax rational. A search that
+  # silently ran out of iterations would return a worse approximation with no
+  # signal, so the flag is asserted rather than assumed.
+  for (s in c(0.4, 0.05)) {
+    rr <- tulpa:::.spde_rational_roots(2L, 1.25, s)
+    expect_true(rr$converged, info = sprintf("spectrum_ratio = %g", s))
+    expect_lte(rr$deviation, 1e-7)
+  }
+})
+
+skip_on_cran()
 # The compiled BRASIL search (src/brasil.h) against the R reference
 # implementation it was ported from (.spde_rational_roots_r, R/brasil.R).
 #
@@ -13,40 +36,41 @@
 # invariances the consumers already have (the barycentric weights up to scale,
 # the roots up to order), so the comparison sorts the roots.
 
+# The comparison runs over a pairwise covering design of (order, beta,
+# spectrum_ratio): every order meets every beta, and the ratio cycles so that
+# every (order, ratio) and every (beta, ratio) pair also occurs. Across the
+# full 4 x 5 x 4 product the search takes the same branches the design
+# reaches: phase 1 relocates an interior node (not an end node) only at ratios
+# <= 0.1, order 4 at ratio 0.4 is the one setting where the search runs to its
+# iteration cap without converging, so the port is held to the oracle through
+# all 1100 iterations there, and every cell returns as many roots as its
+# order. The R reference dominates the cost, which grows with the product.
 test_that("the compiled rational roots match the R oracle", {
   skip_on_cran()
-  for (order in 1:4) {
-    for (beta in c(0.375, 0.625, 0.875, 1.25, 1.75)) {
-      for (s in c(0.4, 0.1, 0.01, 1e-3)) {
-        cpp <- tulpa:::.spde_rational_roots(order, beta, s)
-        ref <- tulpa:::.spde_rational_roots_r(order, beta, s)
-        info <- sprintf("order = %d, beta = %g, spectrum_ratio = %g",
-                        order, beta, s)
-        expect_equal(length(cpp$rb), length(ref$rb), info = info)
-        expect_equal(length(cpp$rc), length(ref$rc), info = info)
-        expect_equal(sort(cpp$rb), sort(ref$rb), tolerance = 1e-6, info = info)
-        expect_equal(sort(cpp$rc), sort(ref$rc), tolerance = 1e-6, info = info)
-        expect_equal(cpp$scale,    ref$scale,    tolerance = 1e-6, info = info)
-        expect_equal(cpp$m_beta,   ref$m_beta,                     info = info)
-        expect_equal(cpp$beta_rem, ref$beta_rem, tolerance = 1e-12, info = info)
-        # The minimax error is the quantity the approximation is chosen to
-        # minimise, so agreeing on it is the statement that the two searches
-        # landed on the same rational, not merely on nearby roots.
-        expect_equal(cpp$error, ref$error, tolerance = 1e-6, info = info)
-      }
-    }
-  }
-})
+  betas  <- c(0.375, 0.625, 0.875, 1.25, 1.75)
+  ratios <- c(0.4, 0.1, 0.01, 1e-3)
+  design <- expand.grid(order = 1:4, b = seq_along(betas))
+  design$beta <- betas[design$b]
+  design$s    <- ratios[(design$order + design$b) %% 4L + 1L]
+  expect_true(any(design$order == 4L & design$s == 0.4))
 
-test_that("the compiled search equioscillates to its tolerance", {
-  # `converged` means the local error maxima agree to `tol` -- the
-  # equioscillation property that defines the minimax rational. A search that
-  # silently ran out of iterations would return a worse approximation with no
-  # signal, so the flag is asserted rather than assumed.
-  for (s in c(0.4, 0.05)) {
-    rr <- tulpa:::.spde_rational_roots(2L, 1.25, s)
-    expect_true(rr$converged, info = sprintf("spectrum_ratio = %g", s))
-    expect_lte(rr$deviation, 1e-7)
+  for (i in seq_len(nrow(design))) {
+    order <- design$order[i]; beta <- design$beta[i]; s <- design$s[i]
+    cpp <- tulpa:::.spde_rational_roots(order, beta, s)
+    ref <- tulpa:::.spde_rational_roots_r(order, beta, s)
+    info <- sprintf("order = %d, beta = %g, spectrum_ratio = %g",
+                    order, beta, s)
+    expect_equal(length(cpp$rb), length(ref$rb), info = info)
+    expect_equal(length(cpp$rc), length(ref$rc), info = info)
+    expect_equal(sort(cpp$rb), sort(ref$rb), tolerance = 1e-6, info = info)
+    expect_equal(sort(cpp$rc), sort(ref$rc), tolerance = 1e-6, info = info)
+    expect_equal(cpp$scale,    ref$scale,    tolerance = 1e-6, info = info)
+    expect_equal(cpp$m_beta,   ref$m_beta,                     info = info)
+    expect_equal(cpp$beta_rem, ref$beta_rem, tolerance = 1e-12, info = info)
+    # The minimax error is the quantity the approximation is chosen to
+    # minimise, so agreeing on it is the statement that the two searches
+    # landed on the same rational, not merely on nearby roots.
+    expect_equal(cpp$error, ref$error, tolerance = 1e-6, info = info)
   }
 })
 
@@ -63,10 +87,4 @@ test_that("the approximation the port defines is the R oracle's function", {
     # ... and both approximate the function they were asked for.
     expect_lt(max(abs(as.numeric(cpp) - x^(-0.75))) / max(x^(-0.75)), 0.05)
   }
-})
-
-test_that("the compiled entry refuses an out-of-domain request", {
-  expect_error(tulpa:::.spde_rational_roots(0L, 1.25, 0.1), "order must be")
-  expect_error(tulpa:::.spde_rational_roots(2L, 1.25, 0), "spectrum_ratio")
-  expect_error(tulpa:::.spde_rational_roots(2L, 1.25, 1), "spectrum_ratio")
 })

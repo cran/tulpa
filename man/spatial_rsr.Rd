@@ -2,22 +2,29 @@
 % Please edit documentation in R/spatial_rsr_spde.R
 \name{spatial_rsr}
 \alias{spatial_rsr}
-\title{Restricted Spatial Regression (RSR)}
+\alias{print.tulpa_rsr}
+\title{Restricted spatial regression (RSR)}
 \usage{
 spatial_rsr(spatial, restrict_to)
+
+\method{print}{tulpa_rsr}(x, ...)
 }
 \arguments{
 \item{spatial}{An areal specification -- \code{spatial_car()}, \code{spatial_icar()},
 \code{spatial_bym2()} or a proper-CAR spec -- or an NNGP one, \code{spatial_gp()}.
-The projection is applied by the binomial Polya-Gamma Gibbs sampler, which
-carries the field's own prior precision as an adjacency or as Vecchia
-factors; an HSGP basis (\code{spatial_gp(approx = "hsgp")}) and an SPDE mesh
+The projection is applied by the binomial Polya-Gamma Gibbs sampler and
+by nested Laplace, both of which carry the field's own prior precision as
+an adjacency or as Vecchia factors; an HSGP basis (\code{spatial_gp(approx = "hsgp")}) and an SPDE mesh
 (\code{spatial_spde()}) are neither, and are refused at construction rather
 than accepted and then unfittable.}
 
 \item{restrict_to}{Formula specifying which covariates to orthogonalize
 against (e.g., \code{~ depth + temp}). The spatial effect will be constrained
 to be orthogonal to the column space of these covariates.}
+
+\item{x}{A \code{tulpa_rsr} specification.}
+
+\item{...}{Passed to the print method of the restricted field.}
 }
 \value{
 A modified spatial specification with RSR enabled
@@ -77,8 +84,14 @@ a posterior-predictive check (Hanks et al., 2015) where that is in doubt.
 \item Interval coverage matters more than the point estimate
 }
 
-RSR fits are binomial, through \code{mode = "gibbs"} (which \code{mode = "auto"}
-selects for it).
+A restricted field is fitted by nested Laplace (\code{mode = "structured"} or
+\code{"nested_laplace"}, under any family that path takes, and alongside a
+random-effect term, a temporal field, smoothers or \code{latent()} blocks), where
+the field reaches the linear predictor through the projector \verb{S P_perp}
+(\code{S} the observation-to-unit or observation-to-location incidence), or, for
+a binomial response, by the Polya-Gamma Gibbs sampler (\code{mode = "gibbs"}).
+\code{mode = "auto"} selects Gibbs for a binomial response and nested Laplace
+otherwise. Areal and NNGP fields take both routes.
 }
 \examples{
 # Create RSR spatial structure on an areal field

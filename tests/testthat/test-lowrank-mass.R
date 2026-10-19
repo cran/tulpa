@@ -68,7 +68,10 @@ lr_cases <- function() {
   )
 }
 
+skip_on_cran_budget()
+
 test_that("Woodbury reproduces the dense inverse on every group layout", {
+  skip_on_cran_budget()
   for (nm in names(lr_cases())) {
     cs <- lr_cases()[[nm]]
     n <- length(cs$inv_mass_diag)
@@ -87,6 +90,7 @@ test_that("Woodbury reproduces the dense inverse on every group layout", {
 })
 
 test_that("the kinetic energy is the same quadratic form", {
+  skip_on_cran_budget()
   for (nm in names(lr_cases())) {
     cs <- lr_cases()[[nm]]
     n <- length(cs$inv_mass_diag)
@@ -102,6 +106,7 @@ test_that("the kinetic energy is the same quadratic form", {
 })
 
 test_that("the fused drift and inv_mass_times_p agree", {
+  skip_on_cran_budget()
   # The zero-allocation NUTS loop applies the metric through apply_drift and
   # the rest of the sampler through inv_mass_times_p. Two application sites
   # that can drift apart is what this pins.
@@ -119,6 +124,7 @@ test_that("the fused drift and inv_mass_times_p agree", {
 })
 
 test_that("a rank-0 or malformed term is refused rather than approximated", {
+  skip_on_cran_budget()
   cs <- lr_cases()$irregular
   n <- length(cs$inv_mass_diag)
   p <- rep(1, n)
@@ -140,29 +146,8 @@ test_that("a rank-0 or malformed term is refused rather than approximated", {
     cs$lambda, p)$ok)
 })
 
-test_that("the momentum draw has covariance M", {
-  # p = D^(1/2) z1 + U Lambda^(1/2) z2 with z1, z2 independent is N(0, M)
-  # exactly. Whitening by chol(M) is scale-free, so the Type-IV lambdas -- four
-  # orders of magnitude above the diagonal -- are scored on the same footing as
-  # the diagonal directions rather than swamping them.
-  cs <- lr_cases()$margins
-  n <- length(cs$inv_mass_diag)
-  M <- lr_dense_mass(cs$inv_mass_diag, cs$start, cs$group_ptr,
-                     cs$group_idx, cs$lambda)
-  n_draws <- 200000L
-  draws <- cpp_test_lowrank_mass_momentum(
-    cs$inv_mass_diag, cs$start, cs$group_ptr, cs$group_idx, cs$lambda,
-    n_draws, seed = 4)
-  Z <- draws %*% solve(chol(M))          # rows ~ N(0, I) if the draw is right
-  emp <- crossprod(Z) / n_draws
-  # A covariance entry at this draw count has Monte Carlo sd ~ 3e-3, so 0.03 is
-  # roughly ten of them: a construction error shows as a whole entry, not as a
-  # third decimal.
-  expect_lt(max(abs(emp - diag(ncol(Z)))), 0.03)
-  expect_lt(max(abs(colMeans(draws) / sqrt(diag(M)))), 0.02)
-})
-
 test_that("the block is the only part of the metric the term touches", {
+  skip_on_cran_budget()
   cs <- lr_cases()$irregular
   n <- length(cs$inv_mass_diag)
   set.seed(5)
@@ -175,6 +160,7 @@ test_that("the block is the only part of the metric the term touches", {
 })
 
 test_that("make_margin_mass_term lays down the row and column sums", {
+  skip_on_cran_budget()
   S <- 3L; T <- 4L
   lam_row <- 1 / (0.001 * T)^2
   lam_col <- 1 / (0.001 * S)^2
@@ -205,4 +191,29 @@ test_that("make_margin_mass_term lays down the row and column sums", {
   short <- cpp_test_margin_mass_term(S, T, lam_row, lam_col, rep(0.5, S * T - 1))
   expect_false(short$ok)
   expect_identical(short$rank, 0L)
+})
+
+skip_on_cran()
+
+test_that("the momentum draw has covariance M", {
+  skip_on_cran()
+  # p = D^(1/2) z1 + U Lambda^(1/2) z2 with z1, z2 independent is N(0, M)
+  # exactly. Whitening by chol(M) is scale-free, so the Type-IV lambdas -- four
+  # orders of magnitude above the diagonal -- are scored on the same footing as
+  # the diagonal directions rather than swamping them.
+  cs <- lr_cases()$margins
+  n <- length(cs$inv_mass_diag)
+  M <- lr_dense_mass(cs$inv_mass_diag, cs$start, cs$group_ptr,
+                     cs$group_idx, cs$lambda)
+  n_draws <- 200000L
+  draws <- cpp_test_lowrank_mass_momentum(
+    cs$inv_mass_diag, cs$start, cs$group_ptr, cs$group_idx, cs$lambda,
+    n_draws, seed = 4)
+  Z <- draws %*% solve(chol(M))          # rows ~ N(0, I) if the draw is right
+  emp <- crossprod(Z) / n_draws
+  # A covariance entry at this draw count has Monte Carlo sd ~ 3e-3, so 0.03 is
+  # roughly ten of them: a construction error shows as a whole entry, not as a
+  # third decimal.
+  expect_lt(max(abs(emp - diag(ncol(Z)))), 0.03)
+  expect_lt(max(abs(colMeans(draws) / sqrt(diag(M)))), 0.02)
 })

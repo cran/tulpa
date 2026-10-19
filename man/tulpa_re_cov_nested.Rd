@@ -18,6 +18,7 @@ tulpa_re_cov_nested(
   log_prior_theta = NULL,
   beta_prior = NULL,
   offset = NULL,
+  weights = NULL,
   n_quad = 1L,
   X_zi = NULL,
   zi_prior_sd = 2.5,
@@ -69,6 +70,12 @@ every inner \code{\link[=tulpa_laplace]{tulpa_laplace()}} solve (\code{list(mean
 \item{offset}{Optional observation-level offset on the linear predictor
 (length \code{length(y)}), e.g. \code{log(exposure)} for a rate model. Not supported
 with \code{n_quad > 1}, which errors rather than dropping it.}
+
+\item{weights}{Optional non-negative observation weights (length
+\code{length(y)}), each scaling its row's log-likelihood in every inner
+\code{\link[=tulpa_laplace]{tulpa_laplace()}} solve, so the covariance is integrated under the
+weighted likelihood. Not supported with \code{n_quad > 1}, which errors rather
+than dropping them.}
 
 \item{n_quad}{Quadrature order for the inner marginal. \code{1} (default) uses the
 joint-field Laplace inner solve (\code{\link[=tulpa_laplace]{tulpa_laplace()}}). \verb{> 1} refines the inner
@@ -124,6 +131,14 @@ the reported k-hat is 0.3 to 0.8.
 the fraction that default budget implies, so raising it supplies more
 tail ratios for the SAME estimand rather than moving the fit to a
 deeper quantile of the weight distribution (gcol33/tulpa#631).
+Each draw is one inner Laplace solve, so this sets the diagnostic's
+cost; the draws are solved in one compiled batch, each started from
+the mode at the proposal centre.
+\item \code{k_threads}: thread width for those draws (\code{NULL}, the default,
+follows \code{n_threads}; \code{"auto"} takes the physical performance cores; an
+integer sets it, \code{1L} forcing serial). Each draw is solved
+single-threaded and from the same start, so the k-hat does not depend
+on the width.
 \item \code{k_tail_points}: expert override for that tail size, in upper-tail
 order statistics. Silently capped at 20\% of the draws, beyond which
 body ratios enter the tail and bias the shape.
@@ -248,7 +263,12 @@ weakly-informative PC + LKJ hyperprior, built per block by
 via \code{prior_sigma}, LKJ prior on each correlated block's correlation matrix via
 \code{eta}), expressed in the same parameterization with the exact
 change-of-variables Jacobian. \code{hyperprior = "flat"} makes it the zero
-function, flat in log(theta). Supply a custom \code{log_prior_theta}
+function, flat in log(theta). The likelihood it multiplies is the inner
+Laplace marginal, which integrates the fixed effects out together with the
+random effects rather than profiling them, so under \code{"flat"} the node centre
+\code{theta_hat} is a restricted (REML-type) estimate -- REML for a gaussian
+response, agreeing with \code{glmmTMB(..., REML = TRUE)} rather than with the ML
+fit of \code{lme4::glmer()} otherwise (see \code{\link[=tulpa_eb]{tulpa_eb()}}). Supply a custom \code{log_prior_theta}
 function to override either default (then \code{prior_sigma} / \code{eta} /
 \code{hyperprior} are ignored); it must act on the full stacked parameter vector.
 \code{\link[=tulpa_eb]{tulpa_eb()}} shares this same objective and the same default, so

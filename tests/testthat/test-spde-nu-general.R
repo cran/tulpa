@@ -47,9 +47,25 @@
   Q
 }
 
+test_that("the hyper prior is flat when either hyper slot is absent", {
+  # compute_spde_hyper_prior reads params[log_tau_spde_idx] after checking
+  # log_kappa_spde_idx, so a layout carrying one slot and not the other used to
+  # index at -1. Both guards are in place; with joint_hypers off the layout
+  # reserves neither and the prior is flat.
+  expect_equal(
+    tulpa:::cpp_spde_hyper_prior_probe(
+      log_kappa = 0.3, log_tau = -0.2, nu = 2,
+      prior_range_0 = 0.2, prior_range_alpha = 0.05,
+      prior_sigma_0 = 1.0, prior_sigma_alpha = -1.0
+    )$prior_val, 0.0, tolerance = 1e-12)
+})
+
+skip_on_cran_budget()
+
 # --- #281: nu <= 0 is not a model -------------------------------------------
 
 test_that("nu <= 0 is refused with the reason (gcol33/tulpa#281)", {
+  skip_on_cran_budget()
   coords <- cbind(runif(20), runif(20))
   expect_error(spatial_spde(coords, nu = 0), "degenerate at nu = 0")
   expect_error(spatial_spde(coords, nu = -1), "must be > 0")
@@ -59,26 +75,8 @@ test_that("nu <= 0 is refused with the reason (gcol33/tulpa#281)", {
   expect_match(err, "tau")
 })
 
-# --- #279: nu enters both kappa and tau --------------------------------------
-
-test_that("the C++ (range, sigma) -> (kappa, tau) map matches the R one at every nu", {
-  spec <- .nu_fixture()
-  for (nu in c(0.5, 1, 1.5, 2, 3)) {
-    for (range in c(0.2, 0.8)) for (sigma in c(0.4, 1.7)) {
-      alpha <- max(1L, as.integer(round(nu)) + 1L)
-      res <- cpp_test_spde_assemble(spec$C0_diag, spec$G1_x, spec$G1_i, spec$G1_p,
-                                    range = range, sigma = sigma, nu = nu,
-                                    alpha = alpha)
-      kt <- tulpa:::.spde_kappa_tau(range, sigma, nu)
-      expect_equal(res$kappa, kt$kappa, tolerance = 1e-14,
-                   info = sprintf("nu=%g range=%g", nu, range))
-      expect_equal(res$tau, kt$tau_spde, tolerance = 1e-14,
-                   info = sprintf("nu=%g sigma=%g", nu, sigma))
-    }
-  }
-})
-
 test_that("nu = 1 keeps the old hardcoded conversion exactly (gcol33/tulpa#279)", {
+  skip_on_cran_budget()
   # The nu-general tau must reduce to 1 / (sqrt(4 pi) kappa sigma) at nu = 1,
   # so the default SPDE path is unmoved by the fix.
   spec <- .nu_fixture()
@@ -93,6 +91,7 @@ test_that("nu = 1 keeps the old hardcoded conversion exactly (gcol33/tulpa#279)"
 })
 
 test_that("(kappa, tau) invert the d = 2 Matern marginal variance", {
+  skip_on_cran_budget()
   # sigma^2 = 1 / (4 pi nu kappa^(2 nu) tau^2). A nu-independent tau satisfies
   # this only at nu = 1.
   spec <- .nu_fixture()
@@ -109,6 +108,7 @@ test_that("(kappa, tau) invert the d = 2 Matern marginal variance", {
 # --- #280: the assembly is the alpha it was asked for ------------------------
 
 test_that("the FEM assembly reproduces K (C^-1 K)^(alpha-1) at every integer alpha", {
+  skip_on_cran_budget()
   spec <- .nu_fixture()
   n <- spec$n_mesh
   for (alpha in 1:4) {
@@ -124,6 +124,7 @@ test_that("the FEM assembly reproduces K (C^-1 K)^(alpha-1) at every integer alp
 })
 
 test_that("alpha >= 3 is assembled, not silently folded into alpha = 2 (gcol33/tulpa#280)", {
+  skip_on_cran_budget()
   # The pre-fix `if (alpha == 1) ... else <alpha 2>` returned the alpha = 2
   # precision for every alpha >= 2, on the alpha = 2 sparsity pattern. The
   # higher-order operator has a strictly wider stencil, so the pattern alone
@@ -145,6 +146,7 @@ test_that("alpha >= 3 is assembled, not silently folded into alpha = 2 (gcol33/t
 })
 
 test_that("the R precision mirror agrees with the compiled assembly at nu = 1 and nu = 2", {
+  skip_on_cran_budget()
   # .spde_precision_Q (the analytic marginal-SE path) and the compiled builder
   # are two implementations of the same operator; #279/#280 had them disagree
   # at nu = 2 on both the tau map and the assembly order.
@@ -162,6 +164,64 @@ test_that("the R precision mirror agrees with the compiled assembly at nu = 1 an
     Qc <- .nu_from_csc(res, n)
     expect_lt(max(abs(Qc - Qr)) / max(abs(Qr)), 1e-12,
               label = sprintf("nu=%g precision mismatch", nu))
+  }
+})
+
+test_that("joint NUTS refuses an integer alpha it cannot differentiate (gcol33/tulpa#280)", {
+  skip_on_cran_budget()
+  # The non-centered transform's adjoint is written for the alpha = 2 assembly.
+  # Sampling nu = 2 there would silently be a nu = 1 fit.
+  set.seed(3)
+  coords <- cbind(runif(30), runif(30))
+  spec <- spatial_spde(coords, nu = 2)
+  expect_error(
+    tulpa_nuts_spde(y = rnorm(30), X = matrix(1, 30, 1), spatial = spec,
+                    family = "gaussian", joint = TRUE),
+    "alpha = 2"
+  )
+})
+
+test_that("nu != 1 moves the hyper prior away from the nu = 1 map", {
+  skip_on_cran_budget()
+  # The negative control for the test above: at nu = 1 the two references
+  # coincide, so a test run only at nu = 1 passes against either map. This
+  # states how far apart they are at nu = 2, which is reachable with no user
+  # action (cpp_tulpa_fit_spde_nuts defaults nu to alpha - 1, so alpha = 3
+  # gives nu = 2).
+  nu1_sigma_map <- function(log_kappa, log_tau) {
+    exp(-log_kappa - log_tau) / sqrt(4 * pi)
+  }
+  for (nu in c(2, 3)) {
+    lk <- 0.7; lt <- -0.4
+    rs <- tulpa:::.spde_range_sigma(exp(lk), exp(lt), nu)
+    expect_false(isTRUE(all.equal(rs$sigma, nu1_sigma_map(lk, lt))),
+                 info = sprintf("nu=%g", nu))
+  }
+  # ... and at nu = 1 they are the same number, so nothing about the default
+  # path moved.
+  expect_equal(tulpa:::.spde_range_sigma(exp(0.7), exp(-0.4), 1)$sigma,
+               nu1_sigma_map(0.7, -0.4), tolerance = 1e-14)
+})
+
+skip_on_cran()
+
+# --- #279: nu enters both kappa and tau --------------------------------------
+
+test_that("the C++ (range, sigma) -> (kappa, tau) map matches the R one at every nu", {
+  skip_on_cran()
+  spec <- .nu_fixture()
+  for (nu in c(0.5, 1, 1.5, 2, 3)) {
+    for (range in c(0.2, 0.8)) for (sigma in c(0.4, 1.7)) {
+      alpha <- max(1L, as.integer(round(nu)) + 1L)
+      res <- cpp_test_spde_assemble(spec$C0_diag, spec$G1_x, spec$G1_i, spec$G1_p,
+                                    range = range, sigma = sigma, nu = nu,
+                                    alpha = alpha)
+      kt <- tulpa:::.spde_kappa_tau(range, sigma, nu)
+      expect_equal(res$kappa, kt$kappa, tolerance = 1e-14,
+                   info = sprintf("nu=%g range=%g", nu, range))
+      expect_equal(res$tau, kt$tau_spde, tolerance = 1e-14,
+                   info = sprintf("nu=%g sigma=%g", nu, sigma))
+    }
   }
 })
 
@@ -227,27 +287,15 @@ test_that("fit_spde runs the nu = 2 operator end to end (gcol33/tulpa#279, #280)
   fit <- fit_spde(y, matrix(1, n_obs, 1), spec, family = "gaussian", phi = 0.0081,
                   control = list(n_grid = 7L))
   expect_true(fit$converged)
-  expect_true(all(is.finite(fit$log_marginal)))
+  expect_cells_solved(fit)
   expect_gt(fit$sigma, 0.6 * sigma_true)
   expect_lt(fit$sigma, 1.6 * sigma_true)
-})
-
-test_that("joint NUTS refuses an integer alpha it cannot differentiate (gcol33/tulpa#280)", {
-  # The non-centered transform's adjoint is written for the alpha = 2 assembly.
-  # Sampling nu = 2 there would silently be a nu = 1 fit.
-  set.seed(3)
-  coords <- cbind(runif(30), runif(30))
-  spec <- spatial_spde(coords, nu = 2)
-  expect_error(
-    tulpa_nuts_spde(y = rnorm(30), X = matrix(1, 30, 1), spatial = spec,
-                    family = "gaussian", joint = TRUE),
-    "alpha = 2"
-  )
 })
 
 # --- #437: the joint-NUTS hyper prior reads the same map ---------------------
 
 test_that("the PC hyper prior maps (log_kappa, log_tau) to sigma at every nu", {
+  skip_on_cran()
   # compute_spde_hyper_prior is the only prior on (log_kappa, log_tau) in
   # joint-NUTS mode, and it has to reach sigma through the same map the sampler
   # reports sigma_draws with. The nu = 1 special case
@@ -291,38 +339,4 @@ test_that("the PC hyper prior maps (log_kappa, log_tau) to sigma at every nu", {
                  info = sprintf("nu=%g log_kappa=%g log_tau=%g",
                                 grid$nu[i], grid$log_kappa[i], grid$log_tau[i]))
   }
-})
-
-test_that("nu != 1 moves the hyper prior away from the nu = 1 map", {
-  # The negative control for the test above: at nu = 1 the two references
-  # coincide, so a test run only at nu = 1 passes against either map. This
-  # states how far apart they are at nu = 2, which is reachable with no user
-  # action (cpp_tulpa_fit_spde_nuts defaults nu to alpha - 1, so alpha = 3
-  # gives nu = 2).
-  nu1_sigma_map <- function(log_kappa, log_tau) {
-    exp(-log_kappa - log_tau) / sqrt(4 * pi)
-  }
-  for (nu in c(2, 3)) {
-    lk <- 0.7; lt <- -0.4
-    rs <- tulpa:::.spde_range_sigma(exp(lk), exp(lt), nu)
-    expect_false(isTRUE(all.equal(rs$sigma, nu1_sigma_map(lk, lt))),
-                 info = sprintf("nu=%g", nu))
-  }
-  # ... and at nu = 1 they are the same number, so nothing about the default
-  # path moved.
-  expect_equal(tulpa:::.spde_range_sigma(exp(0.7), exp(-0.4), 1)$sigma,
-               nu1_sigma_map(0.7, -0.4), tolerance = 1e-14)
-})
-
-test_that("the hyper prior is flat when either hyper slot is absent", {
-  # compute_spde_hyper_prior reads params[log_tau_spde_idx] after checking
-  # log_kappa_spde_idx, so a layout carrying one slot and not the other used to
-  # index at -1. Both guards are in place; with joint_hypers off the layout
-  # reserves neither and the prior is flat.
-  expect_equal(
-    tulpa:::cpp_spde_hyper_prior_probe(
-      log_kappa = 0.3, log_tau = -0.2, nu = 2,
-      prior_range_0 = 0.2, prior_range_alpha = 0.05,
-      prior_sigma_0 = 1.0, prior_sigma_alpha = -1.0
-    )$prior_val, 0.0, tolerance = 1e-12)
 })

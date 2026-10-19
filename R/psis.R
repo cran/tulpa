@@ -418,7 +418,11 @@
 #' Above it the proposal cannot be reliably corrected to the target.
 #'
 #' @param log_ratios Numeric vector of (unnormalized) log importance ratios
-#'   `log p_target(x) - log q_proposal(x)` evaluated at draws `x ~ q`.
+#'   `log p_target(x) - log q_proposal(x)` evaluated at draws `x ~ q`. `-Inf`
+#'   marks a draw of zero weight (it keeps its place and counts towards `S`);
+#'   `NA` / `NaN` is an error. A `+Inf` ratio is the worst
+#'   possible one and returns `pareto_k = Inf` with all the weight on the
+#'   `+Inf` draws.
 #' @param tail_points Number of upper-tail order statistics for the
 #'   generalized-Pareto fit, or `NULL` (default) for the automatic PSIS rule
 #'   `ceil(min(0.2 * S, 3 * sqrt(S)))`. An explicit value is an expert
@@ -428,7 +432,9 @@
 #' @return A list with `pareto_k` (the tail shape, `NA` if the sample is too
 #'   small to fit), `is_ess` (importance-sampling effective sample size,
 #'   `1 / sum(w^2)` on the normalized smoothed weights), `log_weights`
-#'   (the normalized smoothed log weights), `tail_len` (the tail size used), and
+#'   (the normalized smoothed log weights, one per element of `log_ratios` and
+#'   in the same order; with fewer than 5 draws the raw ratios, normalized),
+#'   `tail_len` (the tail size used, `0` when no tail was fitted), and
 #'   `tail_smoothed` (`FALSE` when the tail kept its raw log ratios because the
 #'   generalized-Pareto fit was not attempted or returned a shape / scale the
 #'   quantile function is undefined at; `pareto_k` then reports the attempted fit
@@ -444,11 +450,36 @@
 #' ps$is_ess
 #' @export
 tulpa_psis <- function(log_ratios, tail_points = NULL) {
-  log_ratios <- log_ratios[is.finite(log_ratios)]
+  # One log weight per input draw, so the result stays aligned with the draws
+  # the ratios were evaluated at (gcol33/tulpa#892). A `-Inf` ratio is a draw
+  # of zero weight (a target density of zero there): it stays in place, below
+  # the tail, and counts towards `S` like any other proposal draw. A missing
+  # ratio has no weight to give, so it is refused rather than
+  # dropped. A `+Inf` ratio is the worst ratio there is -- infinitely many
+  # draws' worth of mass on one draw -- so it reports an infinite shape rather
+  # than being filtered out ahead of a fit that then looks healthy.
+  if (!is.numeric(log_ratios) || anyNA(log_ratios)) {
+    stop("`log_ratios` must be a numeric vector with no NA / NaN entries.",
+         call. = FALSE)
+  }
+  log_ratios <- as.numeric(log_ratios)
   S <- length(log_ratios)
-  if (S < 5L) {
-    return(list(pareto_k = NA_real_, is_ess = NA_real_, log_weights = numeric(0),
+  if (S > 0L && all(log_ratios == -Inf)) {
+    stop("`log_ratios` are all -Inf: no draw carries importance weight.",
+         call. = FALSE)
+  }
+  pos_inf <- log_ratios == Inf
+  if (any(pos_inf)) {
+    lw <- ifelse(pos_inf, -log(sum(pos_inf)), -Inf)
+    return(list(pareto_k = Inf, is_ess = sum(pos_inf), log_weights = lw,
                 tail_len = 0L, tail_smoothed = FALSE))
+  }
+  if (S < 5L) {
+    # Too few draws for a tail fit: the raw ratios, normalized.
+    lw <- log_ratios - .tulpa_logsumexp(log_ratios)
+    return(list(pareto_k = NA_real_,
+                is_ess = if (S) 1 / sum(exp(2 * lw)) else NA_real_,
+                log_weights = lw, tail_len = 0L, tail_smoothed = FALSE))
   }
 
   # The GPD tail fit + Pareto smoothing (the former body, now the C++ oracle
@@ -467,7 +498,10 @@ tulpa_psis <- function(log_ratios, tail_points = NULL) {
 # normalizing constant is common to every draw, so it drops under PSIS's
 # self-normalization and only the quadratic 0.5 ||z||^2 enters. Each evaluation
 # is one inner Laplace solve, so `n_samples` extra solves are paid -- the cost
-# the `diagnose_k` switch controls.
+# the `diagnose_k` switch controls. `log_target_batched(U)` takes the S x d
+# draw matrix and returns S log-densities, so the caller evaluates a whole
+# proposal's draws in one call (re_cov_nested's compiled batch); a non-finite
+# value is a zero-weight draw.
 #
 # This path applies NO radius cap (unlike the grid/joint `.nested_is_pareto_k`):
 # its inner solve is a dense `tulpa_laplace()` that converges in a handful of
@@ -476,18 +510,16 @@ tulpa_psis <- function(log_ratios, tail_points = NULL) {
 # and the unbiased choice -- consistent in correctness with the grid/joint path,
 # whose cap now folds the far tail back in whenever it would matter
 
-.nested_outer_pareto_k <- function(log_target, theta_hat, L_scale,
+.nested_outer_pareto_k <- function(log_target_batched, theta_hat, L_scale,
                                    n_samples = .nl_diag("k_samples"),
                                    tail_points = NULL) {
-  # The per-sample closure is the length-1 case of the batched target the shared
-  # core (.nested_is_pareto_k) drives; wrap it (non-finite -> -Inf, matching the
-  # old drop) and evaluate every draw (radius_cap = Inf). The sampling transform
-  # theta_hat + L_scale %*% Z[s, ] equals the core's Z %*% t(L_scale), so the
-  # draws -- and the k-hat -- are identical to the previous open-coded version.
-  batched <- function(Umat) vapply(seq_len(nrow(Umat)), function(i) {
-    lt <- log_target(Umat[i, ])
-    if (is.finite(lt)) lt else -Inf
-  }, numeric(1))
+  # Every draw is evaluated (radius_cap = Inf, below), and a non-finite target
+  # value is a draw of zero weight.
+  batched <- function(Umat) {
+    lt <- as.numeric(log_target_batched(Umat))
+    lt[!is.finite(lt)] <- -Inf
+    lt
+  }
   # The proposal is the mode-find's own Gaussian, not a set of integration
   # nodes, so the spec carries no grid: the mixture candidate declines (its bump
   # width is a grid RESOLUTION, which a CCD design does not have) and the radius
@@ -554,9 +586,22 @@ tulpa_psis <- function(log_ratios, tail_points = NULL) {
 #' @param tail_points Optional override for the PSIS tail size; `NULL` uses
 #'   the automatic rule.
 #' @param Z Optional pre-drawn `S x d` whitened sample; `NULL` draws it here.
-#' @return A list with `pareto_k`, `is_ess`, `n_eval`, and `declined` (a
-#'   reason string, or `NULL` when the diagnostic ran to completion).
+#' @return A list with `pareto_k`, `is_ess` and `n_eval` (the number of draws
+#'   whose log importance ratio was finite). When the diagnostic ran to
+#'   completion it also carries `lr`, those `n_eval` finite log importance
+#'   ratios in draw order (what `pareto_k` was fitted on, so
+#'   `tulpa_psis(lr, tail_points)$pareto_k` reproduces it), and with
+#'   `return_draws = TRUE` the evaluated draws `U` (`n_eval x d`) and their
+#'   smoothed `log_weights`. When it declined, `pareto_k` and `is_ess` are
+#'   `NA` and `declined` names the reason (e.g. `"draws_too_few"`).
 #' @seealso [tulpa_psis()]
+#' @examples
+#' set.seed(1)
+#' # A Gaussian target a little wider than the standard-normal proposal:
+#' lt <- function(U) -0.5 * rowSums(sweep(U, 2L, c(1.2, 0.8), "/")^2)
+#' k <- tulpa_batched_pareto_k(theta_hat = c(0, 0), L_scale = diag(2),
+#'                             log_target_batched = lt, n_samples = 500)
+#' k$pareto_k
 #' @export
 tulpa_batched_pareto_k <- function(theta_hat, L_scale, log_target_batched,
                                     n_samples = .nl_diag("k_samples"),
@@ -638,8 +683,8 @@ tulpa_batched_pareto_k <- function(theta_hat, L_scale, log_target_batched,
   if (n_eval < .PSIS_MIN_EVAL) {
     return(na_out("draws_too_few", n_eval))
   }
-  ps  <- tulpa_psis(lr, tail_points = tail_points)
   fin <- is.finite(lr)
+  ps  <- tulpa_psis(lr[fin], tail_points = tail_points)
   # `lr` travels with every scored proposal: it is what the k bootstrap re-fits
   # the GPD on, and what `.kdiag_capture()` publishes for the proposal a backend
   # ends up REPORTING. A scorer that is called several times per fit (the
@@ -648,7 +693,7 @@ tulpa_batched_pareto_k <- function(theta_hat, L_scale, log_target_batched,
   out <- list(pareto_k = ps$pareto_k, is_ess = ps$is_ess, n_eval = n_eval,
               lr = lr[fin])
   # The evaluated draws and their PSIS-smoothed log weights, same order
-  # (tulpa_psis keeps the finite entries in place), so a caller can re-estimate
+  # (the finite entries, in draw order), so a caller can re-estimate
   # the proposal from the importance-weighted moments (moment-matching IS).
   if (return_draws) {
     out$U <- U[fin, , drop = FALSE]

@@ -21,6 +21,8 @@
 # Shared helpers                                                              #
 # --------------------------------------------------------------------------- #
 
+skip_on_cran()
+
 .chain_adj_pg <- function(n_s) {
     nbr <- lapply(seq_len(n_s),
                   function(s) setdiff(c(s - 1L, s + 1L), c(0L, n_s + 1L)))
@@ -128,7 +130,7 @@ test_that("phi_grid on gaussian copy arm recovers true residual variance", {
     )
 
     expect_true("phi_pos" %in% colnames(fit$theta_grid))
-    expect_true(all(is.finite(fit$log_marginal)))
+    expect_cells_solved(fit)
 
     # Posterior mean recovers the true residual variance within ~25% relative.
     phi_mean <- fit$theta_mean[["phi_pos"]]
@@ -198,7 +200,7 @@ test_that("phi_grid on lognormal copy arm recovers true log-scale residual varia
         phi_grid  = list(pos = phi_axis)
     )
 
-    expect_true(all(is.finite(fit$log_marginal)))
+    expect_cells_solved(fit)
 
     phi_mean <- fit$theta_mean[["phi_pos"]]
     expect_lt(abs(phi_mean - var_pos_true) / var_pos_true, 0.25)

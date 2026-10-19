@@ -341,7 +341,26 @@ code > span.er { color: #a61717; background-color: #e3d2d2; }
 
 
 
-<div class="sourceCode" id="cb1"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb1-1"><a href="#cb1-1" tabindex="-1"></a><span class="fu">library</span>(tulpa)</span></code></pre></div>
+<div id="installation" class="section level2">
+<h2>Installation</h2>
+<div class="sourceCode" id="cb1"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb1-1"><a href="#cb1-1" tabindex="-1"></a><span class="co"># Current release, built for Windows and macOS</span></span>
+<span id="cb1-2"><a href="#cb1-2" tabindex="-1"></a><span class="fu">install.packages</span>(<span class="st">&quot;tulpa&quot;</span>,</span>
+<span id="cb1-3"><a href="#cb1-3" tabindex="-1"></a>                 <span class="at">repos =</span> <span class="fu">c</span>(<span class="st">&quot;https://gcol33.r-universe.dev&quot;</span>,</span>
+<span id="cb1-4"><a href="#cb1-4" tabindex="-1"></a>                           <span class="st">&quot;https://cloud.r-project.org&quot;</span>))</span>
+<span id="cb1-5"><a href="#cb1-5" tabindex="-1"></a></span>
+<span id="cb1-6"><a href="#cb1-6" tabindex="-1"></a><span class="co"># Development version from GitHub</span></span>
+<span id="cb1-7"><a href="#cb1-7" tabindex="-1"></a><span class="fu">install.packages</span>(<span class="st">&quot;pak&quot;</span>)</span>
+<span id="cb1-8"><a href="#cb1-8" tabindex="-1"></a>pak<span class="sc">::</span><span class="fu">pak</span>(<span class="st">&quot;gcol33/tulpa&quot;</span>)</span>
+<span id="cb1-9"><a href="#cb1-9" tabindex="-1"></a></span>
+<span id="cb1-10"><a href="#cb1-10" tabindex="-1"></a><span class="co"># Pin a release</span></span>
+<span id="cb1-11"><a href="#cb1-11" tabindex="-1"></a>pak<span class="sc">::</span><span class="fu">pak</span>(<span class="st">&quot;gcol33/tulpa@v0.6.0&quot;</span>)</span></code></pre></div>
+<p><code>pak</code> resolves the dependency tree, including
+<code>tulpaMesh</code> (on CRAN, used for SPDE mesh construction).
+<code>tulpa</code> compiles its C++ backend on first install, so a C++17
+toolchain is required: Rtools on Windows, Xcode CLI tools on macOS,
+<code>r-base-dev</code> on Linux.</p>
+<div class="sourceCode" id="cb2"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb2-1"><a href="#cb2-1" tabindex="-1"></a><span class="fu">library</span>(tulpa)</span></code></pre></div>
+</div>
 <div id="what-tulpa-is" class="section level2">
 <h2>What tulpa is</h2>
 <p>tulpa is a Bayesian hierarchical modelling engine. You write a
@@ -411,10 +430,10 @@ Gaussian response built from a fixed intercept of 0.5 and a slope of
 1.2, with residual noise at a standard deviation of 0.8. Four hundred
 rows is enough for the estimates to settle close to the truth without
 being so many that the fit is trivially easy.</p>
-<div class="sourceCode" id="cb2"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb2-1"><a href="#cb2-1" tabindex="-1"></a>n  <span class="ot">&lt;-</span> <span class="dv">400</span></span>
-<span id="cb2-2"><a href="#cb2-2" tabindex="-1"></a>x  <span class="ot">&lt;-</span> <span class="fu">rnorm</span>(n)</span>
-<span id="cb2-3"><a href="#cb2-3" tabindex="-1"></a>y  <span class="ot">&lt;-</span> <span class="fl">0.5</span> <span class="sc">+</span> <span class="fl">1.2</span> <span class="sc">*</span> x <span class="sc">+</span> <span class="fu">rnorm</span>(n, <span class="at">sd =</span> <span class="fl">0.8</span>)</span>
-<span id="cb2-4"><a href="#cb2-4" tabindex="-1"></a>df <span class="ot">&lt;-</span> <span class="fu">data.frame</span>(<span class="at">y =</span> y, <span class="at">x =</span> x)</span></code></pre></div>
+<div class="sourceCode" id="cb3"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb3-1"><a href="#cb3-1" tabindex="-1"></a>n  <span class="ot">&lt;-</span> <span class="dv">400</span></span>
+<span id="cb3-2"><a href="#cb3-2" tabindex="-1"></a>x  <span class="ot">&lt;-</span> <span class="fu">rnorm</span>(n)</span>
+<span id="cb3-3"><a href="#cb3-3" tabindex="-1"></a>y  <span class="ot">&lt;-</span> <span class="fl">0.5</span> <span class="sc">+</span> <span class="fl">1.2</span> <span class="sc">*</span> x <span class="sc">+</span> <span class="fu">rnorm</span>(n, <span class="at">sd =</span> <span class="fl">0.8</span>)</span>
+<span id="cb3-4"><a href="#cb3-4" tabindex="-1"></a>df <span class="ot">&lt;-</span> <span class="fu">data.frame</span>(<span class="at">y =</span> y, <span class="at">x =</span> x)</span></code></pre></div>
 <p>Fit with <code>tulpa()</code>. The formula and <code>family</code>
 mirror <code>glm()</code>; the new argument is <code>mode</code>, which
 selects the inference backend. <code>mode = &quot;laplace&quot;</code> is the
@@ -422,9 +441,9 @@ Tier-2 Gaussian approximation: it finds the posterior mode and the
 curvature there. For a Gaussian likelihood that curvature is exact, so
 the fit returns the analytic posterior immediately, with no iteration
 and no Monte Carlo error.</p>
-<div class="sourceCode" id="cb3"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb3-1"><a href="#cb3-1" tabindex="-1"></a>fit <span class="ot">&lt;-</span> <span class="fu">tulpa</span>(y <span class="sc">~</span> x, <span class="at">data =</span> df, <span class="at">family =</span> <span class="st">&quot;gaussian&quot;</span>,</span>
-<span id="cb3-2"><a href="#cb3-2" tabindex="-1"></a>             <span class="at">mode =</span> <span class="st">&quot;laplace&quot;</span>, <span class="at">phi =</span> <span class="fl">0.8</span><span class="sc">^</span><span class="dv">2</span>)</span>
-<span id="cb3-3"><a href="#cb3-3" tabindex="-1"></a><span class="fu">coef</span>(fit)</span></code></pre></div>
+<div class="sourceCode" id="cb4"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb4-1"><a href="#cb4-1" tabindex="-1"></a>fit <span class="ot">&lt;-</span> <span class="fu">tulpa</span>(y <span class="sc">~</span> x, <span class="at">data =</span> df, <span class="at">family =</span> <span class="st">&quot;gaussian&quot;</span>,</span>
+<span id="cb4-2"><a href="#cb4-2" tabindex="-1"></a>             <span class="at">mode =</span> <span class="st">&quot;laplace&quot;</span>, <span class="at">phi =</span> <span class="fl">0.8</span><span class="sc">^</span><span class="dv">2</span>)</span>
+<span id="cb4-3"><a href="#cb4-3" tabindex="-1"></a><span class="fu">coef</span>(fit)</span></code></pre></div>
 <p>The coefficients land near the truth. <code>coef()</code> reports the
 posterior mean of each fixed effect, the same point estimate you would
 read off a frequentist fit, but here it is a posterior summary rather
@@ -433,12 +452,13 @@ intercept close to 0.5, which is the first thing to check on any
 simulation: did the estimates recover the values you put in.</p>
 <p>A point estimate alone is half a fit. <code>summary()</code> adds the
 posterior standard error and the 2.5% and 97.5% credible bounds for each
-fixed effect, which is what turns “the slope is about 1.2” into “the
-slope is 1.2 with a 95% credible interval that excludes zero by a wide
-margin”. Read the standard error as the posterior spread of the
-coefficient and the bounds as the interval the coefficient falls in with
-95% posterior probability.</p>
-<div class="sourceCode" id="cb4"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb4-1"><a href="#cb4-1" tabindex="-1"></a><span class="fu">summary</span>(fit)</span></code></pre></div>
+fixed effect, alongside how the fit was produced and how reliable it is,
+which is what turns “the slope is about 1.2” into “the slope is 1.2 with
+a 95% credible interval that excludes zero by a wide margin”. Read the
+standard error as the posterior spread of the coefficient and the bounds
+as the interval the coefficient falls in with 95% posterior
+probability.</p>
+<div class="sourceCode" id="cb5"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb5-1"><a href="#cb5-1" tabindex="-1"></a><span class="fu">summary</span>(fit)</span></code></pre></div>
 <p>The credible bounds bracket the true values, which is the second
 recovery check. <code>confint()</code> returns the same bounds as a
 matrix, handy when you want to program against them rather than read
@@ -447,7 +467,7 @@ including the off-diagonal covariance between the intercept and the
 slope. Both read the fixed-effect block of the Hessian the Laplace fit
 already computed, so neither triggers an extra sampling step; they are
 deterministic functions of a fit that has already run.</p>
-<div class="sourceCode" id="cb5"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb5-1"><a href="#cb5-1" tabindex="-1"></a><span class="fu">confint</span>(fit)</span></code></pre></div>
+<div class="sourceCode" id="cb6"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb6-1"><a href="#cb6-1" tabindex="-1"></a><span class="fu">confint</span>(fit)</span></code></pre></div>
 <p>The <code>phi</code> argument is the family’s dispersion parameter,
 and its meaning depends on the family. For <code>gaussian</code> it is
 the residual variance, for <code>neg_binomial_2</code> the size
@@ -496,14 +516,14 @@ term, exactly as in <code>lme4</code>.</p>
 with standard deviation 0.6, then add that offset to the linear
 predictor. The fixed structure is the same intercept and slope as
 before, so the only new ingredient is the group effect.</p>
-<div class="sourceCode" id="cb6"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb6-1"><a href="#cb6-1" tabindex="-1"></a>g  <span class="ot">&lt;-</span> <span class="fu">factor</span>(<span class="fu">sample</span>(<span class="dv">1</span><span class="sc">:</span><span class="dv">12</span>, n, <span class="at">replace =</span> <span class="cn">TRUE</span>))</span>
-<span id="cb6-2"><a href="#cb6-2" tabindex="-1"></a>u  <span class="ot">&lt;-</span> <span class="fu">rnorm</span>(<span class="dv">12</span>, <span class="at">sd =</span> <span class="fl">0.6</span>)</span>
-<span id="cb6-3"><a href="#cb6-3" tabindex="-1"></a>df<span class="sc">$</span>y <span class="ot">&lt;-</span> <span class="fl">0.5</span> <span class="sc">+</span> <span class="fl">1.2</span> <span class="sc">*</span> df<span class="sc">$</span>x <span class="sc">+</span> u[g] <span class="sc">+</span> <span class="fu">rnorm</span>(n, <span class="at">sd =</span> <span class="fl">0.8</span>)</span>
-<span id="cb6-4"><a href="#cb6-4" tabindex="-1"></a>df<span class="sc">$</span>g <span class="ot">&lt;-</span> g</span>
-<span id="cb6-5"><a href="#cb6-5" tabindex="-1"></a></span>
-<span id="cb6-6"><a href="#cb6-6" tabindex="-1"></a>fit_re <span class="ot">&lt;-</span> <span class="fu">tulpa</span>(y <span class="sc">~</span> x <span class="sc">+</span> (<span class="dv">1</span> <span class="sc">|</span> g), <span class="at">data =</span> df, <span class="at">family =</span> <span class="st">&quot;gaussian&quot;</span>,</span>
-<span id="cb6-7"><a href="#cb6-7" tabindex="-1"></a>                <span class="at">mode =</span> <span class="st">&quot;laplace&quot;</span>, <span class="at">sigma_re =</span> <span class="fl">0.6</span>, <span class="at">phi =</span> <span class="fl">0.8</span><span class="sc">^</span><span class="dv">2</span>)</span>
-<span id="cb6-8"><a href="#cb6-8" tabindex="-1"></a><span class="fu">coef</span>(fit_re)</span></code></pre></div>
+<div class="sourceCode" id="cb7"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb7-1"><a href="#cb7-1" tabindex="-1"></a>g  <span class="ot">&lt;-</span> <span class="fu">factor</span>(<span class="fu">sample</span>(<span class="dv">1</span><span class="sc">:</span><span class="dv">12</span>, n, <span class="at">replace =</span> <span class="cn">TRUE</span>))</span>
+<span id="cb7-2"><a href="#cb7-2" tabindex="-1"></a>u  <span class="ot">&lt;-</span> <span class="fu">rnorm</span>(<span class="dv">12</span>, <span class="at">sd =</span> <span class="fl">0.6</span>)</span>
+<span id="cb7-3"><a href="#cb7-3" tabindex="-1"></a>df<span class="sc">$</span>y <span class="ot">&lt;-</span> <span class="fl">0.5</span> <span class="sc">+</span> <span class="fl">1.2</span> <span class="sc">*</span> df<span class="sc">$</span>x <span class="sc">+</span> u[g] <span class="sc">+</span> <span class="fu">rnorm</span>(n, <span class="at">sd =</span> <span class="fl">0.8</span>)</span>
+<span id="cb7-4"><a href="#cb7-4" tabindex="-1"></a>df<span class="sc">$</span>g <span class="ot">&lt;-</span> g</span>
+<span id="cb7-5"><a href="#cb7-5" tabindex="-1"></a></span>
+<span id="cb7-6"><a href="#cb7-6" tabindex="-1"></a>fit_re <span class="ot">&lt;-</span> <span class="fu">tulpa</span>(y <span class="sc">~</span> x <span class="sc">+</span> (<span class="dv">1</span> <span class="sc">|</span> g), <span class="at">data =</span> df, <span class="at">family =</span> <span class="st">&quot;gaussian&quot;</span>,</span>
+<span id="cb7-7"><a href="#cb7-7" tabindex="-1"></a>                <span class="at">mode =</span> <span class="st">&quot;laplace&quot;</span>, <span class="at">sigma_re =</span> <span class="fl">0.6</span>, <span class="at">phi =</span> <span class="fl">0.8</span><span class="sc">^</span><span class="dv">2</span>)</span>
+<span id="cb7-8"><a href="#cb7-8" tabindex="-1"></a><span class="fu">coef</span>(fit_re)</span></code></pre></div>
 <p><code>coef()</code> reports the fixed effects, which are unchanged in
 meaning: the intercept and slope read against a background that now
 accounts for the group structure. The group-level offsets themselves
@@ -512,7 +532,7 @@ the posterior mean of that group’s effect, the quantity a mixed-model
 package calls the BLUP (best linear unbiased predictor). These are the
 estimated departures of each group from the population mean, shrunk
 toward zero by the random-effect variance.</p>
-<div class="sourceCode" id="cb7"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb7-1"><a href="#cb7-1" tabindex="-1"></a><span class="fu">head</span>(<span class="fu">ranef</span>(fit_re), <span class="dv">4</span>)</span></code></pre></div>
+<div class="sourceCode" id="cb8"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb8-1"><a href="#cb8-1" tabindex="-1"></a><span class="fu">head</span>(<span class="fu">ranef</span>(fit_re), <span class="dv">4</span>)</span></code></pre></div>
 <p>This fit conditions on <code>sigma_re</code> rather than estimating
 it: you pass the random-effect standard deviation and the engine fits
 everything else given that value. Passing one number applies it to the
@@ -566,11 +586,11 @@ for any extra flexibility a richer model brings.</p>
 model, a model adding the slope, and a model adding the random intercept
 on top of the slope. Each is a single <code>tulpa()</code> call
 differing only in the formula.</p>
-<div class="sourceCode" id="cb8"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb8-1"><a href="#cb8-1" tabindex="-1"></a>m0 <span class="ot">&lt;-</span> <span class="fu">tulpa</span>(y <span class="sc">~</span> <span class="dv">1</span>,     <span class="at">data =</span> df, <span class="at">family =</span> <span class="st">&quot;gaussian&quot;</span>, <span class="at">mode =</span> <span class="st">&quot;laplace&quot;</span>, <span class="at">phi =</span> <span class="fl">0.8</span><span class="sc">^</span><span class="dv">2</span>)</span>
-<span id="cb8-2"><a href="#cb8-2" tabindex="-1"></a>m1 <span class="ot">&lt;-</span> <span class="fu">tulpa</span>(y <span class="sc">~</span> x,     <span class="at">data =</span> df, <span class="at">family =</span> <span class="st">&quot;gaussian&quot;</span>, <span class="at">mode =</span> <span class="st">&quot;laplace&quot;</span>, <span class="at">phi =</span> <span class="fl">0.8</span><span class="sc">^</span><span class="dv">2</span>)</span>
-<span id="cb8-3"><a href="#cb8-3" tabindex="-1"></a>m2 <span class="ot">&lt;-</span> <span class="fu">tulpa</span>(y <span class="sc">~</span> x <span class="sc">+</span> (<span class="dv">1</span> <span class="sc">|</span> g), <span class="at">data =</span> df, <span class="at">family =</span> <span class="st">&quot;gaussian&quot;</span>,</span>
-<span id="cb8-4"><a href="#cb8-4" tabindex="-1"></a>            <span class="at">mode =</span> <span class="st">&quot;laplace&quot;</span>, <span class="at">sigma_re =</span> <span class="fl">0.6</span>, <span class="at">phi =</span> <span class="fl">0.8</span><span class="sc">^</span><span class="dv">2</span>)</span>
-<span id="cb8-5"><a href="#cb8-5" tabindex="-1"></a><span class="fu">compare_models</span>(<span class="at">intercept =</span> m0, <span class="at">slope =</span> m1, <span class="at">slope_re =</span> m2, <span class="at">criterion =</span> <span class="st">&quot;loglik&quot;</span>)</span></code></pre></div>
+<div class="sourceCode" id="cb9"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb9-1"><a href="#cb9-1" tabindex="-1"></a>m0 <span class="ot">&lt;-</span> <span class="fu">tulpa</span>(y <span class="sc">~</span> <span class="dv">1</span>,     <span class="at">data =</span> df, <span class="at">family =</span> <span class="st">&quot;gaussian&quot;</span>, <span class="at">mode =</span> <span class="st">&quot;laplace&quot;</span>, <span class="at">phi =</span> <span class="fl">0.8</span><span class="sc">^</span><span class="dv">2</span>)</span>
+<span id="cb9-2"><a href="#cb9-2" tabindex="-1"></a>m1 <span class="ot">&lt;-</span> <span class="fu">tulpa</span>(y <span class="sc">~</span> x,     <span class="at">data =</span> df, <span class="at">family =</span> <span class="st">&quot;gaussian&quot;</span>, <span class="at">mode =</span> <span class="st">&quot;laplace&quot;</span>, <span class="at">phi =</span> <span class="fl">0.8</span><span class="sc">^</span><span class="dv">2</span>)</span>
+<span id="cb9-3"><a href="#cb9-3" tabindex="-1"></a>m2 <span class="ot">&lt;-</span> <span class="fu">tulpa</span>(y <span class="sc">~</span> x <span class="sc">+</span> (<span class="dv">1</span> <span class="sc">|</span> g), <span class="at">data =</span> df, <span class="at">family =</span> <span class="st">&quot;gaussian&quot;</span>,</span>
+<span id="cb9-4"><a href="#cb9-4" tabindex="-1"></a>            <span class="at">mode =</span> <span class="st">&quot;laplace&quot;</span>, <span class="at">sigma_re =</span> <span class="fl">0.6</span>, <span class="at">phi =</span> <span class="fl">0.8</span><span class="sc">^</span><span class="dv">2</span>)</span>
+<span id="cb9-5"><a href="#cb9-5" tabindex="-1"></a><span class="fu">compare_models</span>(<span class="at">intercept =</span> m0, <span class="at">slope =</span> m1, <span class="at">slope_re =</span> m2, <span class="at">criterion =</span> <span class="st">&quot;loglik&quot;</span>)</span></code></pre></div>
 <p>The table reports each model’s name (taken straight from the argument
 labels, so label them as a ladder), its fixed-effect parameter count,
 and its log marginal likelihood. Adding the slope lifts the evidence
@@ -606,23 +626,23 @@ what happens in any one group. <code>se.fit = TRUE</code> adds the
 link-scale standard error and credible bounds, drawn from the same
 fixed-effect covariance the summary reports, so the band on the
 prediction inherits the uncertainty in the coefficients.</p>
-<div class="sourceCode" id="cb9"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb9-1"><a href="#cb9-1" tabindex="-1"></a>nd <span class="ot">&lt;-</span> <span class="fu">data.frame</span>(<span class="at">x =</span> <span class="fu">seq</span>(<span class="sc">-</span><span class="dv">2</span>, <span class="dv">2</span>, <span class="at">length.out =</span> <span class="dv">50</span>))</span>
-<span id="cb9-2"><a href="#cb9-2" tabindex="-1"></a>pr <span class="ot">&lt;-</span> <span class="fu">predict</span>(fit_re, <span class="at">newdata =</span> nd, <span class="at">se.fit =</span> <span class="cn">TRUE</span>)</span>
-<span id="cb9-3"><a href="#cb9-3" tabindex="-1"></a><span class="fu">head</span>(pr, <span class="dv">3</span>)</span></code></pre></div>
+<div class="sourceCode" id="cb10"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb10-1"><a href="#cb10-1" tabindex="-1"></a>nd <span class="ot">&lt;-</span> <span class="fu">data.frame</span>(<span class="at">x =</span> <span class="fu">seq</span>(<span class="sc">-</span><span class="dv">2</span>, <span class="dv">2</span>, <span class="at">length.out =</span> <span class="dv">50</span>))</span>
+<span id="cb10-2"><a href="#cb10-2" tabindex="-1"></a>pr <span class="ot">&lt;-</span> <span class="fu">predict</span>(fit_re, <span class="at">newdata =</span> nd, <span class="at">se.fit =</span> <span class="cn">TRUE</span>)</span>
+<span id="cb10-3"><a href="#cb10-3" tabindex="-1"></a><span class="fu">head</span>(pr, <span class="dv">3</span>)</span></code></pre></div>
 <p>The return value carries the prediction in <code>fit</code> and the
 bounds in <code>lower</code> and <code>upper</code>, one row per row of
 <code>newdata</code>. Plotting the trend with its credible band turns
 the table into the marginal effect you would put in a paper: the line is
 the expected response across the covariate, and the ribbon is the 95%
 credible region around it.</p>
-<div class="sourceCode" id="cb10"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb10-1"><a href="#cb10-1" tabindex="-1"></a><span class="fu">library</span>(ggplot2)</span>
-<span id="cb10-2"><a href="#cb10-2" tabindex="-1"></a><span class="fu">ggplot</span>(<span class="fu">data.frame</span>(<span class="at">x =</span> nd<span class="sc">$</span>x, <span class="at">fit =</span> pr<span class="sc">$</span>fit, <span class="at">lo =</span> pr<span class="sc">$</span>lower, <span class="at">hi =</span> pr<span class="sc">$</span>upper),</span>
-<span id="cb10-3"><a href="#cb10-3" tabindex="-1"></a>       <span class="fu">aes</span>(x, fit)) <span class="sc">+</span></span>
-<span id="cb10-4"><a href="#cb10-4" tabindex="-1"></a>  <span class="fu">geom_ribbon</span>(<span class="fu">aes</span>(<span class="at">ymin =</span> lo, <span class="at">ymax =</span> hi), <span class="at">fill =</span> <span class="st">&quot;steelblue&quot;</span>, <span class="at">alpha =</span> <span class="fl">0.25</span>) <span class="sc">+</span></span>
-<span id="cb10-5"><a href="#cb10-5" tabindex="-1"></a>  <span class="fu">geom_line</span>(<span class="at">linewidth =</span> <span class="dv">1</span>) <span class="sc">+</span></span>
-<span id="cb10-6"><a href="#cb10-6" tabindex="-1"></a>  <span class="fu">labs</span>(<span class="at">x =</span> <span class="st">&quot;x&quot;</span>, <span class="at">y =</span> <span class="st">&quot;predicted y&quot;</span>) <span class="sc">+</span></span>
-<span id="cb10-7"><a href="#cb10-7" tabindex="-1"></a>  <span class="fu">theme</span>(<span class="at">panel.background =</span> <span class="fu">element_rect</span>(<span class="at">fill =</span> <span class="st">&quot;transparent&quot;</span>),</span>
-<span id="cb10-8"><a href="#cb10-8" tabindex="-1"></a>        <span class="at">plot.background  =</span> <span class="fu">element_rect</span>(<span class="at">fill =</span> <span class="st">&quot;transparent&quot;</span>))</span></code></pre></div>
+<div class="sourceCode" id="cb11"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb11-1"><a href="#cb11-1" tabindex="-1"></a><span class="fu">library</span>(ggplot2)</span>
+<span id="cb11-2"><a href="#cb11-2" tabindex="-1"></a><span class="fu">ggplot</span>(<span class="fu">data.frame</span>(<span class="at">x =</span> nd<span class="sc">$</span>x, <span class="at">fit =</span> pr<span class="sc">$</span>fit, <span class="at">lo =</span> pr<span class="sc">$</span>lower, <span class="at">hi =</span> pr<span class="sc">$</span>upper),</span>
+<span id="cb11-3"><a href="#cb11-3" tabindex="-1"></a>       <span class="fu">aes</span>(x, fit)) <span class="sc">+</span></span>
+<span id="cb11-4"><a href="#cb11-4" tabindex="-1"></a>  <span class="fu">geom_ribbon</span>(<span class="fu">aes</span>(<span class="at">ymin =</span> lo, <span class="at">ymax =</span> hi), <span class="at">fill =</span> <span class="st">&quot;steelblue&quot;</span>, <span class="at">alpha =</span> <span class="fl">0.25</span>) <span class="sc">+</span></span>
+<span id="cb11-5"><a href="#cb11-5" tabindex="-1"></a>  <span class="fu">geom_line</span>(<span class="at">linewidth =</span> <span class="dv">1</span>) <span class="sc">+</span></span>
+<span id="cb11-6"><a href="#cb11-6" tabindex="-1"></a>  <span class="fu">labs</span>(<span class="at">x =</span> <span class="st">&quot;x&quot;</span>, <span class="at">y =</span> <span class="st">&quot;predicted y&quot;</span>) <span class="sc">+</span></span>
+<span id="cb11-7"><a href="#cb11-7" tabindex="-1"></a>  <span class="fu">theme</span>(<span class="at">panel.background =</span> <span class="fu">element_rect</span>(<span class="at">fill =</span> <span class="st">&quot;transparent&quot;</span>),</span>
+<span id="cb11-8"><a href="#cb11-8" tabindex="-1"></a>        <span class="at">plot.background  =</span> <span class="fu">element_rect</span>(<span class="at">fill =</span> <span class="st">&quot;transparent&quot;</span>))</span></code></pre></div>
 <p>The band is narrow in the middle of the covariate range and flares at
 the edges, which is the signature of a linear fit: the prediction is
 most certain near the bulk of the data and least certain where you
@@ -643,14 +663,14 @@ family needs. The same <code>coef()</code>, <code>summary()</code>,
 <code>predict()</code>, and comparison machinery applies, because the
 engine treats the likelihood as a pluggable component and everything
 above it is family-blind.</p>
-<div class="sourceCode" id="cb11"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb11-1"><a href="#cb11-1" tabindex="-1"></a><span class="co"># Poisson counts</span></span>
-<span id="cb11-2"><a href="#cb11-2" tabindex="-1"></a>dp <span class="ot">&lt;-</span> <span class="fu">data.frame</span>(<span class="at">y =</span> <span class="fu">rpois</span>(n, <span class="fu">exp</span>(<span class="fl">0.2</span> <span class="sc">+</span> <span class="fl">0.6</span> <span class="sc">*</span> x)), <span class="at">x =</span> x)</span>
-<span id="cb11-3"><a href="#cb11-3" tabindex="-1"></a><span class="fu">coef</span>(<span class="fu">tulpa</span>(y <span class="sc">~</span> x, <span class="at">data =</span> dp, <span class="at">family =</span> <span class="st">&quot;poisson&quot;</span>, <span class="at">mode =</span> <span class="st">&quot;laplace&quot;</span>))</span>
-<span id="cb11-4"><a href="#cb11-4" tabindex="-1"></a></span>
-<span id="cb11-5"><a href="#cb11-5" tabindex="-1"></a><span class="co"># Beta proportions in (0, 1), precision phi</span></span>
-<span id="cb11-6"><a href="#cb11-6" tabindex="-1"></a>mu <span class="ot">&lt;-</span> <span class="fu">plogis</span>(<span class="fl">0.1</span> <span class="sc">+</span> <span class="fl">0.8</span> <span class="sc">*</span> x)</span>
-<span id="cb11-7"><a href="#cb11-7" tabindex="-1"></a>db <span class="ot">&lt;-</span> <span class="fu">data.frame</span>(<span class="at">y =</span> <span class="fu">rbeta</span>(n, mu <span class="sc">*</span> <span class="dv">8</span>, (<span class="dv">1</span> <span class="sc">-</span> mu) <span class="sc">*</span> <span class="dv">8</span>), <span class="at">x =</span> x)</span>
-<span id="cb11-8"><a href="#cb11-8" tabindex="-1"></a><span class="fu">coef</span>(<span class="fu">tulpa</span>(y <span class="sc">~</span> x, <span class="at">data =</span> db, <span class="at">family =</span> <span class="st">&quot;beta&quot;</span>, <span class="at">mode =</span> <span class="st">&quot;laplace&quot;</span>, <span class="at">phi =</span> <span class="dv">8</span>))</span></code></pre></div>
+<div class="sourceCode" id="cb12"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb12-1"><a href="#cb12-1" tabindex="-1"></a><span class="co"># Poisson counts</span></span>
+<span id="cb12-2"><a href="#cb12-2" tabindex="-1"></a>dp <span class="ot">&lt;-</span> <span class="fu">data.frame</span>(<span class="at">y =</span> <span class="fu">rpois</span>(n, <span class="fu">exp</span>(<span class="fl">0.2</span> <span class="sc">+</span> <span class="fl">0.6</span> <span class="sc">*</span> x)), <span class="at">x =</span> x)</span>
+<span id="cb12-3"><a href="#cb12-3" tabindex="-1"></a><span class="fu">coef</span>(<span class="fu">tulpa</span>(y <span class="sc">~</span> x, <span class="at">data =</span> dp, <span class="at">family =</span> <span class="st">&quot;poisson&quot;</span>, <span class="at">mode =</span> <span class="st">&quot;laplace&quot;</span>))</span>
+<span id="cb12-4"><a href="#cb12-4" tabindex="-1"></a></span>
+<span id="cb12-5"><a href="#cb12-5" tabindex="-1"></a><span class="co"># Beta proportions in (0, 1), precision phi</span></span>
+<span id="cb12-6"><a href="#cb12-6" tabindex="-1"></a>mu <span class="ot">&lt;-</span> <span class="fu">plogis</span>(<span class="fl">0.1</span> <span class="sc">+</span> <span class="fl">0.8</span> <span class="sc">*</span> x)</span>
+<span id="cb12-7"><a href="#cb12-7" tabindex="-1"></a>db <span class="ot">&lt;-</span> <span class="fu">data.frame</span>(<span class="at">y =</span> <span class="fu">rbeta</span>(n, mu <span class="sc">*</span> <span class="dv">8</span>, (<span class="dv">1</span> <span class="sc">-</span> mu) <span class="sc">*</span> <span class="dv">8</span>), <span class="at">x =</span> x)</span>
+<span id="cb12-8"><a href="#cb12-8" tabindex="-1"></a><span class="fu">coef</span>(<span class="fu">tulpa</span>(y <span class="sc">~</span> x, <span class="at">data =</span> db, <span class="at">family =</span> <span class="st">&quot;beta&quot;</span>, <span class="at">mode =</span> <span class="st">&quot;laplace&quot;</span>, <span class="at">phi =</span> <span class="dv">8</span>))</span></code></pre></div>
 <p>The Poisson slope recovers the 0.6 it was built from and the beta
 slope recovers its 0.8, each on its own link scale: log for the Poisson
 rate, logit for the beta mean. Counts go through <code>poisson</code>
@@ -672,7 +692,7 @@ and the tier matters because it pins down what the credible intervals
 mean. tulpa sorts every backend into one of three tiers, and
 <code>inference_mode_info()</code> prints the full map with the
 guarantee attached to each.</p>
-<div class="sourceCode" id="cb12"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb12-1"><a href="#cb12-1" tabindex="-1"></a><span class="fu">inference_mode_info</span>()</span></code></pre></div>
+<div class="sourceCode" id="cb13"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb13-1"><a href="#cb13-1" tabindex="-1"></a><span class="fu">inference_mode_info</span>()</span></code></pre></div>
 <p>Tier 1 (Exact) draws from the posterior, so its intervals are
 posterior uncertainty up to Monte Carlo error that shrinks with more
 draws. MALA, the independence-MH samplers, and the Polya-Gamma Gibbs
@@ -687,32 +707,32 @@ recorded rule and never silently drops to Tier 3.</p>
 <p>Fit the binomial grouped model two ways, once with the deterministic
 Laplace approximation and once with MALA, a gradient sampler that draws
 from the posterior directly.</p>
-<div class="sourceCode" id="cb13"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb13-1"><a href="#cb13-1" tabindex="-1"></a>df_b <span class="ot">&lt;-</span> df</span>
-<span id="cb13-2"><a href="#cb13-2" tabindex="-1"></a>df_b<span class="sc">$</span>y <span class="ot">&lt;-</span> <span class="fu">rbinom</span>(n, <span class="dv">1</span>, <span class="fu">plogis</span>(<span class="sc">-</span><span class="fl">0.3</span> <span class="sc">+</span> <span class="fl">1.0</span> <span class="sc">*</span> df<span class="sc">$</span>x <span class="sc">+</span> u[df<span class="sc">$</span>g]))</span>
-<span id="cb13-3"><a href="#cb13-3" tabindex="-1"></a></span>
-<span id="cb13-4"><a href="#cb13-4" tabindex="-1"></a>fit_lap <span class="ot">&lt;-</span> <span class="fu">tulpa</span>(y <span class="sc">~</span> x <span class="sc">+</span> (<span class="dv">1</span> <span class="sc">|</span> g), <span class="at">data =</span> df_b, <span class="at">family =</span> <span class="st">&quot;binomial&quot;</span>,</span>
-<span id="cb13-5"><a href="#cb13-5" tabindex="-1"></a>                 <span class="at">mode =</span> <span class="st">&quot;laplace&quot;</span>, <span class="at">sigma_re =</span> <span class="fl">0.6</span>)</span>
-<span id="cb13-6"><a href="#cb13-6" tabindex="-1"></a>fit_mala <span class="ot">&lt;-</span> <span class="fu">tulpa</span>(y <span class="sc">~</span> x <span class="sc">+</span> (<span class="dv">1</span> <span class="sc">|</span> g), <span class="at">data =</span> df_b, <span class="at">family =</span> <span class="st">&quot;binomial&quot;</span>,</span>
-<span id="cb13-7"><a href="#cb13-7" tabindex="-1"></a>                  <span class="at">mode =</span> <span class="st">&quot;mala&quot;</span>, <span class="at">sigma_re =</span> <span class="fl">0.6</span>,</span>
-<span id="cb13-8"><a href="#cb13-8" tabindex="-1"></a>                  <span class="at">control =</span> <span class="fu">list</span>(<span class="at">n_iter =</span> <span class="dv">450</span>, <span class="at">warmup =</span> <span class="dv">150</span>))</span></code></pre></div>
+<div class="sourceCode" id="cb14"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb14-1"><a href="#cb14-1" tabindex="-1"></a>df_b <span class="ot">&lt;-</span> df</span>
+<span id="cb14-2"><a href="#cb14-2" tabindex="-1"></a>df_b<span class="sc">$</span>y <span class="ot">&lt;-</span> <span class="fu">rbinom</span>(n, <span class="dv">1</span>, <span class="fu">plogis</span>(<span class="sc">-</span><span class="fl">0.3</span> <span class="sc">+</span> <span class="fl">1.0</span> <span class="sc">*</span> df<span class="sc">$</span>x <span class="sc">+</span> u[df<span class="sc">$</span>g]))</span>
+<span id="cb14-3"><a href="#cb14-3" tabindex="-1"></a></span>
+<span id="cb14-4"><a href="#cb14-4" tabindex="-1"></a>fit_lap <span class="ot">&lt;-</span> <span class="fu">tulpa</span>(y <span class="sc">~</span> x <span class="sc">+</span> (<span class="dv">1</span> <span class="sc">|</span> g), <span class="at">data =</span> df_b, <span class="at">family =</span> <span class="st">&quot;binomial&quot;</span>,</span>
+<span id="cb14-5"><a href="#cb14-5" tabindex="-1"></a>                 <span class="at">mode =</span> <span class="st">&quot;laplace&quot;</span>, <span class="at">sigma_re =</span> <span class="fl">0.6</span>)</span>
+<span id="cb14-6"><a href="#cb14-6" tabindex="-1"></a>fit_mala <span class="ot">&lt;-</span> <span class="fu">tulpa</span>(y <span class="sc">~</span> x <span class="sc">+</span> (<span class="dv">1</span> <span class="sc">|</span> g), <span class="at">data =</span> df_b, <span class="at">family =</span> <span class="st">&quot;binomial&quot;</span>,</span>
+<span id="cb14-7"><a href="#cb14-7" tabindex="-1"></a>                  <span class="at">mode =</span> <span class="st">&quot;mala&quot;</span>, <span class="at">sigma_re =</span> <span class="fl">0.6</span>,</span>
+<span id="cb14-8"><a href="#cb14-8" tabindex="-1"></a>                  <span class="at">control =</span> <span class="fu">list</span>(<span class="at">n_iter =</span> <span class="dv">450</span>, <span class="at">warmup =</span> <span class="dv">150</span>))</span></code></pre></div>
 <p>The two tiers agree on the fixed effects to within their uncertainty,
 which is the expected outcome when the posterior is near-Gaussian: the
 posterior mean is the easy quantity and every method finds it. The
 Laplace fit is deterministic and immediate; the sampler carries Monte
 Carlo error and stays agnostic about the posterior shape, which is the
 guarantee you pay for when the posterior is not Gaussian.</p>
-<div class="sourceCode" id="cb14"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb14-1"><a href="#cb14-1" tabindex="-1"></a><span class="fu">data.frame</span>(</span>
-<span id="cb14-2"><a href="#cb14-2" tabindex="-1"></a>  <span class="at">term    =</span> <span class="fu">names</span>(<span class="fu">coef</span>(fit_lap)),</span>
-<span id="cb14-3"><a href="#cb14-3" tabindex="-1"></a>  <span class="at">laplace =</span> <span class="fu">round</span>(<span class="fu">coef</span>(fit_lap), <span class="dv">3</span>),</span>
-<span id="cb14-4"><a href="#cb14-4" tabindex="-1"></a>  <span class="at">mala    =</span> <span class="fu">round</span>(<span class="fu">coef</span>(fit_mala), <span class="dv">3</span>)</span>
-<span id="cb14-5"><a href="#cb14-5" tabindex="-1"></a>)</span></code></pre></div>
+<div class="sourceCode" id="cb15"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb15-1"><a href="#cb15-1" tabindex="-1"></a><span class="fu">data.frame</span>(</span>
+<span id="cb15-2"><a href="#cb15-2" tabindex="-1"></a>  <span class="at">term    =</span> <span class="fu">names</span>(<span class="fu">coef</span>(fit_lap)),</span>
+<span id="cb15-3"><a href="#cb15-3" tabindex="-1"></a>  <span class="at">laplace =</span> <span class="fu">round</span>(<span class="fu">coef</span>(fit_lap), <span class="dv">3</span>),</span>
+<span id="cb15-4"><a href="#cb15-4" tabindex="-1"></a>  <span class="at">mala    =</span> <span class="fu">round</span>(<span class="fu">coef</span>(fit_mala), <span class="dv">3</span>)</span>
+<span id="cb15-5"><a href="#cb15-5" tabindex="-1"></a>)</span></code></pre></div>
 <p>The agreement here is itself a signal that Laplace was safe for this
-model. Every fit records which backend ran and at which tier, through
-the <code>backend</code> and <code>inference_tier</code> fields, and
-<code>selection_reason</code> records why <code>mode = &quot;auto&quot;</code>
-chose what it did, so you are never left guessing which engine produced
-a number.</p>
-<div class="sourceCode" id="cb15"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb15-1"><a href="#cb15-1" tabindex="-1"></a><span class="fu">c</span>(<span class="at">backend =</span> fit_mala<span class="sc">$</span>backend, <span class="at">tier =</span> fit_mala<span class="sc">$</span>inference_tier)</span></code></pre></div>
+model. Every fit records which backend ran and at which tier, and why
+<code>mode = &quot;auto&quot;</code> chose what it did. <code>print()</code> names
+the backend and tier in its first line, and <code>summary()</code>
+carries all three in its <code>inference</code> part, so you are never
+left guessing which engine produced a number.</p>
+<div class="sourceCode" id="cb16"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb16-1"><a href="#cb16-1" tabindex="-1"></a><span class="fu">unlist</span>(<span class="fu">summary</span>(fit_mala)<span class="sc">$</span>inference[<span class="fu">c</span>(<span class="st">&quot;backend&quot;</span>, <span class="st">&quot;inference_tier&quot;</span>)])</span></code></pre></div>
 <p>The tiers encode an epistemic guarantee that goes beyond the speed
 trade-off. Tier 1 intervals are posterior uncertainty you can quote
 without an asterisk. Tier 2 intervals are correct conditional on the
@@ -773,7 +793,7 @@ with the tier each belongs to and the situation each suits:</p>
 mixed. <code>plot(fit, type = &quot;trace&quot;)</code> draws the post-warmup
 draws for the leading fixed effects; a healthy chain looks like a fuzzy
 horizontal band with no drift or sticking.</p>
-<div class="sourceCode" id="cb16"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb16-1"><a href="#cb16-1" tabindex="-1"></a><span class="fu">plot</span>(fit_mala, <span class="at">type =</span> <span class="st">&quot;trace&quot;</span>)</span></code></pre></div>
+<div class="sourceCode" id="cb17"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb17-1"><a href="#cb17-1" tabindex="-1"></a><span class="fu">plot</span>(fit_mala, <span class="at">type =</span> <span class="st">&quot;trace&quot;</span>)</span></code></pre></div>
 <p>The agreement between the tiers here is the typical case for a latent
 Gaussian model with enough data, and it is also the case where the cheap
 method is the right one. The interesting models are the ones where the
@@ -806,32 +826,33 @@ formula. <code>type = &quot;icar&quot;</code> puts an intrinsic
 conditional-autoregressive field on the units. Here twenty regions sit
 on a ring, each adjacent to its two neighbours, with a smooth wave of
 regional effect around the loop.</p>
-<div class="sourceCode" id="cb17"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb17-1"><a href="#cb17-1" tabindex="-1"></a>K <span class="ot">&lt;-</span> <span class="dv">20</span></span>
-<span id="cb17-2"><a href="#cb17-2" tabindex="-1"></a>W <span class="ot">&lt;-</span> <span class="fu">matrix</span>(<span class="dv">0</span>, K, K)</span>
-<span id="cb17-3"><a href="#cb17-3" tabindex="-1"></a><span class="cf">for</span> (i <span class="cf">in</span> <span class="dv">1</span><span class="sc">:</span>K) { j <span class="ot">&lt;-</span> <span class="cf">if</span> (i <span class="sc">&lt;</span> K) i <span class="sc">+</span> <span class="dv">1</span> <span class="cf">else</span> <span class="dv">1</span>; W[i, j] <span class="ot">&lt;-</span> W[j, i] <span class="ot">&lt;-</span> <span class="dv">1</span> }</span>
-<span id="cb17-4"><a href="#cb17-4" tabindex="-1"></a></span>
-<span id="cb17-5"><a href="#cb17-5" tabindex="-1"></a>region <span class="ot">&lt;-</span> <span class="fu">factor</span>(<span class="fu">sample</span>(<span class="dv">1</span><span class="sc">:</span>K, n, <span class="at">replace =</span> <span class="cn">TRUE</span>))</span>
-<span id="cb17-6"><a href="#cb17-6" tabindex="-1"></a>field  <span class="ot">&lt;-</span> <span class="fu">as.numeric</span>(<span class="fu">scale</span>(<span class="fu">sin</span>(<span class="dv">2</span> <span class="sc">*</span> pi <span class="sc">*</span> (<span class="dv">1</span><span class="sc">:</span>K) <span class="sc">/</span> K)))[region]</span>
-<span id="cb17-7"><a href="#cb17-7" tabindex="-1"></a>ds <span class="ot">&lt;-</span> <span class="fu">data.frame</span>(<span class="at">y =</span> <span class="fu">rbinom</span>(n, <span class="dv">1</span>, <span class="fu">plogis</span>(<span class="sc">-</span><span class="fl">0.2</span> <span class="sc">+</span> <span class="fl">0.7</span> <span class="sc">*</span> x <span class="sc">+</span> field)),</span>
-<span id="cb17-8"><a href="#cb17-8" tabindex="-1"></a>                 <span class="at">x =</span> x, <span class="at">region =</span> region)</span>
-<span id="cb17-9"><a href="#cb17-9" tabindex="-1"></a></span>
-<span id="cb17-10"><a href="#cb17-10" tabindex="-1"></a>fit_sp <span class="ot">&lt;-</span> <span class="fu">tulpa</span>(y <span class="sc">~</span> x <span class="sc">+</span> <span class="fu">spatial</span>(region), <span class="at">data =</span> ds, <span class="at">family =</span> <span class="st">&quot;binomial&quot;</span>,</span>
-<span id="cb17-11"><a href="#cb17-11" tabindex="-1"></a>                <span class="at">spatial =</span> <span class="fu">list</span>(<span class="at">type =</span> <span class="st">&quot;icar&quot;</span>, <span class="at">adjacency =</span> W),</span>
-<span id="cb17-12"><a href="#cb17-12" tabindex="-1"></a>                <span class="at">mode =</span> <span class="st">&quot;laplace&quot;</span>)</span>
-<span id="cb17-13"><a href="#cb17-13" tabindex="-1"></a><span class="fu">coef</span>(fit_sp)</span></code></pre></div>
+<div class="sourceCode" id="cb18"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb18-1"><a href="#cb18-1" tabindex="-1"></a>K <span class="ot">&lt;-</span> <span class="dv">20</span></span>
+<span id="cb18-2"><a href="#cb18-2" tabindex="-1"></a>W <span class="ot">&lt;-</span> <span class="fu">matrix</span>(<span class="dv">0</span>, K, K)</span>
+<span id="cb18-3"><a href="#cb18-3" tabindex="-1"></a><span class="cf">for</span> (i <span class="cf">in</span> <span class="dv">1</span><span class="sc">:</span>K) { j <span class="ot">&lt;-</span> <span class="cf">if</span> (i <span class="sc">&lt;</span> K) i <span class="sc">+</span> <span class="dv">1</span> <span class="cf">else</span> <span class="dv">1</span>; W[i, j] <span class="ot">&lt;-</span> W[j, i] <span class="ot">&lt;-</span> <span class="dv">1</span> }</span>
+<span id="cb18-4"><a href="#cb18-4" tabindex="-1"></a></span>
+<span id="cb18-5"><a href="#cb18-5" tabindex="-1"></a>region <span class="ot">&lt;-</span> <span class="fu">factor</span>(<span class="fu">sample</span>(<span class="dv">1</span><span class="sc">:</span>K, n, <span class="at">replace =</span> <span class="cn">TRUE</span>))</span>
+<span id="cb18-6"><a href="#cb18-6" tabindex="-1"></a>field  <span class="ot">&lt;-</span> <span class="fu">as.numeric</span>(<span class="fu">scale</span>(<span class="fu">sin</span>(<span class="dv">2</span> <span class="sc">*</span> pi <span class="sc">*</span> (<span class="dv">1</span><span class="sc">:</span>K) <span class="sc">/</span> K)))[region]</span>
+<span id="cb18-7"><a href="#cb18-7" tabindex="-1"></a>ds <span class="ot">&lt;-</span> <span class="fu">data.frame</span>(<span class="at">y =</span> <span class="fu">rbinom</span>(n, <span class="dv">1</span>, <span class="fu">plogis</span>(<span class="sc">-</span><span class="fl">0.2</span> <span class="sc">+</span> <span class="fl">0.7</span> <span class="sc">*</span> x <span class="sc">+</span> field)),</span>
+<span id="cb18-8"><a href="#cb18-8" tabindex="-1"></a>                 <span class="at">x =</span> x, <span class="at">region =</span> region)</span>
+<span id="cb18-9"><a href="#cb18-9" tabindex="-1"></a></span>
+<span id="cb18-10"><a href="#cb18-10" tabindex="-1"></a>fit_sp <span class="ot">&lt;-</span> <span class="fu">tulpa</span>(y <span class="sc">~</span> x <span class="sc">+</span> <span class="fu">spatial</span>(region), <span class="at">data =</span> ds, <span class="at">family =</span> <span class="st">&quot;binomial&quot;</span>,</span>
+<span id="cb18-11"><a href="#cb18-11" tabindex="-1"></a>                <span class="at">spatial =</span> <span class="fu">list</span>(<span class="at">type =</span> <span class="st">&quot;icar&quot;</span>, <span class="at">adjacency =</span> W),</span>
+<span id="cb18-12"><a href="#cb18-12" tabindex="-1"></a>                <span class="at">mode =</span> <span class="st">&quot;laplace&quot;</span>)</span>
+<span id="cb18-13"><a href="#cb18-13" tabindex="-1"></a><span class="fu">coef</span>(fit_sp)</span></code></pre></div>
 <p>The slope recovers near its true 0.7 while the ICAR field absorbs the
 regional structure. Plot the per-region field effect around the ring to
-see the wave the fit pulled out of binary data: the mode at each
-region’s latent column traces the smooth signal the covariate could not
+see the wave the fit pulled out of binary data:
+<code>field_effects()</code> returns the field at each region, here its
+posterior mode, and traces the smooth signal the covariate could not
 explain.</p>
-<div class="sourceCode" id="cb18"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb18-1"><a href="#cb18-1" tabindex="-1"></a><span class="fu">library</span>(ggplot2)</span>
-<span id="cb18-2"><a href="#cb18-2" tabindex="-1"></a>fe <span class="ot">&lt;-</span> <span class="fu">tail</span>(fit_sp<span class="sc">$</span>mode, K)</span>
-<span id="cb18-3"><a href="#cb18-3" tabindex="-1"></a><span class="fu">ggplot</span>(<span class="fu">data.frame</span>(<span class="at">region =</span> <span class="fu">seq_len</span>(K), <span class="at">effect =</span> fe), <span class="fu">aes</span>(region, effect)) <span class="sc">+</span></span>
-<span id="cb18-4"><a href="#cb18-4" tabindex="-1"></a>  <span class="fu">geom_line</span>(<span class="at">linewidth =</span> <span class="dv">1</span>, <span class="at">colour =</span> <span class="st">&quot;steelblue&quot;</span>) <span class="sc">+</span></span>
-<span id="cb18-5"><a href="#cb18-5" tabindex="-1"></a>  <span class="fu">geom_point</span>() <span class="sc">+</span></span>
-<span id="cb18-6"><a href="#cb18-6" tabindex="-1"></a>  <span class="fu">labs</span>(<span class="at">x =</span> <span class="st">&quot;region&quot;</span>, <span class="at">y =</span> <span class="st">&quot;field effect&quot;</span>) <span class="sc">+</span></span>
-<span id="cb18-7"><a href="#cb18-7" tabindex="-1"></a>  <span class="fu">theme</span>(<span class="at">panel.background =</span> <span class="fu">element_rect</span>(<span class="at">fill =</span> <span class="st">&quot;transparent&quot;</span>),</span>
-<span id="cb18-8"><a href="#cb18-8" tabindex="-1"></a>        <span class="at">plot.background  =</span> <span class="fu">element_rect</span>(<span class="at">fill =</span> <span class="st">&quot;transparent&quot;</span>))</span></code></pre></div>
+<div class="sourceCode" id="cb19"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb19-1"><a href="#cb19-1" tabindex="-1"></a><span class="fu">library</span>(ggplot2)</span>
+<span id="cb19-2"><a href="#cb19-2" tabindex="-1"></a>fe <span class="ot">&lt;-</span> <span class="fu">field_effects</span>(fit_sp)</span>
+<span id="cb19-3"><a href="#cb19-3" tabindex="-1"></a><span class="fu">ggplot</span>(<span class="fu">data.frame</span>(<span class="at">region =</span> fe<span class="sc">$</span>unit, <span class="at">effect =</span> fe<span class="sc">$</span>estimate), <span class="fu">aes</span>(region, effect)) <span class="sc">+</span></span>
+<span id="cb19-4"><a href="#cb19-4" tabindex="-1"></a>  <span class="fu">geom_line</span>(<span class="at">linewidth =</span> <span class="dv">1</span>, <span class="at">colour =</span> <span class="st">&quot;steelblue&quot;</span>) <span class="sc">+</span></span>
+<span id="cb19-5"><a href="#cb19-5" tabindex="-1"></a>  <span class="fu">geom_point</span>() <span class="sc">+</span></span>
+<span id="cb19-6"><a href="#cb19-6" tabindex="-1"></a>  <span class="fu">labs</span>(<span class="at">x =</span> <span class="st">&quot;region&quot;</span>, <span class="at">y =</span> <span class="st">&quot;field effect&quot;</span>) <span class="sc">+</span></span>
+<span id="cb19-7"><a href="#cb19-7" tabindex="-1"></a>  <span class="fu">theme</span>(<span class="at">panel.background =</span> <span class="fu">element_rect</span>(<span class="at">fill =</span> <span class="st">&quot;transparent&quot;</span>),</span>
+<span id="cb19-8"><a href="#cb19-8" tabindex="-1"></a>        <span class="at">plot.background  =</span> <span class="fu">element_rect</span>(<span class="at">fill =</span> <span class="st">&quot;transparent&quot;</span>))</span></code></pre></div>
 <p>The field absorbs the regional signal so the slope does not have to.
 Without the field, a covariate that happens to vary across the ring the
 same way the latent wave does would soak up part of that wave and report
@@ -865,37 +886,36 @@ tulpa offers that function as a first-order random walk, declared with
 <p>Simulate counts over thirty time points with a smooth sinusoidal
 trend, a real covariate effect, and Poisson noise, then fit with the
 random-walk trend in place.</p>
-<div class="sourceCode" id="cb19"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb19-1"><a href="#cb19-1" tabindex="-1"></a>Tt    <span class="ot">&lt;-</span> <span class="dv">30</span></span>
-<span id="cb19-2"><a href="#cb19-2" tabindex="-1"></a>time  <span class="ot">&lt;-</span> <span class="fu">sample</span>(<span class="fu">seq_len</span>(Tt), n, <span class="at">replace =</span> <span class="cn">TRUE</span>)</span>
-<span id="cb19-3"><a href="#cb19-3" tabindex="-1"></a>trend <span class="ot">&lt;-</span> <span class="fl">1.2</span> <span class="sc">*</span> <span class="fu">sin</span>(<span class="dv">2</span> <span class="sc">*</span> pi <span class="sc">*</span> <span class="fu">seq_len</span>(Tt) <span class="sc">/</span> Tt)</span>
-<span id="cb19-4"><a href="#cb19-4" tabindex="-1"></a>xt    <span class="ot">&lt;-</span> <span class="fu">rnorm</span>(n)</span>
-<span id="cb19-5"><a href="#cb19-5" tabindex="-1"></a>dt    <span class="ot">&lt;-</span> <span class="fu">data.frame</span>(<span class="at">y =</span> <span class="fu">rpois</span>(n, <span class="fu">exp</span>(<span class="fl">0.4</span> <span class="sc">+</span> <span class="fl">0.5</span> <span class="sc">*</span> xt <span class="sc">+</span> trend[time])),</span>
-<span id="cb19-6"><a href="#cb19-6" tabindex="-1"></a>                    <span class="at">x =</span> xt, <span class="at">time =</span> time)</span>
-<span id="cb19-7"><a href="#cb19-7" tabindex="-1"></a></span>
-<span id="cb19-8"><a href="#cb19-8" tabindex="-1"></a>fit_t <span class="ot">&lt;-</span> <span class="fu">tulpa</span>(y <span class="sc">~</span> x, <span class="at">data =</span> dt, <span class="at">family =</span> <span class="st">&quot;poisson&quot;</span>,</span>
-<span id="cb19-9"><a href="#cb19-9" tabindex="-1"></a>               <span class="at">temporal =</span> <span class="fu">temporal_rw1</span>(<span class="st">&quot;time&quot;</span>), <span class="at">mode =</span> <span class="st">&quot;auto&quot;</span>)</span>
-<span id="cb19-10"><a href="#cb19-10" tabindex="-1"></a><span class="fu">coef</span>(fit_t)</span></code></pre></div>
+<div class="sourceCode" id="cb20"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb20-1"><a href="#cb20-1" tabindex="-1"></a>Tt    <span class="ot">&lt;-</span> <span class="dv">30</span></span>
+<span id="cb20-2"><a href="#cb20-2" tabindex="-1"></a>time  <span class="ot">&lt;-</span> <span class="fu">sample</span>(<span class="fu">seq_len</span>(Tt), n, <span class="at">replace =</span> <span class="cn">TRUE</span>)</span>
+<span id="cb20-3"><a href="#cb20-3" tabindex="-1"></a>trend <span class="ot">&lt;-</span> <span class="fl">1.2</span> <span class="sc">*</span> <span class="fu">sin</span>(<span class="dv">2</span> <span class="sc">*</span> pi <span class="sc">*</span> <span class="fu">seq_len</span>(Tt) <span class="sc">/</span> Tt)</span>
+<span id="cb20-4"><a href="#cb20-4" tabindex="-1"></a>xt    <span class="ot">&lt;-</span> <span class="fu">rnorm</span>(n)</span>
+<span id="cb20-5"><a href="#cb20-5" tabindex="-1"></a>dt    <span class="ot">&lt;-</span> <span class="fu">data.frame</span>(<span class="at">y =</span> <span class="fu">rpois</span>(n, <span class="fu">exp</span>(<span class="fl">0.4</span> <span class="sc">+</span> <span class="fl">0.5</span> <span class="sc">*</span> xt <span class="sc">+</span> trend[time])),</span>
+<span id="cb20-6"><a href="#cb20-6" tabindex="-1"></a>                    <span class="at">x =</span> xt, <span class="at">time =</span> time)</span>
+<span id="cb20-7"><a href="#cb20-7" tabindex="-1"></a></span>
+<span id="cb20-8"><a href="#cb20-8" tabindex="-1"></a>fit_t <span class="ot">&lt;-</span> <span class="fu">tulpa</span>(y <span class="sc">~</span> x, <span class="at">data =</span> dt, <span class="at">family =</span> <span class="st">&quot;poisson&quot;</span>,</span>
+<span id="cb20-9"><a href="#cb20-9" tabindex="-1"></a>               <span class="at">temporal =</span> <span class="fu">temporal_rw1</span>(<span class="st">&quot;time&quot;</span>), <span class="at">mode =</span> <span class="st">&quot;auto&quot;</span>)</span>
+<span id="cb20-10"><a href="#cb20-10" tabindex="-1"></a><span class="fu">coef</span>(fit_t)</span></code></pre></div>
 <p>The slope lands near its true 0.5 with the trend absorbed into the
 field rather than the coefficient. <code>mode = &quot;auto&quot;</code> routes the
-temporal field to the nested-Laplace backend, which carries the per-grid
-latent modes in <code>$modes</code> (one row per grid point, columns
-ordered <code>[fixed effects, field]</code>) and the grid
-<code>$weights</code>. Weight-average the field column for each time
-point to integrate over the smoothing precision, then plot the recovered
-walk against the truth.</p>
-<div class="sourceCode" id="cb20"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb20-1"><a href="#cb20-1" tabindex="-1"></a>w  <span class="ot">&lt;-</span> fit_t<span class="sc">$</span>weights <span class="sc">/</span> <span class="fu">sum</span>(fit_t<span class="sc">$</span>weights)</span>
-<span id="cb20-2"><a href="#cb20-2" tabindex="-1"></a>nf <span class="ot">&lt;-</span> fit_t<span class="sc">$</span>n_fixed</span>
-<span id="cb20-3"><a href="#cb20-3" tabindex="-1"></a>te <span class="ot">&lt;-</span> <span class="fu">vapply</span>(<span class="fu">seq_len</span>(Tt),</span>
-<span id="cb20-4"><a href="#cb20-4" tabindex="-1"></a>             <span class="cf">function</span>(u) <span class="fu">sum</span>(w <span class="sc">*</span> fit_t<span class="sc">$</span>modes[, nf <span class="sc">+</span> u]), <span class="fu">numeric</span>(<span class="dv">1</span>))</span>
-<span id="cb20-5"><a href="#cb20-5" tabindex="-1"></a><span class="fu">ggplot</span>(<span class="fu">data.frame</span>(<span class="at">time =</span> <span class="fu">seq_len</span>(Tt),</span>
-<span id="cb20-6"><a href="#cb20-6" tabindex="-1"></a>                  <span class="at">est =</span> te <span class="sc">-</span> <span class="fu">mean</span>(te),</span>
-<span id="cb20-7"><a href="#cb20-7" tabindex="-1"></a>                  <span class="at">truth =</span> trend <span class="sc">-</span> <span class="fu">mean</span>(trend)),</span>
-<span id="cb20-8"><a href="#cb20-8" tabindex="-1"></a>       <span class="fu">aes</span>(time)) <span class="sc">+</span></span>
-<span id="cb20-9"><a href="#cb20-9" tabindex="-1"></a>  <span class="fu">geom_line</span>(<span class="fu">aes</span>(<span class="at">y =</span> truth), <span class="at">linewidth =</span> <span class="dv">1</span>, <span class="at">colour =</span> <span class="st">&quot;grey50&quot;</span>) <span class="sc">+</span></span>
-<span id="cb20-10"><a href="#cb20-10" tabindex="-1"></a>  <span class="fu">geom_line</span>(<span class="fu">aes</span>(<span class="at">y =</span> est), <span class="at">linewidth =</span> <span class="dv">1</span>, <span class="at">colour =</span> <span class="st">&quot;steelblue&quot;</span>) <span class="sc">+</span></span>
-<span id="cb20-11"><a href="#cb20-11" tabindex="-1"></a>  <span class="fu">labs</span>(<span class="at">x =</span> <span class="st">&quot;time&quot;</span>, <span class="at">y =</span> <span class="st">&quot;trend (centred)&quot;</span>) <span class="sc">+</span></span>
-<span id="cb20-12"><a href="#cb20-12" tabindex="-1"></a>  <span class="fu">theme</span>(<span class="at">panel.background =</span> <span class="fu">element_rect</span>(<span class="at">fill =</span> <span class="st">&quot;transparent&quot;</span>),</span>
-<span id="cb20-13"><a href="#cb20-13" tabindex="-1"></a>        <span class="at">plot.background  =</span> <span class="fu">element_rect</span>(<span class="at">fill =</span> <span class="st">&quot;transparent&quot;</span>))</span></code></pre></div>
+temporal field to the nested-Laplace backend, and
+<code>tulpa_outer_grid()</code> returns its grid: the per-grid latent
+modes in <code>modes</code> (one row per grid point, columns ordered
+<code>[fixed effects, field]</code>) and the grid <code>weights</code>.
+Weight-average the field column for each time point to integrate over
+the smoothing precision, then plot the recovered walk against the
+truth.</p>
+<div class="sourceCode" id="cb21"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb21-1"><a href="#cb21-1" tabindex="-1"></a>g  <span class="ot">&lt;-</span> <span class="fu">tulpa_outer_grid</span>(fit_t)</span>
+<span id="cb21-2"><a href="#cb21-2" tabindex="-1"></a>te <span class="ot">&lt;-</span> <span class="fu">colSums</span>(g<span class="sc">$</span>weights <span class="sc">*</span> g<span class="sc">$</span>modes)[g<span class="sc">$</span>n_fixed <span class="sc">+</span> <span class="fu">seq_len</span>(Tt)]</span>
+<span id="cb21-3"><a href="#cb21-3" tabindex="-1"></a><span class="fu">ggplot</span>(<span class="fu">data.frame</span>(<span class="at">time =</span> <span class="fu">seq_len</span>(Tt),</span>
+<span id="cb21-4"><a href="#cb21-4" tabindex="-1"></a>                  <span class="at">est =</span> te <span class="sc">-</span> <span class="fu">mean</span>(te),</span>
+<span id="cb21-5"><a href="#cb21-5" tabindex="-1"></a>                  <span class="at">truth =</span> trend <span class="sc">-</span> <span class="fu">mean</span>(trend)),</span>
+<span id="cb21-6"><a href="#cb21-6" tabindex="-1"></a>       <span class="fu">aes</span>(time)) <span class="sc">+</span></span>
+<span id="cb21-7"><a href="#cb21-7" tabindex="-1"></a>  <span class="fu">geom_line</span>(<span class="fu">aes</span>(<span class="at">y =</span> truth), <span class="at">linewidth =</span> <span class="dv">1</span>, <span class="at">colour =</span> <span class="st">&quot;grey50&quot;</span>) <span class="sc">+</span></span>
+<span id="cb21-8"><a href="#cb21-8" tabindex="-1"></a>  <span class="fu">geom_line</span>(<span class="fu">aes</span>(<span class="at">y =</span> est), <span class="at">linewidth =</span> <span class="dv">1</span>, <span class="at">colour =</span> <span class="st">&quot;steelblue&quot;</span>) <span class="sc">+</span></span>
+<span id="cb21-9"><a href="#cb21-9" tabindex="-1"></a>  <span class="fu">labs</span>(<span class="at">x =</span> <span class="st">&quot;time&quot;</span>, <span class="at">y =</span> <span class="st">&quot;trend (centred)&quot;</span>) <span class="sc">+</span></span>
+<span id="cb21-10"><a href="#cb21-10" tabindex="-1"></a>  <span class="fu">theme</span>(<span class="at">panel.background =</span> <span class="fu">element_rect</span>(<span class="at">fill =</span> <span class="st">&quot;transparent&quot;</span>),</span>
+<span id="cb21-11"><a href="#cb21-11" tabindex="-1"></a>        <span class="at">plot.background  =</span> <span class="fu">element_rect</span>(<span class="at">fill =</span> <span class="st">&quot;transparent&quot;</span>))</span></code></pre></div>
 <p>The estimated walk follows the wave, centred to remove the level the
 sum-to-zero handling leaves free. The front door carries
 <code>temporal_rw1()</code> today; the second-order walk, the AR(1)
@@ -919,25 +939,25 @@ half-line, a proportion is trapped in the unit interval.</p>
 pushes them through the linear predictor, and simulates responses, so
 you can see whether the prior expects data the response could never
 produce.</p>
-<div class="sourceCode" id="cb21"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb21-1"><a href="#cb21-1" tabindex="-1"></a>fam <span class="ot">&lt;-</span> <span class="fu">tulpa_family</span>(</span>
-<span id="cb21-2"><a href="#cb21-2" tabindex="-1"></a>  <span class="st">&quot;poisson&quot;</span>,</span>
-<span id="cb21-3"><a href="#cb21-3" tabindex="-1"></a>  <span class="cf">function</span>(eta, params, n_obs, ...) <span class="fu">rpois</span>(n_obs, <span class="fu">exp</span>(eta[[<span class="dv">1</span>]]))</span>
-<span id="cb21-4"><a href="#cb21-4" tabindex="-1"></a>)</span>
-<span id="cb21-5"><a href="#cb21-5" tabindex="-1"></a>pp <span class="ot">&lt;-</span> <span class="fu">prior_predict</span>(y <span class="sc">~</span> x, <span class="at">family =</span> fam, <span class="at">data =</span> dp, <span class="at">n_draws =</span> <span class="dv">50</span>,</span>
-<span id="cb21-6"><a href="#cb21-6" tabindex="-1"></a>                    <span class="at">priors =</span> <span class="fu">tulpa_priors</span>(<span class="at">beta =</span> <span class="fu">prior_normal</span>(<span class="dv">0</span>, <span class="dv">1</span>)))</span>
-<span id="cb21-7"><a href="#cb21-7" tabindex="-1"></a>pp</span></code></pre></div>
+<div class="sourceCode" id="cb22"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb22-1"><a href="#cb22-1" tabindex="-1"></a>fam <span class="ot">&lt;-</span> <span class="fu">tulpa_family</span>(</span>
+<span id="cb22-2"><a href="#cb22-2" tabindex="-1"></a>  <span class="st">&quot;poisson&quot;</span>,</span>
+<span id="cb22-3"><a href="#cb22-3" tabindex="-1"></a>  <span class="cf">function</span>(eta, params, n_obs, ...) <span class="fu">rpois</span>(n_obs, <span class="fu">exp</span>(eta[[<span class="dv">1</span>]]))</span>
+<span id="cb22-4"><a href="#cb22-4" tabindex="-1"></a>)</span>
+<span id="cb22-5"><a href="#cb22-5" tabindex="-1"></a>pp <span class="ot">&lt;-</span> <span class="fu">prior_predict</span>(y <span class="sc">~</span> x, <span class="at">family =</span> fam, <span class="at">data =</span> dp, <span class="at">n_draws =</span> <span class="dv">50</span>,</span>
+<span id="cb22-6"><a href="#cb22-6" tabindex="-1"></a>                    <span class="at">priors =</span> <span class="fu">tulpa_priors</span>(<span class="at">beta =</span> <span class="fu">prior_normal</span>(<span class="dv">0</span>, <span class="dv">1</span>)))</span>
+<span id="cb22-7"><a href="#cb22-7" tabindex="-1"></a>pp</span></code></pre></div>
 <p><code>pp$y</code> holds one simulated dataset per prior draw. Overlay
 their densities to see the range the prior expects, then tighten the
 prior if it covers ranges the response could never take.</p>
-<div class="sourceCode" id="cb22"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb22-1"><a href="#cb22-1" tabindex="-1"></a>sims <span class="ot">&lt;-</span> <span class="fu">data.frame</span>(</span>
-<span id="cb22-2"><a href="#cb22-2" tabindex="-1"></a>  <span class="at">value =</span> <span class="fu">unlist</span>(pp<span class="sc">$</span>y),</span>
-<span id="cb22-3"><a href="#cb22-3" tabindex="-1"></a>  <span class="at">draw  =</span> <span class="fu">factor</span>(<span class="fu">rep</span>(<span class="fu">seq_along</span>(pp<span class="sc">$</span>y), <span class="fu">lengths</span>(pp<span class="sc">$</span>y)))</span>
-<span id="cb22-4"><a href="#cb22-4" tabindex="-1"></a>)</span>
-<span id="cb22-5"><a href="#cb22-5" tabindex="-1"></a><span class="fu">ggplot</span>(sims, <span class="fu">aes</span>(value, <span class="at">group =</span> draw)) <span class="sc">+</span></span>
-<span id="cb22-6"><a href="#cb22-6" tabindex="-1"></a>  <span class="fu">geom_density</span>(<span class="at">colour =</span> <span class="st">&quot;steelblue&quot;</span>, <span class="at">alpha =</span> <span class="fl">0.3</span>) <span class="sc">+</span></span>
-<span id="cb22-7"><a href="#cb22-7" tabindex="-1"></a>  <span class="fu">labs</span>(<span class="at">x =</span> <span class="st">&quot;simulated y&quot;</span>, <span class="at">y =</span> <span class="st">&quot;density&quot;</span>) <span class="sc">+</span></span>
-<span id="cb22-8"><a href="#cb22-8" tabindex="-1"></a>  <span class="fu">theme</span>(<span class="at">panel.background =</span> <span class="fu">element_rect</span>(<span class="at">fill =</span> <span class="st">&quot;transparent&quot;</span>),</span>
-<span id="cb22-9"><a href="#cb22-9" tabindex="-1"></a>        <span class="at">plot.background  =</span> <span class="fu">element_rect</span>(<span class="at">fill =</span> <span class="st">&quot;transparent&quot;</span>))</span></code></pre></div>
+<div class="sourceCode" id="cb23"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb23-1"><a href="#cb23-1" tabindex="-1"></a>sims <span class="ot">&lt;-</span> <span class="fu">data.frame</span>(</span>
+<span id="cb23-2"><a href="#cb23-2" tabindex="-1"></a>  <span class="at">value =</span> <span class="fu">unlist</span>(pp<span class="sc">$</span>y),</span>
+<span id="cb23-3"><a href="#cb23-3" tabindex="-1"></a>  <span class="at">draw  =</span> <span class="fu">factor</span>(<span class="fu">rep</span>(<span class="fu">seq_along</span>(pp<span class="sc">$</span>y), <span class="fu">lengths</span>(pp<span class="sc">$</span>y)))</span>
+<span id="cb23-4"><a href="#cb23-4" tabindex="-1"></a>)</span>
+<span id="cb23-5"><a href="#cb23-5" tabindex="-1"></a><span class="fu">ggplot</span>(sims, <span class="fu">aes</span>(value, <span class="at">group =</span> draw)) <span class="sc">+</span></span>
+<span id="cb23-6"><a href="#cb23-6" tabindex="-1"></a>  <span class="fu">geom_density</span>(<span class="at">colour =</span> <span class="st">&quot;steelblue&quot;</span>, <span class="at">alpha =</span> <span class="fl">0.3</span>) <span class="sc">+</span></span>
+<span id="cb23-7"><a href="#cb23-7" tabindex="-1"></a>  <span class="fu">labs</span>(<span class="at">x =</span> <span class="st">&quot;simulated y&quot;</span>, <span class="at">y =</span> <span class="st">&quot;density&quot;</span>) <span class="sc">+</span></span>
+<span id="cb23-8"><a href="#cb23-8" tabindex="-1"></a>  <span class="fu">theme</span>(<span class="at">panel.background =</span> <span class="fu">element_rect</span>(<span class="at">fill =</span> <span class="st">&quot;transparent&quot;</span>),</span>
+<span id="cb23-9"><a href="#cb23-9" tabindex="-1"></a>        <span class="at">plot.background  =</span> <span class="fu">element_rect</span>(<span class="at">fill =</span> <span class="st">&quot;transparent&quot;</span>))</span></code></pre></div>
 <p>A wide prior predictive that spills past the plausible range says the
 priors are too vague; tightening <code>prior_normal(0, 2.5)</code>
 toward <code>prior_normal(0, 1)</code> pulls it in. The priors vignette
@@ -959,30 +979,30 @@ everything from the Newton system up.</p>
 <p>Define a first-order random-walk precision on a chain of twenty
 nodes, the same structure the temporal path builds internally, but
 written by hand to show the contract.</p>
-<div class="sourceCode" id="cb23"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb23-1"><a href="#cb23-1" tabindex="-1"></a><span class="fu">library</span>(Matrix)</span>
-<span id="cb23-2"><a href="#cb23-2" tabindex="-1"></a>m <span class="ot">&lt;-</span> <span class="dv">20</span></span>
-<span id="cb23-3"><a href="#cb23-3" tabindex="-1"></a>D2 <span class="ot">&lt;-</span> <span class="fu">diff</span>(<span class="fu">diag</span>(m), <span class="at">differences =</span> <span class="dv">1</span>)</span>
-<span id="cb23-4"><a href="#cb23-4" tabindex="-1"></a>R  <span class="ot">&lt;-</span> <span class="fu">crossprod</span>(D2)               <span class="co"># RW1 structure matrix</span></span>
-<span id="cb23-5"><a href="#cb23-5" tabindex="-1"></a>blk <span class="ot">&lt;-</span> <span class="fu">tgmrf</span>(</span>
-<span id="cb23-6"><a href="#cb23-6" tabindex="-1"></a>  <span class="at">Q     =</span> <span class="cf">function</span>(theta) <span class="fu">as</span>(theta[<span class="dv">1</span>] <span class="sc">*</span> (R <span class="sc">+</span> <span class="fl">1e-4</span> <span class="sc">*</span> <span class="fu">diag</span>(m)), <span class="st">&quot;dgCMatrix&quot;</span>),</span>
-<span id="cb23-7"><a href="#cb23-7" tabindex="-1"></a>  <span class="at">prior =</span> <span class="cf">function</span>(theta) <span class="fu">dgamma</span>(theta[<span class="dv">1</span>], <span class="dv">2</span>, <span class="dv">1</span>, <span class="at">log =</span> <span class="cn">TRUE</span>),</span>
-<span id="cb23-8"><a href="#cb23-8" tabindex="-1"></a>  <span class="at">init  =</span> <span class="fu">c</span>(<span class="at">tau =</span> <span class="dv">1</span>)</span>
-<span id="cb23-9"><a href="#cb23-9" tabindex="-1"></a>)</span>
-<span id="cb23-10"><a href="#cb23-10" tabindex="-1"></a>blk</span></code></pre></div>
+<div class="sourceCode" id="cb24"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb24-1"><a href="#cb24-1" tabindex="-1"></a><span class="fu">library</span>(Matrix)</span>
+<span id="cb24-2"><a href="#cb24-2" tabindex="-1"></a>m <span class="ot">&lt;-</span> <span class="dv">20</span></span>
+<span id="cb24-3"><a href="#cb24-3" tabindex="-1"></a>D2 <span class="ot">&lt;-</span> <span class="fu">diff</span>(<span class="fu">diag</span>(m), <span class="at">differences =</span> <span class="dv">1</span>)</span>
+<span id="cb24-4"><a href="#cb24-4" tabindex="-1"></a>R  <span class="ot">&lt;-</span> <span class="fu">crossprod</span>(D2)               <span class="co"># RW1 structure matrix</span></span>
+<span id="cb24-5"><a href="#cb24-5" tabindex="-1"></a>blk <span class="ot">&lt;-</span> <span class="fu">tgmrf</span>(</span>
+<span id="cb24-6"><a href="#cb24-6" tabindex="-1"></a>  <span class="at">Q     =</span> <span class="cf">function</span>(theta) <span class="fu">as</span>(theta[<span class="dv">1</span>] <span class="sc">*</span> (R <span class="sc">+</span> <span class="fl">1e-4</span> <span class="sc">*</span> <span class="fu">diag</span>(m)), <span class="st">&quot;dgCMatrix&quot;</span>),</span>
+<span id="cb24-7"><a href="#cb24-7" tabindex="-1"></a>  <span class="at">prior =</span> <span class="cf">function</span>(theta) <span class="fu">dgamma</span>(theta[<span class="dv">1</span>], <span class="dv">2</span>, <span class="dv">1</span>, <span class="at">log =</span> <span class="cn">TRUE</span>),</span>
+<span id="cb24-8"><a href="#cb24-8" tabindex="-1"></a>  <span class="at">init  =</span> <span class="fu">c</span>(<span class="at">tau =</span> <span class="dv">1</span>)</span>
+<span id="cb24-9"><a href="#cb24-9" tabindex="-1"></a>)</span>
+<span id="cb24-10"><a href="#cb24-10" tabindex="-1"></a>blk</span></code></pre></div>
 <p>The constructor evaluates <code>Q(init)</code> once to catch errors
 early, infer the field length, and capture the sparsity pattern the
 inner solver reuses at every grid point. The returned block carries the
 precision family, the hyperparameter names, and the registry key the
 nested-Laplace dispatcher recognises, and prints a compact summary of
 what it found.</p>
-<div class="sourceCode" id="cb24"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb24-1"><a href="#cb24-1" tabindex="-1"></a>Q1 <span class="ot">&lt;-</span> <span class="fu">as.matrix</span>(blk<span class="sc">$</span><span class="fu">Q</span>(<span class="fu">c</span>(<span class="at">tau =</span> <span class="dv">1</span>)))</span>
-<span id="cb24-2"><a href="#cb24-2" tabindex="-1"></a>ix <span class="ot">&lt;-</span> <span class="fu">which</span>(Q1 <span class="sc">!=</span> <span class="dv">0</span>, <span class="at">arr.ind =</span> <span class="cn">TRUE</span>)</span>
-<span id="cb24-3"><a href="#cb24-3" tabindex="-1"></a><span class="fu">ggplot</span>(<span class="fu">data.frame</span>(<span class="at">row =</span> ix[, <span class="dv">1</span>], <span class="at">col =</span> ix[, <span class="dv">2</span>]), <span class="fu">aes</span>(col, row)) <span class="sc">+</span></span>
-<span id="cb24-4"><a href="#cb24-4" tabindex="-1"></a>  <span class="fu">geom_tile</span>(<span class="at">fill =</span> <span class="st">&quot;steelblue&quot;</span>) <span class="sc">+</span></span>
-<span id="cb24-5"><a href="#cb24-5" tabindex="-1"></a>  <span class="fu">scale_y_reverse</span>() <span class="sc">+</span></span>
-<span id="cb24-6"><a href="#cb24-6" tabindex="-1"></a>  <span class="fu">labs</span>(<span class="at">x =</span> <span class="st">&quot;column&quot;</span>, <span class="at">y =</span> <span class="st">&quot;row&quot;</span>) <span class="sc">+</span></span>
-<span id="cb24-7"><a href="#cb24-7" tabindex="-1"></a>  <span class="fu">theme</span>(<span class="at">panel.background =</span> <span class="fu">element_rect</span>(<span class="at">fill =</span> <span class="st">&quot;transparent&quot;</span>),</span>
-<span id="cb24-8"><a href="#cb24-8" tabindex="-1"></a>        <span class="at">plot.background  =</span> <span class="fu">element_rect</span>(<span class="at">fill =</span> <span class="st">&quot;transparent&quot;</span>))</span></code></pre></div>
+<div class="sourceCode" id="cb25"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb25-1"><a href="#cb25-1" tabindex="-1"></a>Q1 <span class="ot">&lt;-</span> <span class="fu">as.matrix</span>(blk<span class="sc">$</span><span class="fu">Q</span>(<span class="fu">c</span>(<span class="at">tau =</span> <span class="dv">1</span>)))</span>
+<span id="cb25-2"><a href="#cb25-2" tabindex="-1"></a>ix <span class="ot">&lt;-</span> <span class="fu">which</span>(Q1 <span class="sc">!=</span> <span class="dv">0</span>, <span class="at">arr.ind =</span> <span class="cn">TRUE</span>)</span>
+<span id="cb25-3"><a href="#cb25-3" tabindex="-1"></a><span class="fu">ggplot</span>(<span class="fu">data.frame</span>(<span class="at">row =</span> ix[, <span class="dv">1</span>], <span class="at">col =</span> ix[, <span class="dv">2</span>]), <span class="fu">aes</span>(col, row)) <span class="sc">+</span></span>
+<span id="cb25-4"><a href="#cb25-4" tabindex="-1"></a>  <span class="fu">geom_tile</span>(<span class="at">fill =</span> <span class="st">&quot;steelblue&quot;</span>) <span class="sc">+</span></span>
+<span id="cb25-5"><a href="#cb25-5" tabindex="-1"></a>  <span class="fu">scale_y_reverse</span>() <span class="sc">+</span></span>
+<span id="cb25-6"><a href="#cb25-6" tabindex="-1"></a>  <span class="fu">labs</span>(<span class="at">x =</span> <span class="st">&quot;column&quot;</span>, <span class="at">y =</span> <span class="st">&quot;row&quot;</span>) <span class="sc">+</span></span>
+<span id="cb25-7"><a href="#cb25-7" tabindex="-1"></a>  <span class="fu">theme</span>(<span class="at">panel.background =</span> <span class="fu">element_rect</span>(<span class="at">fill =</span> <span class="st">&quot;transparent&quot;</span>),</span>
+<span id="cb25-8"><a href="#cb25-8" tabindex="-1"></a>        <span class="at">plot.background  =</span> <span class="fu">element_rect</span>(<span class="at">fill =</span> <span class="st">&quot;transparent&quot;</span>))</span></code></pre></div>
 <p>The tridiagonal pattern is the Markov property written as a matrix:
 each node is conditionally independent of every non-neighbour given its
 neighbours, and that independence is exactly a zero off the three
@@ -999,6 +1019,10 @@ the Gaussian approximation it computed; the sampler tier reports
 empirical posterior summaries from its draws. Reaching for the accessor
 you already know from base R or broom is the intended workflow.</p>
 <table>
+<colgroup>
+<col width="50%" />
+<col width="50%" />
+</colgroup>
 <thead>
 <tr class="header">
 <th>Accessor</th>
@@ -1012,7 +1036,9 @@ you already know from base R or broom is the intended workflow.</p>
 </tr>
 <tr class="even">
 <td><code>summary()</code></td>
-<td>fixed effects: estimate, SE, credible bounds</td>
+<td>the full report: backend and tier, fixed effects with SE and
+credible bounds, variance components, hyperparameters, reliability;
+<code>coef(summary(fit))</code> is the fixed-effect table</td>
 </tr>
 <tr class="odd">
 <td><code>confint()</code></td>
@@ -1035,6 +1061,15 @@ you already know from base R or broom is the intended workflow.</p>
 <td>one-row model summary</td>
 </tr>
 <tr class="even">
+<td><code>diagnostics()</code></td>
+<td>convergence or approximation reliability, per parameter</td>
+</tr>
+<tr class="odd">
+<td><code>tulpa_outer_grid()</code></td>
+<td>a nested-Laplace fit’s hyperparameter grid: nodes, weights, per-cell
+modes</td>
+</tr>
+<tr class="even">
 <td><code>predict()</code>, <code>fitted()</code></td>
 <td>fixed-effect prediction / in-sample mean</td>
 </tr>
@@ -1052,14 +1087,14 @@ you already know from base R or broom is the intended workflow.</p>
 convention: one row per term, with the estimate, standard error, and
 credible bounds in named columns, ready to feed a table or a coefficient
 plot.</p>
-<div class="sourceCode" id="cb25"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb25-1"><a href="#cb25-1" tabindex="-1"></a><span class="fu">tidy</span>(fit_re)</span></code></pre></div>
+<div class="sourceCode" id="cb26"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb26-1"><a href="#cb26-1" tabindex="-1"></a><span class="fu">tidy</span>(fit_re)</span></code></pre></div>
 <p><code>glance()</code> returns a single-row model summary carrying the
 fixed-effect count, the number of draws, the log-likelihood, the
 divergence count, the mean acceptance rate, and the convergence flag. On
 a Laplace fit the sampler-only fields read <code>NA</code>, which is the
 honest report; on a sampler fit they carry the diagnostics that say
 whether the chain mixed.</p>
-<div class="sourceCode" id="cb26"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb26-1"><a href="#cb26-1" tabindex="-1"></a><span class="fu">glance</span>(fit_mala)[<span class="fu">c</span>(<span class="st">&quot;n_samples&quot;</span>, <span class="st">&quot;logLik&quot;</span>, <span class="st">&quot;mean_accept&quot;</span>, <span class="st">&quot;n_divergent&quot;</span>)]</span></code></pre></div>
+<div class="sourceCode" id="cb27"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb27-1"><a href="#cb27-1" tabindex="-1"></a><span class="fu">glance</span>(fit_mala)[<span class="fu">c</span>(<span class="st">&quot;n_samples&quot;</span>, <span class="st">&quot;logLik&quot;</span>, <span class="st">&quot;mean_accept&quot;</span>, <span class="st">&quot;n_divergent&quot;</span>)]</span></code></pre></div>
 <p><code>plot()</code> defaults to the fixed-effect densities, a quick
 visual of where each coefficient sits and how wide its posterior is. On
 a sampler fit <code>type = &quot;trace&quot;</code> shows the chains instead, as

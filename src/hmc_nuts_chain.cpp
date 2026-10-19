@@ -26,6 +26,9 @@
 
 #include "hmc_mass_st_gmrf.h"
 #include "hmc_sampler.h"
+#include "hmc_walnuts.h"
+#include "laplace_profile.h"  // TULPA_PROFILE_PHASE (nuts_warmup / nuts_sampling)
+#include "tulpa_priors_temporal.h"  // compute_temporal_prior (NC temporal GP storage)
 #include "simp/adapt.h"  // step-adapted multistage constructors, resolved at
                          // warmup end (Eigen-heavy; kept out of the widely
                          // included hmc_sampler_decls.h, pulled into this TU).
@@ -52,7 +55,7 @@ HMCResultCpp run_hmc_chain_cpp(
     int max_treedepth,
     MassMatrixType metric_type,
     double adapt_delta,
-    int riemannian,
+    const tulpa::WalnutsConfig* walnuts,
     const std::vector<double>& inv_metric_init
 ) {
   // Every NUTS entry in the package reaches the sampler through this function,
@@ -81,6 +84,11 @@ HMCResultCpp run_hmc_chain_cpp(
   ActiveGridProgressScope progress_scope(own_progress.get());
 
   for (int iter = 0; iter < n_iter; iter++) {
+    // One enclosing profiler scope per iteration (tulpa_profile()); the
+    // gradient evaluations inside it are timed as their own leaf phase. Per
+    // chain, so across-chain runs add chain-seconds, like the outer grid does.
+    TULPA_PROFILE_PHASE(iter < n_warmup ? ::tulpa::PHASE_NUTS_WARMUP
+                                        : ::tulpa::PHASE_NUTS_SAMPLING);
 #include "hmc_nuts_chain_iter_window.h"
 
 #include "hmc_nuts_chain_iter_nuts.h"
@@ -128,14 +136,6 @@ HMCResultCpp run_hmc_chain_cpp(
              warmup_total_leapfrog + sampling_total_lf, result.epsilon);
   }
 
-  if (verbose && (softabs_retries > 0 || softabs_metric_active)) {
-    REprintf("  [SoftAbs] Chain %d: metric=%s, %d divergent retried (up to %d attempts), %d resolved (%d remained)\n",
-             chain_id + 1,
-             softabs_metric_active ? "active" : "inactive",
-             softabs_retries, SOFTABS_MAX_RETRIES, softabs_successes,
-             softabs_retries - softabs_successes);
-  }
-
   return result;
 }
 
@@ -153,7 +153,7 @@ HMCResult run_hmc_chain(
     int max_treedepth,
     MassMatrixType metric_type,
     double adapt_delta,
-    int riemannian,
+    const tulpa::WalnutsConfig* walnuts,
     const std::vector<double>& inv_metric_init
 ) {
   // The gradient gate and the fit scope live in run_hmc_chain_cpp, which this
@@ -161,7 +161,7 @@ HMCResult run_hmc_chain(
 
   // Run C++ version - pass verbose through for debugging
   HMCResultCpp cpp_result = run_hmc_chain_cpp(
-    q_init, data, layout, n_iter, n_warmup, L, chain_id, seed, verbose, max_treedepth, metric_type, adapt_delta, riemannian, inv_metric_init
+    q_init, data, layout, n_iter, n_warmup, L, chain_id, seed, verbose, max_treedepth, metric_type, adapt_delta, walnuts, inv_metric_init
   );
 
   // Convert to R result

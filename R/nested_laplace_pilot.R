@@ -116,10 +116,26 @@
 # re-reads the engine's own axis at a lower resolution and keeps the atom and
 # the slab bounds (gcol33/tulpa#633). A spec that STATES its nodes therefore
 # keeps them, and says so.
+#
+# A grid a wrapper MARKED as its own default (`auto_grid()`) is not a statement
+# the pilot has to keep: the placement pass may move it, so the pilot thins it
+# the way it thins every other default axis, with the atom and both ends of the
+# slab kept (`.nl_pilot_alpha_grid()`).
+.nl_pilot_alpha_grid <- function(g, n) {
+    if (!is_auto_grid(g) || !auto_grid_place(g)) return(NULL)
+    v <- as.numeric(g)
+    slab <- .nl_pilot_axis(v[v > 0], n)
+    if (is.null(slab)) return(NULL)
+    auto_grid(c(v[v <= 0], slab))
+}
+
 .nl_pilot_alpha <- function(spec, n) {
     if (!is.list(spec)) return(list(spec = spec, moved = FALSE))
     if (!is.null(spec$alpha_grid) && length(spec$alpha_grid) > 0L) {
-        return(list(spec = spec, moved = FALSE))
+        thin <- .nl_pilot_alpha_grid(spec$alpha_grid, n)
+        if (is.null(thin)) return(list(spec = spec, moved = FALSE))
+        spec$alpha_grid <- thin
+        return(list(spec = spec, moved = TRUE))
     }
     cur <- spec$alpha_n
     if (!is.null(cur) && length(cur) > 0L && as.integer(cur) <= n) {
@@ -134,7 +150,8 @@
 }
 
 # The per-arm `field_coef` counterpart, for the single-block path's inline copy
-# declaration. Same rule: a stated `grid` is kept, a resolution is lowered.
+# declaration. Same rule: a stated `grid` is kept, a marked one is thinned, a
+# resolution is lowered.
 .nl_pilot_field_coef <- function(arm, n) {
     fc <- arm$field_coef
     if (is.null(fc)) return(list(arm = arm, moved = FALSE))
@@ -142,7 +159,11 @@
     if (is.character(fc) && length(fc) == 1L) fc <- list(name = fc)
     if (!is.list(fc)) return(list(arm = arm, moved = FALSE))
     if (!is.null(fc$grid) && length(fc$grid) > 0L) {
-        return(list(arm = arm, moved = FALSE))
+        thin <- .nl_pilot_alpha_grid(fc$grid, n)
+        if (is.null(thin)) return(list(arm = arm, moved = FALSE))
+        fc$grid <- thin
+        arm$field_coef <- fc
+        return(list(arm = arm, moved = TRUE))
     }
     cur <- fc[["n"]]
     if (!is.null(cur) && length(cur) > 0L && as.integer(cur) <= n) {
@@ -244,11 +265,20 @@
 # refinement and the var-of-means consistency pass would add cells to a grid
 # that is not integrated, and the inner-skew / correction / debias / CILA layers
 # are per-cell payloads nothing downstream of a pilot reads. The outer k-hat
-# diagnostic goes with them; the placement path
-# (`.joint_attach_pareto_k_placement()`) supplies the mode and Hessian without
-# it, which is the same route a `diagnose_k = FALSE` fit already takes.
+# diagnostic goes with them; the placement mode-find
+# (`.joint_attach_placement()`) supplies the mode and Hessian without it, which
+# is the same route a `diagnose_k = FALSE` fit already takes.
+#
+# `pilot_screen` goes one step further on a screened fit: the pilot's grid is
+# read off the cheap screen alone (`screen_only` in run_nested_laplace_grid),
+# with no full pass over the kept cells. The rail test, the heaviest cell and
+# the weights the placement seeds from are all readings of where the posterior
+# sits, which is what the screen ranks, and whichever way the placement goes
+# the pilot's cells are discarded (gcol33/tulpa#922). An unscreened pilot
+# (prune off) is unaffected.
 .nl_pilot_control <- function(control) {
     utils::modifyList(control, list(
+        pilot_screen             = TRUE,
         adaptive_grid            = FALSE,
         var_of_means_consistency = FALSE,
         keep_grid_hessians       = FALSE,
@@ -278,7 +308,10 @@
         # detector answers differently.
         regime    = detect$regime %||% NA_character_,
         ess_grid  = detect$ess_grid %||% NA_real_,
-        edge_axes = detect$edge_axes %||% character(0)
+        edge_axes = detect$edge_axes %||% character(0),
+        # TRUE when the detecting grid was read off the cheap screen alone,
+        # with no full pass over its cells.
+        screened  = isTRUE(detect$screened)
     )
     res$outer_grid_pilot_declined <- declined
     res

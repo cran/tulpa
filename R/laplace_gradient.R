@@ -63,24 +63,25 @@
 # terms in `re_list` order, and within a term [g1_c1, g1_c2, g2_c1, ...].
 # Extracted from the marginal-H_beta Schur block in tulpa_laplace(), which
 # needs the same matrix -- one construction, so the two cannot drift.
+#
+# `idx = 0` is "no group" (the kernel skips the row, `src/re_structure.h`), so
+# such a row carries no RE column here either; indexing column 0 was a
+# sparseMatrix error on the Hessian path only (gcol33/tulpa#883).
 .re_design_matrix <- function(re_list, n_obs) {
   if (length(re_list) == 0L) return(NULL)
   parts <- lapply(re_list, function(r) {
     nc <- r$n_coefs %||% 1L
-    if (nc == 1L && is.null(r$Z)) {
-      Matrix::sparseMatrix(
-        i = seq_len(n_obs), j = r$idx,
-        x = rep(1.0, n_obs), dims = c(n_obs, r$n_groups)
-      )
-    } else {
-      Z_full <- r$Z %||% matrix(1, nrow = n_obs, ncol = 1)
-      ii <- rep(seq_len(n_obs), each = nc)
-      jj <- rep((r$idx - 1L) * nc, each = nc) + rep(seq_len(nc), n_obs)
-      Matrix::sparseMatrix(
-        i = ii, j = jj, x = as.numeric(t(Z_full)),
-        dims = c(n_obs, r$n_groups * nc)
-      )
-    }
+    idx <- as.integer(r$idx)
+    in_grp <- which(idx > 0L)
+    Z_full <- r$Z %||% matrix(1, nrow = n_obs, ncol = 1)
+    Z_full <- as.matrix(Z_full)[in_grp, , drop = FALSE]
+    ii <- rep(in_grp, each = nc)
+    jj <- rep((idx[in_grp] - 1L) * nc, each = nc) +
+      rep(seq_len(nc), length(in_grp))
+    Matrix::sparseMatrix(
+      i = ii, j = jj, x = as.numeric(t(Z_full)),
+      dims = c(n_obs, r$n_groups * nc)
+    )
   })
   do.call(cbind, parts)
 }
@@ -232,6 +233,35 @@
 }
 
 
+# The joint negative-log-posterior curvature over the whole latent vector at
+# the mode, at the OBSERVED weight: the kernel's joint Hessian plus the
+# correction for the families whose Newton weight is not the observed curvature
+# (zero elsewhere). One matrix, read by both the marginal fixed-effect precision
+# below and the fit's joint latent draws (`H_latent`, gcol33/tulpa#871), so the
+# random effects are drawn under the curvature the reported SEs came from.
+#
+# The count design has to span the whole latent vector, or the observed-weight
+# correction cannot be formed. Refused (NULL) rather than skipped: for the two
+# families whose working weight is not the observed curvature, skipping it
+# silently returns a precision that is wrong by a percent.
+.laplace_observed_H_joint <- function(H_joint, mode, y, n_trials, X, X_zi,
+                                      re_list, family, phi, phi2 = NULL,
+                                      weights = NULL, offset = NULL) {
+  if (is.null(H_joint) || is.null(mode)) return(NULL)
+  n_x <- nrow(H_joint)
+  if (length(mode) != n_x) return(NULL)
+  A <- .laplace_count_design(X, X_zi, re_list, length(y))
+  if (ncol(A) != n_x) return(NULL)
+  eta <- as.numeric(A %*% mode) + (offset %||% 0)
+  delta <- .laplace_obs_delta(y, n_trials, eta, family, phi, phi2,
+                              weights, has_zi = !is.null(X_zi))
+  if (is.null(delta)) return(NULL)
+  if (max(abs(delta)) > 1e-12) {
+    H_joint <- H_joint + Matrix::crossprod(A, Matrix::Diagonal(x = delta) %*% A)
+  }
+  H_joint
+}
+
 # Marginal fixed-effect precision from the kernel's joint curvature.
 #
 # The joint Hessian is the negative-log-POSTERIOR curvature over the whole
@@ -247,27 +277,17 @@
 # vcov() and confint() slice.
 .laplace_marginal_H_fixed <- function(H_joint, mode, y, n_trials, X, X_zi,
                                       re_list, family, phi, phi2 = NULL,
-                                      weights = NULL, offset = NULL) {
+                                      weights = NULL, offset = NULL,
+                                      H_obs = NULL) {
   if (is.null(H_joint) || is.null(mode)) return(NULL)
-  n_obs   <- length(y)
   p_fixed <- ncol(X) + (if (is.null(X_zi)) 0L else ncol(X_zi))
   n_x     <- nrow(H_joint)
   if (length(mode) != n_x || p_fixed > n_x) return(NULL)
 
-  # The count design has to span the whole latent vector, or the observed-weight
-  # correction below cannot be formed. Refused rather than skipped: for the two
-  # families whose working weight is not the observed curvature, skipping it
-  # silently returns a precision that is wrong by a percent.
-  H <- H_joint
-  A <- .laplace_count_design(X, X_zi, re_list, n_obs)
-  if (ncol(A) != n_x) return(NULL)
-  eta <- as.numeric(A %*% mode) + (offset %||% 0)
-  delta <- .laplace_obs_delta(y, n_trials, eta, family, phi, phi2,
-                              weights, has_zi = !is.null(X_zi))
-  if (is.null(delta)) return(NULL)
-  if (max(abs(delta)) > 1e-12) {
-    H <- H + Matrix::crossprod(A, Matrix::Diagonal(x = delta) %*% A)
-  }
+  H <- H_obs %||% .laplace_observed_H_joint(
+    H_joint, mode, y, n_trials, X, X_zi, re_list, family, phi, phi2,
+    weights, offset)
+  if (is.null(H)) return(NULL)
 
   idx <- seq_len(p_fixed)
   if (p_fixed == n_x) return(as.matrix(H))
@@ -496,7 +516,7 @@
   # H^-1 in full. The alternative is one back-solve per observation for s and
   # per group for V; at n_x below a few thousand the explicit inverse is the
   # same order and serves every downstream piece from one factorization.
-  Hinv <- tryCatch(as.matrix(Matrix::solve(H)), error = function(e) NULL)
+  Hinv <- tryCatch(.spd_inverse(H), error = function(e) NULL)
   if (is.null(Hinv) || any(!is.finite(Hinv))) return(NULL)
 
   # Mode-Jacobian inverse. dx_hat/dtheta = -(A' diag(W_obs) A + P)^-1 (dP) x_hat
@@ -523,7 +543,7 @@
     if (max(abs(delta)) > 1e-12) {
       working_is_observed <- FALSE
       H_true <- H + Matrix::crossprod(A, Matrix::Diagonal(x = delta) %*% A)
-      Hinv_mode <- tryCatch(as.matrix(Matrix::solve(H_true)), error = function(e) NULL)
+      Hinv_mode <- tryCatch(.spd_inverse(H_true), error = function(e) NULL)
       if (is.null(Hinv_mode) || any(!is.finite(Hinv_mode))) {
         exact_jac <- FALSE; Hinv_mode <- Hinv
       }

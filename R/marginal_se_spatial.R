@@ -19,7 +19,7 @@
 #' internally -- Q construction here is a 1:1 port of `spde_qbuilder.h`
 #' (orphan ridge included).
 #'
-#' @keywords internal
+#' @noRd
 #' @name marginal_se_spatial
 NULL
 
@@ -66,6 +66,15 @@ NULL
 #'   `(range, sigma)` -> `(kappa, tau)` mapping via `.spde_kappa_tau()`).
 #' @return A sparse `n_mesh x n_mesh` precision matrix.
 #' @seealso [tulpa_spde_log_hyperprior()], [fit_spde()], [spatial_spde()]
+#' @examples
+#' n <- 6L
+#' G <- Matrix::bandSparse(n, k = c(-1, 0, 1),
+#'                         diagonals = list(rep(-1, n - 1), c(1, rep(2, n - 2), 1),
+#'                                          rep(-1, n - 1)))
+#' sp <- spatial_spde_custom(Matrix::Diagonal(n), G, Matrix::Diagonal(n),
+#'                           prior_range = c(1, 0.5), prior_sigma = c(1, 0.01))
+#' Q <- tulpa_spde_precision_Q(sp, kappa = sqrt(8) / 1, tau_spde = 1)
+#' dim(Q)
 #' @export
 tulpa_spde_precision_Q <- function(spatial, kappa, tau_spde) {
   .spde_precision_Q(spatial, kappa, tau_spde)
@@ -136,7 +145,7 @@ tulpa_spde_precision_Q <- function(spatial, kappa, tau_spde) {
   }
 }
 
-#' Build NNGP precision Lambda = (I - A)' D^-1 (I - A) at given hyperparameters.
+#' Build NNGP precision Lambda = (I - A)' D^-1 (I - A) at given hyperparameters
 #'
 #' Mirrors the algorithm in `src/gpu_nngp_laplace.h::batch_nngp_scatter` plus
 #' `apply_nngp_full_prior_dense` -- for each Vecchia row i (in NNGP order):
@@ -149,7 +158,7 @@ tulpa_spde_precision_Q <- function(spatial, kappa, tau_spde) {
 #' Identifiers follow the C++ side: `nn_idx[i, k]` is a 1-based NNGP-order
 #' index, `nn_order[j]` maps NNGP-order j (1-based) to obs idx (1-based).
 #'
-#' @keywords internal
+#' @noRd
 .nngp_precision_Q <- function(spatial, sigma2_gp, phi_gp) {
   ni        <- spatial$neighbor_info
   n_spatial <- spatial$n_spatial %||% nrow(spatial$unique_coords)
@@ -223,7 +232,7 @@ tulpa_spde_precision_Q <- function(spatial, kappa, tau_spde) {
 
 # --- Schur complement for NNGP marginal H_beta ----------------------------
 
-#' Build a length-n_obs -> length-n_units indicator design matrix Z.
+#' Build a length-n_obs -> length-n_units indicator design matrix Z
 #'
 #' The latent field lives on units -- unique coordinates for an NNGP field,
 #' adjacency units for an areal one -- and each observation belongs to exactly
@@ -238,7 +247,7 @@ tulpa_spde_precision_Q <- function(spatial, kappa, tau_spde) {
 #'
 #' @param obs_to_unit Per-observation unit index, or empty for one observation
 #'   per unit.
-#' @keywords internal
+#' @noRd
 .field_design_Z <- function(obs_to_unit, n_units, n_obs) {
   n_units <- as.integer(n_units)
   if (length(obs_to_unit) == 0L) {
@@ -263,13 +272,13 @@ tulpa_spde_precision_Q <- function(spatial, kappa, tau_spde) {
 }
 
 
-#' n_obs x n_re_groups indicator design for an iid RE block.
+#' n_obs x n_re_groups indicator design for an iid RE block
 #'
 #' `re_idx` is the 1-based per-observation group index. Observations whose
 #' group falls outside `1:n_re_groups` contribute no RE column, matching the
 #' `g >= 0 && g < n_re_groups` guard in the C++ kernels.
 #'
-#' @keywords internal
+#' @noRd
 .re_design <- function(re_idx, n_re_groups, n_obs) {
   if (n_re_groups <= 0L) {
     return(Matrix::sparseMatrix(i = integer(0), j = integer(0), x = numeric(0),
@@ -282,7 +291,7 @@ tulpa_spde_precision_Q <- function(spatial, kappa, tau_spde) {
 }
 
 
-#' Schur complement of the latent block out of the joint Hessian.
+#' Schur complement of the latent block out of the joint Hessian
 #'
 #' Given the fixed-effect design `X`, the combined latent design `D` (the iid
 #' RE indicator block stacked with the spatial-field design), the latent prior
@@ -290,8 +299,18 @@ tulpa_spde_precision_Q <- function(spatial, kappa, tau_spde) {
 #' effect precision `H_beta = X'WX - (X'WD) (D'WD + Q_latent)^{-1} (X'WD)'`.
 #' Shared by the SPDE and NNGP marginal-SE paths.
 #'
-#' @keywords internal
-.schur_H_beta <- function(X, D, Q_latent, W) {
+#' `constr` (optional, `ncol(D) x m`) holds hard linear constraints
+#' `constr' u = 0` on the latent -- the sum-to-zero of an intrinsic field. The
+#' latent is then integrated over the constrained subspace only, so the Schur
+#' complement takes the constrained latent covariance
+#' `P^{-1} - P^{-1} A (A' P^{-1} A)^{-1} A' P^{-1}` (conditioning by kriging,
+#' Rue & Held 2005) in place of `P^{-1}`, `P = D'WD + Q_latent`. Without it the
+#' augmentation's finite variance on the intrinsic field's level, which the
+#' intercept aliases, lands in the intercept's standard error
+#' (gcol33/tulpa#901).
+#'
+#' @noRd
+.schur_H_beta <- function(X, D, Q_latent, W, constr = NULL) {
   D    <- as(D, "CsparseMatrix")
   WX   <- W * X
   WD   <- as(W * D, "CsparseMatrix")
@@ -303,6 +322,11 @@ tulpa_spde_precision_Q <- function(spatial, kappa, tau_spde) {
   R    <- Matrix::Cholesky(P_uu, LDL = FALSE, perm = TRUE)
   sol  <- Matrix::solve(R, t(XtWD), system = "A")
   H    <- as.matrix(XtWX) - XtWD %*% as.matrix(sol)
+  if (!is.null(constr) && ncol(constr) > 0L) {
+    Pa <- as.matrix(Matrix::solve(R, as.matrix(constr), system = "A"))
+    G  <- XtWD %*% Pa                     # (X'WD) P^{-1} A
+    H  <- H + G %*% solve(crossprod(as.matrix(constr), Pa), t(G))
+  }
   (H + t(H)) / 2
 }
 
@@ -325,10 +349,15 @@ tulpa_spde_precision_Q <- function(spatial, kappa, tau_spde) {
 # precision in front of the field's. A field with several blocks (BYM2's phi +
 # theta) passes the combined design and the combined precision, which is the
 # same matrix `bdiag` would build block by block.
+#
+# `constr_field` (optional, `n_field x m`) is the field's hard sum-to-zero
+# constraints, the columns of an intrinsic block the inner solve centred
+# (.schur_H_beta conditions on them; gcol33/tulpa#901).
 .marginal_H_beta_field <- function(mode, X, family, phi, n_trials,
                                    weights, offset,
                                    n_field, Z_field, Q_field,
-                                   re_idx, n_re_groups, sigma_re, y) {
+                                   re_idx, n_re_groups, sigma_re, y,
+                                   constr_field = NULL) {
   p     <- ncol(X)
   n_obs <- nrow(X)
 
@@ -348,7 +377,10 @@ tulpa_spde_precision_Q <- function(spatial, kappa, tau_spde) {
     Q_field
   )
 
-  .schur_H_beta(X, D, Q_latent, W)
+  constr <- if (!is.null(constr_field)) {
+    rbind(matrix(0, n_re_groups, ncol(constr_field)), as.matrix(constr_field))
+  }
+  .schur_H_beta(X, D, Q_latent, W, constr = constr)
 }
 
 
@@ -420,14 +452,14 @@ tulpa_spde_precision_Q <- function(spatial, kappa, tau_spde) {
 
 # --- Proper-CAR precision + marginal H_beta -------------------------------
 
-#' Proper-CAR precision Q = tau * (D - rho W) at fixed (tau, rho).
+#' Proper-CAR precision Q = tau * (D - rho W) at fixed (tau, rho)
 #'
 #' D is the diagonal degree matrix (neighbour counts) and W the adjacency, so
 #' Q has the same nonzero structure as the ICAR precision with rho scaling the
 #' off-diagonals. Matches `tulpa::add_car_proper_prior` / the nested CAR_proper
 #' precision builder.
 #'
-#' @keywords internal
+#' @noRd
 .car_proper_precision_Q <- function(spatial, tau, rho) {
   W   <- as(Matrix::Matrix(as.matrix(spatial$adjacency), sparse = TRUE),
             "CsparseMatrix")
@@ -455,53 +487,32 @@ tulpa_spde_precision_Q <- function(spatial, kappa, tau_spde) {
 
 # --- Intrinsic areal (ICAR / CAR / BYM2) precision + marginal H_beta -------
 
-#' Connected components of an adjacency graph, as a list of node-index vectors.
+#' Connected components of an adjacency graph, as a list of node-index vectors
 #'
-#' Iterative depth-first search, so it carries no recursion-depth risk on a
-#' large map. Returns what `graph_partition` (`inst/include/tulpa/graph_components.h`)
-#' returns -- the actual component MEMBERSHIP, not just a count -- so a genuine
-#' disconnected map (a mainland plus islands) pins each component's constant
-#' over that component's real nodes rather than an equal-size contiguous split.
-#' Takes the dense adjacency rather than a sparse one because symmetric sparse
-#' storage (`dsCMatrix`) keeps a single triangle, which would put an edge's two
-#' endpoints in different components.
+#' Breadth-first over the sparse structure of W + W' (`.adj_component_labels`,
+#' shared with the adjacency validator), so an edge stored in one triangle only
+#' still joins its endpoints and no dense copy is made. Returns what
+#' `graph_partition` (`inst/include/tulpa/graph_components.h`) returns -- the
+#' actual component MEMBERSHIP, not just a count -- so a genuine disconnected
+#' map (a mainland plus islands) pins each component's constant over that
+#' component's real nodes rather than an equal-size contiguous split.
+#' Components are ordered by their lowest node, members increasing.
 #'
-#' @keywords internal
+#' @noRd
 .graph_components <- function(adjacency) {
-  A <- as.matrix(adjacency)
-  n <- nrow(A)
-  if (n == 0L) return(list())
-  nb   <- lapply(seq_len(n), function(i) which(A[i, ] != 0))
-  seen <- logical(n)
-  comps <- list()
-  for (s0 in seq_len(n)) {
-    if (seen[s0]) next
-    seen[s0] <- TRUE
-    stack <- s0
-    members <- integer(0)
-    while (length(stack) > 0L) {
-      s <- stack[[length(stack)]]
-      stack <- stack[-length(stack)]
-      members <- c(members, s)
-      new <- nb[[s]][!seen[nb[[s]]]]
-      if (length(new) > 0L) {
-        seen[new] <- TRUE
-        stack <- c(stack, new)
-      }
-    }
-    comps[[length(comps) + 1L]] <- sort.int(members)
-  }
-  comps
+  lab <- .adj_component_labels(adjacency)
+  if (length(lab) == 0L) return(list())
+  unname(split(seq_along(lab), factor(lab, levels = seq_len(max(lab)))))
 }
 
-#' Number of connected components of an adjacency graph.
+#' Number of connected components of an adjacency graph
 #'
 #' The count of `.graph_components`, single-sourcing the DFS.
 #'
-#' @keywords internal
+#' @noRd
 .graph_n_components <- function(adjacency) length(.graph_components(adjacency))
 
-#' Intrinsic ICAR field precision, augmented to full rank.
+#' Intrinsic ICAR field precision, augmented to full rank
 #'
 #' `L = D - W` (degree minus adjacency) plus the sum-to-zero augmentation
 #' `sum_c 1_c 1_c' / J_c` that identifies each component's constant null
@@ -518,8 +529,13 @@ tulpa_spde_precision_Q <- function(spatial, kappa, tau_spde) {
 #' Hessian. `test-marginal-se-areal.R` pins it against the kernel's own
 #' `log_prior_icar`.
 #'
-#' @keywords internal
-.icar_precision_Q <- function(spatial) {
+#' `node_prec` (optional, one multiplier per node, constant within a
+#' component) scales each component's block, `diag(node_prec) Q_aug` -- the
+#' per-component BYM2 scaling the kernels apply to the structured prior
+#' (`.bym2_component_scaling()`, gcol33/tulpa#902).
+#'
+#' @noRd
+.icar_precision_Q <- function(spatial, node_prec = NULL) {
   W   <- as(Matrix::Matrix(as.matrix(spatial$adjacency), sparse = TRUE),
             "CsparseMatrix")
   n   <- nrow(W)
@@ -538,6 +554,7 @@ tulpa_spde_precision_Q <- function(spatial, kappa, tau_spde) {
   if (length(ii)) {
     Q <- Q + Matrix::sparseMatrix(i = ii, j = jj, x = xx, dims = c(n, n))
   }
+  if (!is.null(node_prec)) Q <- Matrix::Diagonal(n, node_prec) %*% Q
   Matrix::forceSymmetric(Q)
 }
 
@@ -554,20 +571,23 @@ tulpa_spde_precision_Q <- function(spatial, kappa, tau_spde) {
     n_field = n_units,
     Z_field = .field_design_Z(spatial$spatial_idx, n_units, nrow(X)),  # d_fac = 1
     Q_field = .icar_precision_Q(spatial),
-    re_idx = re_idx, n_re_groups = n_re_groups, sigma_re = sigma_re, y = y
+    re_idx = re_idx, n_re_groups = n_re_groups, sigma_re = sigma_re, y = y,
+    # The whole-field sum the kernel centres (centre_intrinsic_level).
+    constr_field = matrix(1, n_units, 1L)
   )
 }
 
 
-#' Marginal H_beta for a BYM2 field. The latent is the two-block
-#' `[phi (structured), theta (unstructured)]` convolution; each enters the
-#' linear predictor through the field indicator scaled by its `d_fac`
-#' (`sigma * sqrt(rho) * scale_factor` for phi, `sigma * sqrt(1 - rho)` for
-#' theta), with `phi` carrying the augmented ICAR precision `.icar_precision_Q`
-#' and `theta ~ N(0, I)`. The conditional
-#' Laplace kernel hardcodes `sigma = 1`, `rho = 0.5`.
+#' Marginal `H_beta` for a BYM2 field
 #'
-#' @keywords internal
+#' The latent is the two-block `[phi (structured), theta (unstructured)]`
+#' convolution; each enters the linear predictor through the field indicator
+#' scaled by its `d_fac` (`sigma * sqrt(rho) * scale_factor` for phi,
+#' `sigma * sqrt(1 - rho)` for theta), with `phi` carrying the augmented ICAR precision
+#' `.icar_precision_Q` and `theta ~ N(0, I)`. The conditional Laplace kernel
+#' hardcodes `sigma = 1`, `rho = 0.5`.
+#'
+#' @noRd
 .marginal_H_beta_bym2 <- function(mode, X, spatial, family, phi,
                                   n_trials, weights = NULL, offset = NULL,
                                   sigma_spatial = 1.0, rho = 0.5,
@@ -587,10 +607,12 @@ tulpa_spde_precision_Q <- function(spatial, kappa, tau_spde) {
     n_field = 2L * n_units,
     Z_field = cbind(d_phi * Z_ind, d_theta * Z_ind),
     Q_field = Matrix::bdiag(
-      .icar_precision_Q(spatial),          # phi: augmented ICAR structure
+      .icar_precision_Q(spatial, spatial$node_prec),  # phi: augmented ICAR
       Matrix::Diagonal(n_units, x = 1.0)   # theta: iid
     ),
-    re_idx = re_idx, n_re_groups = n_re_groups, sigma_re = sigma_re, y = y
+    re_idx = re_idx, n_re_groups = n_re_groups, sigma_re = sigma_re, y = y,
+    # Only the structured phi is intrinsic and centred; theta is proper.
+    constr_field = matrix(rep(c(1, 0), each = n_units), 2L * n_units, 1L)
   )
 }
 

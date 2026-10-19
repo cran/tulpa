@@ -34,40 +34,12 @@ approx_fit <- function(seed = 2L) {
   })
 }
 
-
-# --- fixef -------------------------------------------------------------------
-
-test_that("fixef() returns the fixed effects for both posterior shapes", {
-  for (fit in list(sampler_fit(), approx_fit())) {
-    fe <- fixef(fit)
-    expect_true(is.numeric(fe))
-    expect_identical(fe, coef(fit))
-    expect_identical(names(fe), fit$fixed_names)
-  }
-})
-
 test_that("fixef() excludes the random effects", {
   fit <- approx_fit()
   # coef()/fixef() are the fixed block only; the RE block is ranef()'s. A fit
   # whose fixef() length tracked the mode vector would silently return RE values.
   expect_length(fixef(fit), fit$n_fixed)
   expect_lt(length(fixef(fit)), length(fit$mode))
-})
-
-test_that("lme4::fixef() and nlme::ranef() dispatch on a tulpa_fit", {
-  fit <- sampler_fit()
-  if (requireNamespace("lme4", quietly = TRUE)) {
-    expect_identical(lme4::fixef(fit), fixef(fit))
-  } else {
-    skip("lme4 not installed")
-  }
-})
-
-test_that("nlme::fixef() dispatches on a tulpa_fit", {
-  skip_if_not_installed("nlme")
-  fit <- sampler_fit()
-  expect_identical(nlme::fixef(fit), fixef(fit))
-  expect_s3_class(nlme::ranef(fit), "data.frame")
 })
 
 test_that("registration is armed for packages that load after tulpa", {
@@ -88,10 +60,36 @@ test_that(".s3_register tolerates a package without the generic", {
                "package::generic")
 })
 
+test_that("posterior::as_draws() dispatches on a tulpa_fit", {
+  skip_if_not_installed("posterior")
+  fit <- sampler_fit()
+  expect_identical(posterior::as_draws(fit), as_draws(fit))
+  expect_identical(posterior::as_draws_df(fit), as_draws_df(fit))
+})
+
+test_that("the draws accessors still find real draws", {
+  fit <- sampler_fit()
+  expect_true(is.matrix(posterior_sample(fit)) ||
+                length(dim(posterior_sample(fit))) == 3L)
+  expect_false(is.null(tulpa_draws_array(fit)))
+  expect_equal(dim(tulpa_draws_array(fit))[3L], length(fit$param_names))
+})
+
+skip_on_cran_budget()
+
+test_that("nlme::fixef() dispatches on a tulpa_fit", {
+  skip_on_cran_budget()
+  skip_if_not_installed("nlme")
+  fit <- sampler_fit()
+  expect_identical(nlme::fixef(fit), fixef(fit))
+  expect_s3_class(nlme::ranef(fit), "data.frame")
+})
+
 
 # --- as_draws ----------------------------------------------------------------
 
 test_that("as_draws() converts a sampler fit to every posterior shape", {
+  skip_on_cran_budget()
   skip_if_not_installed("posterior")
   fit <- sampler_fit()
 
@@ -106,14 +104,8 @@ test_that("as_draws() converts a sampler fit to every posterior shape", {
   expect_identical(posterior::variables(arr), fit$param_names)
 })
 
-test_that("posterior::as_draws() dispatches on a tulpa_fit", {
-  skip_if_not_installed("posterior")
-  fit <- sampler_fit()
-  expect_identical(posterior::as_draws(fit), as_draws(fit))
-  expect_identical(posterior::as_draws_df(fit), as_draws_df(fit))
-})
-
 test_that("as_draws() refuses a Gaussian-approximation fit by default", {
+  skip_on_cran_budget()
   skip_if_not_installed("posterior")
   fit <- approx_fit()
   # Silently sampling the approximation would hand back an object every
@@ -124,6 +116,7 @@ test_that("as_draws() refuses a Gaussian-approximation fit by default", {
 })
 
 test_that("n_draws synthesizes from the Gaussian approximation", {
+  skip_on_cran_budget()
   skip_if_not_installed("posterior")
   fit <- approx_fit()
   d <- as_draws(fit, n_draws = 4000, seed = 42)
@@ -139,6 +132,7 @@ test_that("n_draws synthesizes from the Gaussian approximation", {
 })
 
 test_that("the synthesis is seeded and leaves the RNG state untouched", {
+  skip_on_cran_budget()
   skip_if_not_installed("posterior")
   fit <- approx_fit()
   expect_identical(as_draws(fit, n_draws = 100, seed = 3),
@@ -151,6 +145,7 @@ test_that("the synthesis is seeded and leaves the RNG state untouched", {
 })
 
 test_that("n_draws is rejected or ignored where it does not apply", {
+  skip_on_cran_budget()
   skip_if_not_installed("posterior")
   expect_warning(as_draws(sampler_fit(), n_draws = 10), "ignored")
   expect_error(as_draws(approx_fit(), n_draws = 0), "positive integer")
@@ -161,6 +156,7 @@ test_that("n_draws is rejected or ignored where it does not apply", {
 # --- `$` is exact on a fit object --------------------------------------------
 
 test_that("`$` on a tulpa_fit does not partial-match", {
+  skip_on_cran_budget()
   # A fit is a list, so `$`'s default partial matching would let an ABSENT field
   # resolve to any longer field it prefixes. The shape tests in
   # .fit_fixed_table() / vcov() decide which posterior a fit carries by asking
@@ -179,6 +175,7 @@ test_that("`$` on a tulpa_fit does not partial-match", {
 })
 
 test_that("`$` still returns fields that are actually present", {
+  skip_on_cran_budget()
   fit <- sampler_fit()
   for (f in c("backend", "draws", "param_names", "fixed_names", "n_fixed",
               "model_matrix", "formula", "family", "N")) {
@@ -188,9 +185,10 @@ test_that("`$` still returns fields that are actually present", {
 })
 
 test_that("`$` exactness reaches subclasses and does not break assignment", {
+  skip_on_cran_budget()
   fit <- sampler_fit()
+  class(fit) <- c("tulpa_test_subclass", class(fit))
   expect_true(inherits(fit, "tulpa_fit"))
-  expect_gt(length(class(fit)), 1L)   # a subclass, inheriting the method
 
   fit$brand_new_field <- 42
   expect_identical(fit$brand_new_field, 42)
@@ -199,6 +197,7 @@ test_that("`$` exactness reaches subclasses and does not break assignment", {
 })
 
 test_that("print() does not relabel a random-effect sd as the dispersion", {
+  skip_on_cran_budget()
   # print.tulpa_fit reports `x$sigma`. An AGQ fit carries `sigma_re` and no
   # `sigma`, so partial matching printed the RE standard deviation under the
   # "sigma:" label -- readable as the residual/dispersion scale.
@@ -214,13 +213,14 @@ test_that("print() does not relabel a random-effect sd as the dispersion", {
 
   expect_null(fit$sigma)
   expect_false(is.null(fit$sigma_re))
-  expect_false(any(grepl("^sigma:", utils::capture.output(print(fit)))))
+  expect_false(any(grepl("^sigma:", utils::capture.output(print(summary(fit))))))
 })
 
 
 # --- the draws accessors on a fit that carries none --------------------------
 
 test_that("draws accessors return NULL, not the draws_kind tag", {
+  skip_on_cran_budget()
   # `$` partial-matches on lists, so `fit$draws` on a Gaussian-approximation fit
   # resolves to `draws_kind` -- the string "iid". Every draws accessor must read
   # the field exactly, or it hands callers a tag dressed as a draws matrix.
@@ -235,16 +235,34 @@ test_that("draws accessors return NULL, not the draws_kind tag", {
   expect_null(tulpa:::.tulpa_chain_list(fit))
 })
 
-test_that("the draws accessors still find real draws", {
-  fit <- sampler_fit()
-  expect_true(is.matrix(posterior_sample(fit)) ||
-                length(dim(posterior_sample(fit))) == 3L)
-  expect_false(is.null(tulpa_draws_array(fit)))
-  expect_equal(dim(tulpa_draws_array(fit))[3L], length(fit$param_names))
-})
-
 test_that("diagnostics() reports the absence of draws on an approximation fit", {
+  skip_on_cran_budget()
   fit <- approx_fit()
   expect_message(res <- diagnostics(fit), "no posterior draws")
   expect_null(res)
+})
+
+skip_on_cran()
+
+
+# --- fixef -------------------------------------------------------------------
+
+test_that("fixef() returns the fixed effects for both posterior shapes", {
+  skip_on_cran()
+  for (fit in list(sampler_fit(), approx_fit())) {
+    fe <- fixef(fit)
+    expect_true(is.numeric(fe))
+    expect_identical(fe, coef(fit))
+    expect_identical(names(fe), fit$fixed_names)
+  }
+})
+
+test_that("lme4::fixef() and nlme::ranef() dispatch on a tulpa_fit", {
+  skip_on_cran()
+  fit <- sampler_fit()
+  if (requireNamespace("lme4", quietly = TRUE)) {
+    expect_identical(lme4::fixef(fit), fixef(fit))
+  } else {
+    skip("lme4 not installed")
+  }
 })

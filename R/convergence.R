@@ -264,6 +264,51 @@
   is.na(k) || identical(k, "chain")
 }
 
+# Fit-time floor on a chain's mixing, below which the draws are not a usable
+# posterior sample at all: split-Rhat above 1.05 or bulk-ESS under 100 on any
+# main (non-indexed) parameter. Looser than check_diagnostics()'s 1.01 / 400 on
+# purpose -- that is the bar for reporting, this is the bar for "the numbers
+# printed are not yet the posterior" -- so a routine fit does not warn and an
+# unconverged one cannot pass silently. A chain with bulk-ESS 2 printed clean
+# intervals, and only an opt-in diagnostic said otherwise (gcol33/tulpa#875,
+# #878).
+.TULPA_FIT_RHAT_MAX <- 1.05
+.TULPA_FIT_ESS_MIN  <- 100
+
+# Check a fitted chain against that floor. Records the verdict on the fit
+# (`$convergence`, which print() reads) and warns naming the offending
+# parameters. A fit that is not a chain, or is too short to diagnose, passes
+# through untouched.
+.tulpa_check_fit_convergence <- function(fit, caller = "tulpa()") {
+  if (!is.list(fit) || !.tulpa_is_chain(fit)) return(fit)
+  diag <- tryCatch(suppressWarnings(suppressMessages(
+    diagnostics(fit, measures = c("rhat", "ess_bulk")))),
+    error = function(e) NULL)
+  if (is.null(diag) || !NROW(diag)) return(fit)
+  diag <- diag[diag$parameter %in% select_main_params(diag$parameter), ,
+               drop = FALSE]
+  bad_r <- is.finite(diag$rhat) & diag$rhat > .TULPA_FIT_RHAT_MAX
+  bad_e <- is.finite(diag$ess_bulk) & diag$ess_bulk < .TULPA_FIT_ESS_MIN
+  fit$convergence <- list(
+    ok = !any(bad_r | bad_e),
+    rhat_max = suppressWarnings(max(diag$rhat, na.rm = TRUE)),
+    ess_bulk_min = suppressWarnings(min(diag$ess_bulk, na.rm = TRUE)),
+    parameters = diag$parameter[bad_r | bad_e])
+  if (fit$convergence$ok) return(fit)
+  worst <- diag[bad_r | bad_e, , drop = FALSE]
+  worst <- worst[order(worst$ess_bulk), , drop = FALSE]
+  shown <- utils::head(worst, 5L)
+  warning(sprintf(paste0(
+    "%s: the '%s' chain has not converged -- %s. Its estimates and intervals ",
+    "are not yet the posterior. Run longer (control$n_iter / control$warmup), ",
+    "or use mode = 'hmc'; see check_diagnostics()."),
+    caller, fit$backend %||% "sampler",
+    paste(sprintf("%s: Rhat %.2f, bulk-ESS %.0f", shown$parameter, shown$rhat,
+                  shown$ess_bulk), collapse = "; ")),
+    call. = FALSE)
+  fit
+}
+
 # Shared explanation for why chain diagnostics are withheld on a non-chain fit.
 .tulpa_non_chain_msg <- function(fit) {
   k <- .tulpa_draws_kind(fit)
@@ -379,6 +424,81 @@ posterior_sample <- function(fit) {
   draws
 }
 
+# Exact first two moments of a Gaussian mixture a draw matrix was sampled from.
+#
+# A sampler that draws i.i.d. from a known outer-grid mixture stamps it on its
+# output as `attr(draws, "grid_mixture")`: `weights` (one per cell), `modes`
+# (cells x p, the leading p columns of the draws) and the within-cell spread as
+# either `vars` (cells x p marginal variances) or `covs` (a list of p x p
+# covariances; a NULL or non-finite entry is a cell drawn at its mode). The
+# moments follow from the law of total variance,
+#   mean = sum_k w_k m_k,   var = sum_k w_k (v_k + m_k^2) - mean^2,
+# so a summary can report them instead of the Monte-Carlo estimate the draws
+# give. A draw matrix carries the attribute only while it IS that mixture's
+# sample: draws the subspace debias corrected are a different posterior and are
+# not stamped. NULL when there is no mixture.
+#' @keywords internal
+.grid_mixture_moments <- function(draws) {
+  gm <- attr(draws, "grid_mixture")
+  if (is.null(gm) || is.null(gm$modes) || is.null(gm$weights)) return(NULL)
+  modes <- as.matrix(gm$modes)
+  w <- as.numeric(gm$weights)
+  if (length(w) != nrow(modes)) return(NULL)
+  w[!is.finite(w) | w < 0] <- 0
+  if (!any(w > 0)) return(NULL)
+  w <- w / sum(w)
+  p <- ncol(modes)
+  vars <- if (!is.null(gm$vars)) {
+    as.matrix(gm$vars)
+  } else if (!is.null(gm$covs) && length(gm$covs) == nrow(modes)) {
+    t(vapply(gm$covs, function(C) {
+      d <- if (is.null(C)) rep(0, p) else diag(as.matrix(C))[seq_len(p)]
+      if (all(is.finite(d))) d else rep(0, p)
+    }, numeric(p)))
+  } else return(NULL)
+  if (!identical(dim(vars), dim(modes))) return(NULL)
+  on <- w > 0
+  wk <- w[on]
+  mk <- modes[on, , drop = FALSE]
+  m  <- colSums(wk * mk)
+  v  <- colSums(wk * (vars[on, , drop = FALSE] + mk^2)) - m^2
+  list(mean = m, sd = sqrt(pmax(v, 0)))
+}
+
+# Per-column posterior moments a fit carries EXACTLY for its draw matrix, as
+# `mean` / `sd` vectors over the draw columns, NA where only the draws describe
+# that column. The leading columns come from the stamped mixture
+# (`.grid_mixture_moments()`); columns past it -- a model package's
+# hyperparameter tail, drawn from its Gaussian conditional given the mixture
+# block -- come from the fit's own `$means` / `$sds`, joined by parameter name.
+# Both are read only on a stamped draw matrix, since that stamp is what says
+# the draws were sampled from the moments the fit reports. NULL when nothing is
+# exact.
+#' @keywords internal
+.tulpa_exact_moments <- function(draws, nm, fit = NULL) {
+  mom <- .grid_mixture_moments(draws)
+  if (is.null(mom)) return(NULL)
+  n_col <- length(nm)
+  mean <- rep(NA_real_, n_col)
+  sd   <- rep(NA_real_, n_col)
+  lead <- seq_len(min(length(mom$mean), n_col))
+  mean[lead] <- mom$mean[lead]
+  sd[lead]   <- mom$sd[lead]
+  tail <- setdiff(seq_len(n_col), lead)
+  fm <- if (is.list(fit)) fit[["means"]] else NULL
+  fs <- if (is.list(fit)) fit[["sds"]] else NULL
+  if (length(tail) && !is.null(names(fm)) && !is.null(names(fs))) {
+    hit <- tail[nm[tail] %in% names(fm) & nm[tail] %in% names(fs)]
+    mean[hit] <- as.numeric(fm[nm[hit]])
+    sd[hit]   <- as.numeric(fs[nm[hit]])
+  }
+  ok <- is.finite(mean) & is.finite(sd)
+  mean[!ok] <- NA_real_
+  sd[!ok]   <- NA_real_
+  if (!any(ok)) return(NULL)
+  list(mean = mean, sd = sd)
+}
+
 #' MCMC chain draws from a fit
 #'
 #' Returns a fit's posterior draws only when they form a genuine MCMC chain
@@ -391,6 +511,16 @@ posterior_sample <- function(fit) {
 #' @param fit A `tulpa_fit` (or subclass) carrying posterior `$draws`.
 #' @return The chain draws matrix/array, or `NULL` for a non-chain fit.
 #' @seealso [posterior_sample()], [diagnostics()]
+#' @examples
+#' \donttest{
+#' set.seed(1)
+#' d <- data.frame(x = rnorm(60))
+#' d$y <- rpois(60, exp(0.5 + 0.3 * d$x))
+#' fit <- tulpa(y ~ x, data = d, family = "poisson", mode = "hmc",
+#'              control = list(n_iter = 400L, warmup = 200L, n_chains = 2L,
+#'                             seed = 1L))
+#' dim(mcmc_draws(fit))
+#' }
 #' @export
 mcmc_draws <- function(fit) {
   if (!.tulpa_is_chain(fit)) return(NULL)
@@ -475,6 +605,16 @@ mcmc_draws <- function(fit) {
 #'   parameter names on the third dimension, or `NULL` if the fit carries no
 #'   draws. Chains of unequal length are truncated to the shortest.
 #' @seealso [posterior_sample()], [tulpa_posterior_draws()], [diagnostics()]
+#' @examples
+#' \donttest{
+#' set.seed(1)
+#' d <- data.frame(x = rnorm(60))
+#' d$y <- rpois(60, exp(0.5 + 0.3 * d$x))
+#' fit <- tulpa(y ~ x, data = d, family = "poisson", mode = "hmc",
+#'              control = list(n_iter = 400L, warmup = 200L, n_chains = 2L,
+#'                             seed = 1L))
+#' dim(tulpa_draws_array(fit))   # [iteration, chain, parameter]
+#' }
 #' @export
 tulpa_draws_array <- function(fit) {
   arr <- .tulpa_draws_array(fit)
@@ -560,6 +700,8 @@ get_draws_array <- function(fit) list(draws = tulpa_draws_array(fit))
 #' @param param_names Character vector of parameter names.
 #' @return The subset of `param_names` that are not bracketed-index entries
 #'   (or the full vector if that would be empty).
+#' @examples
+#' select_main_params(c("beta[1]", "beta[2]", "log_sigma_re", "re[1]", "re[2]"))
 #' @export
 select_main_params <- function(param_names) {
   keep <- !grepl("\\[[0-9]+(,[0-9]+)*\\]$", param_names)

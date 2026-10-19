@@ -14,6 +14,8 @@
 # Both are checked on the calling thread, so the fit either runs or names what
 # is missing.
 
+skip_on_cran()
+
 bound_arm_fit <- function(arm_extra, family, y, n_group = 6L, per_group = 4L,
                           seed = 3L) {
   set.seed(seed)
@@ -39,7 +41,7 @@ test_that("a truncated_gaussian arm carrying its ceiling fits", {
   set.seed(3L)
   y <- trunc_y(24L)
   fit <- bound_arm_fit(list(trunc_upper = rep(0, 24L)), "truncated_gaussian", y)
-  expect_true(all(is.finite(fit$log_marginal)))
+  expect_cells_solved(fit)
   expect_true(all(is.finite(fit$beta_mean)))
 })
 
@@ -51,7 +53,7 @@ test_that("an interval_gaussian arm carrying its bounds fits", {
   hi <- rep(c(-1, 0, Inf), length.out = 24L)
   fit <- bound_arm_fit(list(lower = lo, upper = hi), "interval_gaussian",
                        rep(0, 24L))
-  expect_true(all(is.finite(fit$log_marginal)))
+  expect_cells_solved(fit)
   expect_true(all(is.finite(fit$beta_mean)))
 })
 

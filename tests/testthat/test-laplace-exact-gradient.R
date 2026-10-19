@@ -120,52 +120,6 @@
   list(analytic = r$H, fd = (Hf + t(Hf)) / 2)
 }
 
-
-test_that("the exact gradient matches a difference of tulpa's own marginal", {
-  skip_on_cran()
-  for (cs in list(list(fam = "poisson",  th = log(0.7)),
-                  list(fam = "binomial", th = log(0.7)),
-                  list(fam = "poisson",  th = log(1.6)))) {
-    d <- .exg_sim(fam = cs$fam, G = if (cs$fam == "binomial") 14L else 10L,
-                  per = if (cs$fam == "binomial") 10L else 7L)
-    r <- .exg_compare(d, cs$th)
-    skip_if(is.null(r), "gradient unavailable")
-    expect_equal(r$analytic, r$fd, tolerance = 1e-6,
-                 info = paste(cs$fam, "at theta =", signif(cs$th, 4)))
-  }
-})
-
-test_that("the exact gradient matches for a correlated block", {
-  d <- .exg_sim(seed = 5L, G = 12L, per = 8L, nc = 2L)
-  r <- .exg_compare(d, c(log(0.7), 0.2, log(0.6)), full = TRUE)
-  skip_if(is.null(r), "gradient unavailable")
-  expect_equal(r$analytic, r$fd, tolerance = 1e-6)
-  expect_length(r$analytic, 3L)
-})
-
-test_that("the closed-form Hessian matches a difference of the analytic gradient", {
-  skip_on_cran()
-  for (cs in list(list(fam = "poisson",  th = log(0.7)),
-                  list(fam = "binomial", th = log(0.7)),
-                  list(fam = "poisson",  th = log(1.6)))) {
-    d <- .exg_sim(fam = cs$fam, G = if (cs$fam == "binomial") 14L else 10L,
-                  per = if (cs$fam == "binomial") 10L else 7L)
-    r <- .exg_hess_compare(d, cs$th)
-    skip_if(is.null(r), "hessian unavailable")
-    expect_equal(dim(r$analytic), c(1L, 1L))
-    expect_equal(r$analytic, r$fd, tolerance = 1e-5,
-                 info = paste(cs$fam, "at theta =", signif(cs$th, 4)))
-  }
-})
-
-test_that("the closed-form Hessian matches for a correlated block", {
-  d <- .exg_sim(seed = 5L, G = 12L, per = 8L, nc = 2L)
-  r <- .exg_hess_compare(d, c(log(0.7), 0.2, log(0.6)), full = TRUE)
-  skip_if(is.null(r), "hessian unavailable")
-  expect_equal(dim(r$analytic), c(3L, 3L))
-  expect_equal(r$analytic, r$fd, tolerance = 1e-5)
-})
-
 .exg_closed_H <- function(fam, phi, theta = log(0.7), G = 24L, per = 10L) {
   d <- .exg_sim(fam = fam, G = G, per = per, phi = phi)
   layout <- .exg_layout(d, FALSE)
@@ -184,7 +138,41 @@ test_that("the closed-form Hessian matches for a correlated block", {
   list(r = at(theta, TRUE), at = at, theta = theta)
 }
 
+test_that("the chain rule export agrees with a direct dSigma trace", {
+  # cpp_recov_block_grad must equal 0.5 tr(dSigma_j . core) with Smat = 0.5 core.
+  set.seed(4)
+  nc <- 2L
+  L <- matrix(c(0.8, 0.25, 0, 0.6), 2, 2)
+  core <- crossprod(matrix(rnorm(4), 2, 2))
+  Smat <- 0.5 * core
+  got <- cpp_recov_block_grad(Smat, L, TRUE, 1.0)
+  dS <- .re_block_dSigma(L, nc, TRUE)
+  want <- vapply(dS, function(d) 0.5 * sum(diag(d %*% core)), numeric(1))
+  expect_equal(as.numeric(got), want, tolerance = 1e-10)
+})
+
+skip_on_cran_budget()
+
+test_that("the exact gradient matches for a correlated block", {
+  skip_on_cran_budget()
+  d <- .exg_sim(seed = 5L, G = 12L, per = 8L, nc = 2L)
+  r <- .exg_compare(d, c(log(0.7), 0.2, log(0.6)), full = TRUE)
+  skip_if(is.null(r), "gradient unavailable")
+  expect_equal(r$analytic, r$fd, tolerance = 1e-6)
+  expect_length(r$analytic, 3L)
+})
+
+test_that("the closed-form Hessian matches for a correlated block", {
+  skip_on_cran_budget()
+  d <- .exg_sim(seed = 5L, G = 12L, per = 8L, nc = 2L)
+  r <- .exg_hess_compare(d, c(log(0.7), 0.2, log(0.6)), full = TRUE)
+  skip_if(is.null(r), "hessian unavailable")
+  expect_equal(dim(r$analytic), c(3L, 3L))
+  expect_equal(r$analytic, r$fd, tolerance = 1e-5)
+})
+
 test_that("the closed Hessian handles a working weight that is not the observed one", {
+  skip_on_cran_budget()
   # truncated_neg_binomial_2 builds H from Var(y | y > 0), not from its observed
   # curvature. The gradient's dW channel is v_r' (dx_hat/dtheta) and the mode
   # motion follows the TRUE stationarity condition, so u is formed on the
@@ -200,6 +188,7 @@ test_that("the closed Hessian handles a working weight that is not the observed 
 })
 
 test_that("the closed Hessian handles neg_binomial_1", {
+  skip_on_cran_budget()
   # The same split again. Its observed curvature is -s + r^2 (psi'(r) -
   # psi'(y+r)), so d(W_obs - w)/deta carries psi'' -- which is why this route
   # used to decline, missing H_theta by 2.6e-2 when forced on. With
@@ -214,6 +203,7 @@ test_that("the closed Hessian handles neg_binomial_1", {
 })
 
 test_that("the observed-curvature correction is exact at both derivative rungs", {
+  skip_on_cran_budget()
   # What the two branches above rest on, checked directly rather than only
   # through the assembled Hessian: d(W_obs - w)/deta against a difference of the
   # correction itself, and -- for neg_binomial_1, the only family carrying a
@@ -236,6 +226,263 @@ test_that("the observed-curvature correction is exact at both derivative rungs",
     ref <- -s + 3 * r^2 * (trigamma(r) - trigamma(y + r)) +
       r^3 * (psigamma(r, 2L) - psigamma(y + r, 2L)) - mu / (1 + phi)
     expect_equal(got, ref, tolerance = 1e-7)
+  }
+})
+
+test_that("a gaussian response has a closed Hessian with the curvature at zero", {
+  skip_on_cran_budget()
+  # The control: dw/deta and d2w/deta2 are identically zero, so the Hessian is
+  # exercised through J, dR and dV alone -- the analogue of the gradient control.
+  d <- .exg_sim(fam = "gaussian")
+  layout <- .exg_layout(d, FALSE)
+  L <- .exg_theta_to_L(log(0.7), 1L, FALSE)
+  fit <- tulpa_laplace(y = d$y, n_trials = d$n_trials, X = d$X,
+                       re_list = .re_cov_build_re_list(list(L), layout),
+                       family = "gaussian", phi = 0.49,
+                       return_hessian = TRUE, return_joint_hessian = TRUE)
+  r <- .laplace_exact_re_grad(
+    fit = fit, y = d$y, X = d$X, n_trials = d$n_trials, offset = NULL,
+    weights = NULL, re_list = .re_cov_build_re_list(list(L), layout),
+    layout = layout, L_list = list(L), family = "gaussian", phi = 0.49,
+    want_hessian = TRUE)
+  skip_if(is.null(r) || is.null(r$H), "hessian unavailable")
+  expect_equal(dim(r$H), c(1L, 1L))
+  expect_true(all(is.finite(r$H)))
+})
+
+test_that("a gaussian response is the control: dw/deta is zero throughout", {
+  skip_on_cran_budget()
+  # The curvature-movement term vanishes identically here, so this case is
+  # exact with or without it -- which is why it cannot be the only check.
+  d <- .exg_sim(fam = "gaussian")
+  r <- .exg_compare(d, log(0.7), phi = 0.49)
+  skip_if(is.null(r), "gradient unavailable")
+  expect_equal(r$analytic, r$fd, tolerance = 1e-8)
+  expect_true(all(cpp_family_curvature_deta_vec(
+    d$y, d$n_trials, rnorm(d$n), "gaussian", 0.7) == 0))
+})
+
+test_that("dw/deta differentiates the weight the Newton system uses", {
+  skip_on_cran_budget()
+  cases <- list(
+    list(family = "poisson",                  y = 4,   n = 1L,  phi = 1.0),
+    list(family = "binomial",                 y = 3,   n = 10L, phi = 1.0),
+    list(family = "neg_binomial_2",           y = 6,   n = 1L,  phi = 2.5),
+    list(family = "neg_binomial_1",           y = 6,   n = 1L,  phi = 1.7),
+    list(family = "truncated_poisson",        y = 3,   n = 1L,  phi = 1.0),
+    list(family = "truncated_neg_binomial_2", y = 3,   n = 1L,  phi = 2.0),
+    list(family = "beta_binomial",            y = 3,   n = 10L, phi = 4.0),
+    list(family = "gamma",                    y = 2.0, n = 1L,  phi = 3.0),
+    list(family = "inverse_gaussian",         y = 1.4, n = 1L,  phi = 1.1),
+    list(family = "beta",                     y = 0.6, n = 1L,  phi = 6.0),
+    list(family = "binomial_probit",          y = 3,   n = 10L, phi = 1.0),
+    list(family = "binomial_cloglog",         y = 3,   n = 10L, phi = 1.0),
+    list(family = "gaussian_log",             y = 1.2, n = 1L,  phi = 1.5)
+  )
+  h <- 1e-5
+  for (cs in cases) {
+    for (eta in c(-0.6, 0.0, 0.9)) {
+      w <- function(e) unname(
+        cpp_family_terms(cs$y, cs$n, e, cs$family, cs$phi)[["neg_hess"]])
+      got <- unname(cpp_family_curvature_deta(
+        cs$y, cs$n, eta, cs$family, cs$phi)[["dw_deta"]])
+      num <- (w(eta + h) - w(eta - h)) / (2 * h)
+      # Scaled by the larger magnitude with a floor: several families have a
+      # weight that is genuinely constant in eta, where the answer is 0 and a
+      # ratio against finite-difference noise is meaningless.
+      scale <- max(abs(num), abs(got), 1e-6)
+      expect_lt(abs(got - num) / scale, 1e-4)
+    }
+  }
+})
+
+test_that("families with an exact curvature derivative are gated honestly", {
+  skip_on_cran_budget()
+  for (f in c("poisson", "binomial", "neg_binomial_2", "gamma",
+              "binomial_probit", "gaussian_log")) {
+    expect_true(cpp_family_has_curvature_derivative(f), info = f)
+  }
+  # The gate is what stops the exact path being offered for a family whose
+  # weight has no closed-form eta-derivative here.
+  expect_false(cpp_family_has_curvature_derivative("not_a_family"))
+})
+
+test_that("the vectorized curvature derivative matches the scalar probe", {
+  skip_on_cran_budget()
+  set.seed(2)
+  eta <- rnorm(25)
+  y   <- rpois(25, 2)
+  vec <- cpp_family_curvature_deta_vec(y, 1L, eta, "poisson", 1.0)
+  sc  <- vapply(seq_along(eta), function(i)
+    unname(cpp_family_curvature_deta(y[i], 1L, eta[i], "poisson", 1.0)[["dw_deta"]]),
+    numeric(1))
+  expect_equal(vec, sc)
+  expect_error(cpp_family_curvature_deta_vec(y[1:3], 1L, eta, "poisson", 1.0),
+               "differ in length")
+})
+
+test_that("d2w/deta2 differentiates dw/deta (curvature the theta-Hessian needs)", {
+  skip_on_cran_budget()
+  # Same load-bearing idea as the dw/deta test: a central difference of the
+  # verified first curvature derivative is the ground truth the closed-form
+  # second derivative must reproduce, family by family.
+  cases <- list(
+    list(family = "poisson",          y = 4,   n = 1L,  phi = 1.0),
+    list(family = "binomial",         y = 3,   n = 10L, phi = 1.0),
+    list(family = "neg_binomial_2",   y = 6,   n = 1L,  phi = 2.5),
+    list(family = "neg_binomial_1",   y = 6,   n = 1L,  phi = 1.7),
+    list(family = "beta_binomial",    y = 3,   n = 10L, phi = 4.0),
+    list(family = "tweedie",          y = 2.0, n = 1L,  phi = 1.3, phi2 = 1.6),
+    list(family = "gamma",            y = 2.0, n = 1L,  phi = 3.0),
+    list(family = "inverse_gaussian", y = 1.4, n = 1L,  phi = 1.1),
+    list(family = "beta",             y = 0.6, n = 1L,  phi = 6.0),
+    list(family = "binomial_probit",  y = 3,   n = 10L, phi = 1.0),
+    list(family = "binomial_cloglog", y = 3,   n = 10L, phi = 1.0),
+    list(family = "gaussian_log",     y = 1.2, n = 1L,  phi = 1.5)
+  )
+  h <- 1e-5
+  for (cs in cases) {
+    p2 <- if (is.null(cs$phi2)) NA_real_ else cs$phi2
+    for (eta in c(-0.6, 0.0, 0.9)) {
+      dw <- function(e) unname(cpp_family_curvature_deta(
+        cs$y, cs$n, e, cs$family, cs$phi, p2)[["dw_deta"]])
+      got <- unname(cpp_family_curvature_deta2(
+        cs$y, cs$n, eta, cs$family, cs$phi, p2)[["d2w_deta2"]])
+      num <- (dw(eta + h) - dw(eta - h)) / (2 * h)
+      # Floor as before: gamma+log has dw==0 identically, so this is the
+      # 0-vs-FD-noise case where a ratio would be meaningless.
+      scale <- max(abs(num), abs(got), 1e-6)
+      expect_lt(abs(got - num) / scale, 1e-4)
+    }
+  }
+})
+
+test_that("the second curvature derivative gate covers every family with a first", {
+  skip_on_cran_budget()
+  # The truncated pair carry the third truncation-shape derivative d3a, so their
+  # second eta-derivative is closed-form alongside every other family.
+  for (f in c("poisson", "binomial", "neg_binomial_2", "neg_binomial_1",
+              "beta_binomial", "t", "tweedie", "gamma", "beta",
+              "binomial_probit", "gaussian_log",
+              "truncated_poisson", "truncated_neg_binomial_2"))
+    expect_true(cpp_family_has_curvature_2nd_derivative(f), info = f)
+  expect_false(cpp_family_has_curvature_2nd_derivative("not_a_family"))
+  # The truncated second eta-derivative FD-checks against the first, the same
+  # gate proto_truncated_curvature.R pins in base R.
+  h <- 1e-6
+  for (cs in list(list(f = "truncated_poisson", phi = 1.0),
+                  list(f = "truncated_neg_binomial_2", phi = 2.5))) {
+    for (eta in c(-0.6, 0.2, 0.9)) {
+      dw <- function(e) unname(cpp_family_curvature_deta(
+        3, 1L, e, cs$f, cs$phi, NA_real_)[["dw_deta"]])
+      got <- unname(cpp_family_curvature_deta2(
+        3, 1L, eta, cs$f, cs$phi, NA_real_)[["d2w_deta2"]])
+      num <- (dw(eta + h) - dw(eta - h)) / (2 * h)
+      expect_lt(abs(got - num) / max(abs(num), abs(got), 1e-6), 1e-4, label = cs$f)
+    }
+  }
+})
+
+
+test_that("the compiled zero-inflation gate needs a discrete base, not just a curvature", {
+  skip_on_cran_budget()
+  # has_observed_curvature() alone used to decide this, and was right only while
+  # the count families were the only ones carrying one. The mixture's y = 0
+  # branch reads log_lik_for_family(0, ...) as log P(Y = 0); for a continuous
+  # family that is a log-DENSITY -- finite and plausible for gaussian, infinite
+  # for gamma or beta -- so the gate needs the discreteness condition of its own.
+  for (f in c("poisson", "binomial", "neg_binomial_2", "neg_binomial_1",
+              "truncated_poisson", "truncated_neg_binomial_2"))
+    expect_true(cpp_family_compiled_zi_supported(f), info = f)
+  for (f in c("gaussian", "lognormal", "gamma", "beta", "inverse_gaussian",
+              "tweedie", "t"))
+    expect_false(cpp_family_compiled_zi_supported(f), info = f)
+})
+
+test_that("the vectorized second curvature derivative matches the scalar probe", {
+  skip_on_cran_budget()
+  set.seed(3)
+  eta <- rnorm(20)
+  y   <- rpois(20, 2)
+  vec <- cpp_family_curvature_deta2_vec(y, 1L, eta, "poisson", 1.0)
+  sc  <- vapply(seq_along(eta), function(i) unname(cpp_family_curvature_deta2(
+    y[i], 1L, eta[i], "poisson", 1.0)[["d2w_deta2"]]), numeric(1))
+  expect_equal(vec, sc)
+  expect_error(cpp_family_curvature_deta2_vec(y[1:3], 1L, eta, "poisson", 1.0),
+               "differ in length")
+})
+
+test_that("the joint Hessian round-trips as a symmetric matrix", {
+  skip_on_cran_budget()
+  d <- .exg_sim()
+  layout <- .exg_layout(d, FALSE)
+  L <- .exg_theta_to_L(log(0.7), 1L, FALSE)
+  f <- tulpa_laplace(y = d$y, n_trials = d$n_trials, X = d$X,
+                     re_list = .re_cov_build_re_list(list(L), layout),
+                     family = "poisson", return_hessian = TRUE,
+                     return_joint_hessian = TRUE)
+  H <- f$H_joint
+  expect_false(is.null(H))
+  expect_equal(nrow(H), length(f$mode))
+  expect_equal(ncol(H), length(f$mode))
+  expect_true(Matrix::isSymmetric(H))
+  # It is a posterior precision, so it must be positive definite.
+  expect_true(min(eigen(as.matrix(H), symmetric = TRUE,
+                        only.values = TRUE)$values) > 0)
+  # Absent unless asked for, so no other caller pays for it.
+  f0 <- tulpa_laplace(y = d$y, n_trials = d$n_trials, X = d$X,
+                      re_list = .re_cov_build_re_list(list(L), layout),
+                      family = "poisson", return_hessian = TRUE)
+  expect_null(f0$H_joint)
+})
+
+test_that("the gradient-driven outer fit lands where the derivative-free one does", {
+  skip_on_cran_budget()
+  d <- .exg_sim(seed = 7L, G = 20L, per = 8L)
+  re <- list(idx = d$grp, n_groups = d$G, n_coefs = 1L)
+  a <- tulpa_eb(d$y, NULL, d$X, re, family = "poisson")
+
+  orig <- cpp_family_has_curvature_derivative
+  on.exit(assignInNamespace("cpp_family_has_curvature_derivative", orig,
+                            ns = "tulpa"), add = TRUE)
+  assignInNamespace("cpp_family_has_curvature_derivative",
+                    function(family) FALSE, ns = "tulpa")
+  b <- tulpa_eb(d$y, NULL, d$X, re, family = "poisson")
+
+  expect_equal(unname(coef(a)), unname(coef(b)), tolerance = 1e-4)
+  expect_equal(unname(sqrt(diag(vcov(a)))), unname(sqrt(diag(vcov(b)))),
+               tolerance = 1e-4)
+})
+
+skip_on_cran()
+
+
+test_that("the exact gradient matches a difference of tulpa's own marginal", {
+  skip_on_cran()
+  for (cs in list(list(fam = "poisson",  th = log(0.7)),
+                  list(fam = "binomial", th = log(0.7)),
+                  list(fam = "poisson",  th = log(1.6)))) {
+    d <- .exg_sim(fam = cs$fam, G = if (cs$fam == "binomial") 14L else 10L,
+                  per = if (cs$fam == "binomial") 10L else 7L)
+    r <- .exg_compare(d, cs$th)
+    skip_if(is.null(r), "gradient unavailable")
+    expect_equal(r$analytic, r$fd, tolerance = 1e-6,
+                 info = paste(cs$fam, "at theta =", signif(cs$th, 4)))
+  }
+})
+
+test_that("the closed-form Hessian matches a difference of the analytic gradient", {
+  skip_on_cran()
+  for (cs in list(list(fam = "poisson",  th = log(0.7)),
+                  list(fam = "binomial", th = log(0.7)),
+                  list(fam = "poisson",  th = log(1.6)))) {
+    d <- .exg_sim(fam = cs$fam, G = if (cs$fam == "binomial") 14L else 10L,
+                  per = if (cs$fam == "binomial") 10L else 7L)
+    r <- .exg_hess_compare(d, cs$th)
+    skip_if(is.null(r), "hessian unavailable")
+    expect_equal(dim(r$analytic), c(1L, 1L))
+    expect_equal(r$analytic, r$fd, tolerance = 1e-5,
+                 info = paste(cs$fam, "at theta =", signif(cs$th, 4)))
   }
 })
 
@@ -307,154 +554,8 @@ test_that("the analytic mode Jacobian equals the differenced true inner mode", {
   }
 })
 
-test_that("a gaussian response has a closed Hessian with the curvature at zero", {
-  # The control: dw/deta and d2w/deta2 are identically zero, so the Hessian is
-  # exercised through J, dR and dV alone -- the analogue of the gradient control.
-  d <- .exg_sim(fam = "gaussian")
-  layout <- .exg_layout(d, FALSE)
-  L <- .exg_theta_to_L(log(0.7), 1L, FALSE)
-  fit <- tulpa_laplace(y = d$y, n_trials = d$n_trials, X = d$X,
-                       re_list = .re_cov_build_re_list(list(L), layout),
-                       family = "gaussian", phi = 0.49,
-                       return_hessian = TRUE, return_joint_hessian = TRUE)
-  r <- .laplace_exact_re_grad(
-    fit = fit, y = d$y, X = d$X, n_trials = d$n_trials, offset = NULL,
-    weights = NULL, re_list = .re_cov_build_re_list(list(L), layout),
-    layout = layout, L_list = list(L), family = "gaussian", phi = 0.49,
-    want_hessian = TRUE)
-  skip_if(is.null(r) || is.null(r$H), "hessian unavailable")
-  expect_equal(dim(r$H), c(1L, 1L))
-  expect_true(all(is.finite(r$H)))
-})
-
-test_that("a gaussian response is the control: dw/deta is zero throughout", {
-  # The curvature-movement term vanishes identically here, so this case is
-  # exact with or without it -- which is why it cannot be the only check.
-  d <- .exg_sim(fam = "gaussian")
-  r <- .exg_compare(d, log(0.7), phi = 0.49)
-  skip_if(is.null(r), "gradient unavailable")
-  expect_equal(r$analytic, r$fd, tolerance = 1e-8)
-  expect_true(all(cpp_family_curvature_deta_vec(
-    d$y, d$n_trials, rnorm(d$n), "gaussian", 0.7) == 0))
-})
-
-test_that("dw/deta differentiates the weight the Newton system uses", {
-  cases <- list(
-    list(family = "poisson",                  y = 4,   n = 1L,  phi = 1.0),
-    list(family = "binomial",                 y = 3,   n = 10L, phi = 1.0),
-    list(family = "neg_binomial_2",           y = 6,   n = 1L,  phi = 2.5),
-    list(family = "neg_binomial_1",           y = 6,   n = 1L,  phi = 1.7),
-    list(family = "truncated_poisson",        y = 3,   n = 1L,  phi = 1.0),
-    list(family = "truncated_neg_binomial_2", y = 3,   n = 1L,  phi = 2.0),
-    list(family = "beta_binomial",            y = 3,   n = 10L, phi = 4.0),
-    list(family = "gamma",                    y = 2.0, n = 1L,  phi = 3.0),
-    list(family = "inverse_gaussian",         y = 1.4, n = 1L,  phi = 1.1),
-    list(family = "beta",                     y = 0.6, n = 1L,  phi = 6.0),
-    list(family = "binomial_probit",          y = 3,   n = 10L, phi = 1.0),
-    list(family = "binomial_cloglog",         y = 3,   n = 10L, phi = 1.0),
-    list(family = "gaussian_log",             y = 1.2, n = 1L,  phi = 1.5)
-  )
-  h <- 1e-5
-  for (cs in cases) {
-    for (eta in c(-0.6, 0.0, 0.9)) {
-      w <- function(e) unname(
-        cpp_family_terms(cs$y, cs$n, e, cs$family, cs$phi)[["neg_hess"]])
-      got <- unname(cpp_family_curvature_deta(
-        cs$y, cs$n, eta, cs$family, cs$phi)[["dw_deta"]])
-      num <- (w(eta + h) - w(eta - h)) / (2 * h)
-      # Scaled by the larger magnitude with a floor: several families have a
-      # weight that is genuinely constant in eta, where the answer is 0 and a
-      # ratio against finite-difference noise is meaningless.
-      scale <- max(abs(num), abs(got), 1e-6)
-      expect_lt(abs(got - num) / scale, 1e-4)
-    }
-  }
-})
-
-test_that("families with an exact curvature derivative are gated honestly", {
-  for (f in c("poisson", "binomial", "neg_binomial_2", "gamma",
-              "binomial_probit", "gaussian_log")) {
-    expect_true(cpp_family_has_curvature_derivative(f), info = f)
-  }
-  # The gate is what stops the exact path being offered for a family whose
-  # weight has no closed-form eta-derivative here.
-  expect_false(cpp_family_has_curvature_derivative("not_a_family"))
-})
-
-test_that("the vectorized curvature derivative matches the scalar probe", {
-  set.seed(2)
-  eta <- rnorm(25)
-  y   <- rpois(25, 2)
-  vec <- cpp_family_curvature_deta_vec(y, 1L, eta, "poisson", 1.0)
-  sc  <- vapply(seq_along(eta), function(i)
-    unname(cpp_family_curvature_deta(y[i], 1L, eta[i], "poisson", 1.0)[["dw_deta"]]),
-    numeric(1))
-  expect_equal(vec, sc)
-  expect_error(cpp_family_curvature_deta_vec(y[1:3], 1L, eta, "poisson", 1.0),
-               "differ in length")
-})
-
-test_that("d2w/deta2 differentiates dw/deta (curvature the theta-Hessian needs)", {
-  # Same load-bearing idea as the dw/deta test: a central difference of the
-  # verified first curvature derivative is the ground truth the closed-form
-  # second derivative must reproduce, family by family.
-  cases <- list(
-    list(family = "poisson",          y = 4,   n = 1L,  phi = 1.0),
-    list(family = "binomial",         y = 3,   n = 10L, phi = 1.0),
-    list(family = "neg_binomial_2",   y = 6,   n = 1L,  phi = 2.5),
-    list(family = "neg_binomial_1",   y = 6,   n = 1L,  phi = 1.7),
-    list(family = "beta_binomial",    y = 3,   n = 10L, phi = 4.0),
-    list(family = "tweedie",          y = 2.0, n = 1L,  phi = 1.3, phi2 = 1.6),
-    list(family = "gamma",            y = 2.0, n = 1L,  phi = 3.0),
-    list(family = "inverse_gaussian", y = 1.4, n = 1L,  phi = 1.1),
-    list(family = "beta",             y = 0.6, n = 1L,  phi = 6.0),
-    list(family = "binomial_probit",  y = 3,   n = 10L, phi = 1.0),
-    list(family = "binomial_cloglog", y = 3,   n = 10L, phi = 1.0),
-    list(family = "gaussian_log",     y = 1.2, n = 1L,  phi = 1.5)
-  )
-  h <- 1e-5
-  for (cs in cases) {
-    p2 <- if (is.null(cs$phi2)) NA_real_ else cs$phi2
-    for (eta in c(-0.6, 0.0, 0.9)) {
-      dw <- function(e) unname(cpp_family_curvature_deta(
-        cs$y, cs$n, e, cs$family, cs$phi, p2)[["dw_deta"]])
-      got <- unname(cpp_family_curvature_deta2(
-        cs$y, cs$n, eta, cs$family, cs$phi, p2)[["d2w_deta2"]])
-      num <- (dw(eta + h) - dw(eta - h)) / (2 * h)
-      # Floor as before: gamma+log has dw==0 identically, so this is the
-      # 0-vs-FD-noise case where a ratio would be meaningless.
-      scale <- max(abs(num), abs(got), 1e-6)
-      expect_lt(abs(got - num) / scale, 1e-4)
-    }
-  }
-})
-
-test_that("the second curvature derivative gate covers every family with a first", {
-  # The truncated pair carry the third truncation-shape derivative d3a, so their
-  # second eta-derivative is closed-form alongside every other family.
-  for (f in c("poisson", "binomial", "neg_binomial_2", "neg_binomial_1",
-              "beta_binomial", "t", "tweedie", "gamma", "beta",
-              "binomial_probit", "gaussian_log",
-              "truncated_poisson", "truncated_neg_binomial_2"))
-    expect_true(cpp_family_has_curvature_2nd_derivative(f), info = f)
-  expect_false(cpp_family_has_curvature_2nd_derivative("not_a_family"))
-  # The truncated second eta-derivative FD-checks against the first, the same
-  # gate proto_truncated_curvature.R pins in base R.
-  h <- 1e-6
-  for (cs in list(list(f = "truncated_poisson", phi = 1.0),
-                  list(f = "truncated_neg_binomial_2", phi = 2.5))) {
-    for (eta in c(-0.6, 0.2, 0.9)) {
-      dw <- function(e) unname(cpp_family_curvature_deta(
-        3, 1L, e, cs$f, cs$phi, NA_real_)[["dw_deta"]])
-      got <- unname(cpp_family_curvature_deta2(
-        3, 1L, eta, cs$f, cs$phi, NA_real_)[["d2w_deta2"]])
-      num <- (dw(eta + h) - dw(eta - h)) / (2 * h)
-      expect_lt(abs(got - num) / max(abs(num), abs(got), 1e-6), 1e-4, label = cs$f)
-    }
-  }
-})
-
 test_that("the exact mode-Jacobian gate tracks whether the observed curvature is available", {
+  skip_on_cran()
   # Every front-door family now carries an exact observed curvature: the
   # explicitly branched ones directly, everything on the generic mu-space route
   # through the grad_mu ladder. So the gate is open across the registry, and
@@ -475,95 +576,21 @@ test_that("the exact mode-Jacobian gate tracks whether the observed curvature is
       y, 6L, eta, cs[[1]], cs[[2]])) < 1e-12), info = cs[[1]])
     expect_true(cpp_family_working_weight_is_observed(cs[[1]]), info = cs[[1]])
   }
+  # beta's Newton weight is the observed curvature under every link
+  # (gcol33/tulpa#936), so its delta is the zero function too; its response
+  # lives on (0, 1).
+  expect_true(all(abs(cpp_family_obs_curvature_delta_vec(
+    c(0.2, 0.55, 0.9), 1L, eta, "beta", 6)) < 1e-12))
+  expect_true(cpp_family_working_weight_is_observed("beta"))
   nonzero_delta <- list(
     list("truncated_neg_binomial_2", 2.5), list("neg_binomial_1", 2.5),
-    list("gamma", 3), list("beta", 6), list("inverse_gaussian", 0.6),
+    list("gamma", 3), list("inverse_gaussian", 0.6),
     list("beta_binomial", 6), list("binomial_probit", 1), list("gaussian_log", 1.4))
   for (cs in nonzero_delta) {
     expect_true(any(abs(cpp_family_obs_curvature_delta_vec(
       y, 6L, eta, cs[[1]], cs[[2]])) > 1e-8), info = cs[[1]])
     expect_false(cpp_family_working_weight_is_observed(cs[[1]]), info = cs[[1]])
   }
-})
-
-
-test_that("the compiled zero-inflation gate needs a discrete base, not just a curvature", {
-  # has_observed_curvature() alone used to decide this, and was right only while
-  # the count families were the only ones carrying one. The mixture's y = 0
-  # branch reads log_lik_for_family(0, ...) as log P(Y = 0); for a continuous
-  # family that is a log-DENSITY -- finite and plausible for gaussian, infinite
-  # for gamma or beta -- so the gate needs the discreteness condition of its own.
-  for (f in c("poisson", "binomial", "neg_binomial_2", "neg_binomial_1",
-              "truncated_poisson", "truncated_neg_binomial_2"))
-    expect_true(cpp_family_compiled_zi_supported(f), info = f)
-  for (f in c("gaussian", "lognormal", "gamma", "beta", "inverse_gaussian",
-              "tweedie", "t"))
-    expect_false(cpp_family_compiled_zi_supported(f), info = f)
-})
-
-test_that("the vectorized second curvature derivative matches the scalar probe", {
-  set.seed(3)
-  eta <- rnorm(20)
-  y   <- rpois(20, 2)
-  vec <- cpp_family_curvature_deta2_vec(y, 1L, eta, "poisson", 1.0)
-  sc  <- vapply(seq_along(eta), function(i) unname(cpp_family_curvature_deta2(
-    y[i], 1L, eta[i], "poisson", 1.0)[["d2w_deta2"]]), numeric(1))
-  expect_equal(vec, sc)
-  expect_error(cpp_family_curvature_deta2_vec(y[1:3], 1L, eta, "poisson", 1.0),
-               "differ in length")
-})
-
-test_that("the chain rule export agrees with a direct dSigma trace", {
-  # cpp_recov_block_grad must equal 0.5 tr(dSigma_j . core) with Smat = 0.5 core.
-  set.seed(4)
-  nc <- 2L
-  L <- matrix(c(0.8, 0.25, 0, 0.6), 2, 2)
-  core <- crossprod(matrix(rnorm(4), 2, 2))
-  Smat <- 0.5 * core
-  got <- cpp_recov_block_grad(Smat, L, TRUE, 1.0)
-  dS <- .re_block_dSigma(L, nc, TRUE)
-  want <- vapply(dS, function(d) 0.5 * sum(diag(d %*% core)), numeric(1))
-  expect_equal(as.numeric(got), want, tolerance = 1e-10)
-})
-
-test_that("the joint Hessian round-trips as a symmetric matrix", {
-  d <- .exg_sim()
-  layout <- .exg_layout(d, FALSE)
-  L <- .exg_theta_to_L(log(0.7), 1L, FALSE)
-  f <- tulpa_laplace(y = d$y, n_trials = d$n_trials, X = d$X,
-                     re_list = .re_cov_build_re_list(list(L), layout),
-                     family = "poisson", return_hessian = TRUE,
-                     return_joint_hessian = TRUE)
-  H <- f$H_joint
-  expect_false(is.null(H))
-  expect_equal(nrow(H), length(f$mode))
-  expect_equal(ncol(H), length(f$mode))
-  expect_true(Matrix::isSymmetric(H))
-  # It is a posterior precision, so it must be positive definite.
-  expect_true(min(eigen(as.matrix(H), symmetric = TRUE,
-                        only.values = TRUE)$values) > 0)
-  # Absent unless asked for, so no other caller pays for it.
-  f0 <- tulpa_laplace(y = d$y, n_trials = d$n_trials, X = d$X,
-                      re_list = .re_cov_build_re_list(list(L), layout),
-                      family = "poisson", return_hessian = TRUE)
-  expect_null(f0$H_joint)
-})
-
-test_that("the gradient-driven outer fit lands where the derivative-free one does", {
-  d <- .exg_sim(seed = 7L, G = 20L, per = 8L)
-  re <- list(idx = d$grp, n_groups = d$G, n_coefs = 1L)
-  a <- tulpa_eb(d$y, NULL, d$X, re, family = "poisson")
-
-  orig <- cpp_family_has_curvature_derivative
-  on.exit(assignInNamespace("cpp_family_has_curvature_derivative", orig,
-                            ns = "tulpa"), add = TRUE)
-  assignInNamespace("cpp_family_has_curvature_derivative",
-                    function(family) FALSE, ns = "tulpa")
-  b <- tulpa_eb(d$y, NULL, d$X, re, family = "poisson")
-
-  expect_equal(unname(coef(a)), unname(coef(b)), tolerance = 1e-4)
-  expect_equal(unname(sqrt(diag(vcov(a)))), unname(sqrt(diag(vcov(b)))),
-               tolerance = 1e-4)
 })
 
 test_that("the closed, exact-stencil and finite-difference corrections agree", {

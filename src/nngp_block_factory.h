@@ -11,7 +11,8 @@
 // (sigma2, phi_gp) using batch_nngp_scatter from gpu_nngp_laplace.h.
 //
 // NNGP uses INDEXED_SINGLE semantics: each obs maps to a single spatial
-// unit via the per-arm spatial_idx vector. The data scatter adds the
+// unit via the per-arm spatial_idx vector; a caller reading the field through a
+// projector replaces that gather (block_projector.h). The data scatter adds the
 // usual β/spatial cross + spatial/spatial diagonal (handled by the
 // shared scatter_arm_obs_joint_multi_sparse). The prior scatter
 // (apply_nngp_full_prior_sparse) adds the off-diagonal coupling
@@ -192,11 +193,9 @@ inline LatentBlock make_nngp_block(
                                       nn_idx, nn_order, n_spatial, nn, start);
     };
 
-    // No dense `add_prior`: the NNGP prior is scattered through the sparse
-    // builder only, and blocks_require_sparse() reads that off the block rather
-    // than every caller remembering to pass force_sparse. One scatter is the
-    // whole of the prior: a dense twin would be a second implementation of the
-    // same Lambda with nothing exercising it.
+    // The prior scatters through the sparse builder only, so
+    // blocks_require_sparse() sends every fit carrying the block to the sparse
+    // Newton (the single-arm multi-block driver routes it there too).
 
     block.log_prior = [cell_cache, start, n_spatial, nn, nn_idx, nn_order](
         const Rcpp::NumericVector& x, int k_grid

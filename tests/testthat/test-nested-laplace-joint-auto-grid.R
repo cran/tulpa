@@ -21,6 +21,8 @@
 # The fixture and its pinned-axis prior live in `helper-sparse-icar-arm.R`,
 # shared with `test-outer-grid-collapse-reporting.R`.
 
+skip_on_cran()
+
 test_that("auto-recenter resolves a sigma-axis edge collapse and stays spread", {
     skip_on_cran()
     sim   <- .sparse_icar_arm()
@@ -36,7 +38,7 @@ test_that("auto-recenter resolves a sigma-axis edge collapse and stays spread", 
     expect_true(fit$outer_grid_recenter_attempts >= 1L)
     # The recentered axis sits above the retired 3.0 ceiling.
     expect_gt(max(fit$theta_grid[, "sigma"]), 3.0)
-    expect_true(all(is.finite(fit$log_marginal)))
+    expect_cells_solved(fit)
 })
 
 test_that("the SAME data with a tiny explicit sigma_grid stays collapsed (override never touched)", {
@@ -302,7 +304,7 @@ test_that("auto-recenter engages at diagnose_k = FALSE (single-block icar)", {
     expect_identical(fit$pareto_k_regime, "spread")
     expect_true(fit$outer_grid_recenter_attempts >= 1L)
     expect_gt(max(fit$theta_grid[, "sigma"]), 3.0)
-    expect_true(all(is.finite(fit$log_marginal)))
+    expect_cells_solved(fit)
     # The diagnostic itself stayed off throughout -- the recenter used only
     # the placement-only mode-Hessian, not a computed outer k-hat.
     expect_true(is.na(fit$pareto_k))

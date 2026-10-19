@@ -30,6 +30,8 @@ NULL
 #' @param term A language object (formula term)
 #' @return A list of language objects, each a `|` or `||` call
 #' @keywords internal
+#' @examples
+#' findbars(y ~ x + (1 | g) + (1 + x | h))
 #' @export
 findbars <- function(term) {
   if (is.name(term) || !is.language(term)) return(NULL)
@@ -112,6 +114,8 @@ findbars <- function(term) {
 #' @param term A language object (formula term)
 #' @return A language object with all bar terms removed, or NULL if nothing remains
 #' @keywords internal
+#' @examples
+#' nobars(y ~ x + (1 | g) + (1 + x | h))
 #' @export
 nobars <- function(term) {
   .strip_rhs(term, function(x) {
@@ -136,7 +140,7 @@ nobars <- function(term) {
 #'
 #' @param term A language object (formula term)
 #' @return A list of language objects, each a `latent(...)` call
-#' @keywords internal
+#' @noRd
 find_latent_terms <- function(term) {
   if (is.name(term) || !is.language(term)) return(NULL)
 
@@ -167,7 +171,7 @@ find_latent_terms <- function(term) {
 #' @param term A language object (formula term)
 #' @return A language object with all `latent(...)` calls removed, or NULL
 #'   if nothing remains.
-#' @keywords internal
+#' @noRd
 no_latent_terms <- function(term) {
   .strip_rhs(term, function(x) {
     is.call(x) && identical(x[[1]], as.name("latent")) && length(x) == 2L
@@ -343,7 +347,7 @@ tulpa_is_spatial_bar <- function(x) {
 #'   - `has_intercept`: logical
 #'   - `correlated`: logical (TRUE for `|`, FALSE for `||`)
 #'   - `original`: the original bar language object
-#' @keywords internal
+#' @noRd
 parse_bar_term <- function(bar_term) {
   stopifnot(is.call(bar_term))
 
@@ -382,7 +386,7 @@ parse_bar_term <- function(bar_term) {
 #'
 #' @param rhs A language object (RHS of `|` or `||`).
 #' @return List of group specs.
-#' @keywords internal
+#' @noRd
 resolve_group_rhs <- function(rhs) {
   # Nested grouping a/b
   if (is.call(rhs) && identical(rhs[[1]], as.name("/")) && is.name(rhs[[2]]) && is.name(rhs[[3]])) {
@@ -429,7 +433,7 @@ resolve_group_rhs <- function(rhs) {
 #'
 #' @param lhs A language object (LHS of a bar term)
 #' @return A list with `has_intercept` (logical) and `slope_terms` (list of language objects)
-#' @keywords internal
+#' @noRd
 decompose_bar_lhs <- function(lhs) {
   terms <- collect_additive_terms(lhs)
   has_intercept <- TRUE
@@ -457,7 +461,7 @@ decompose_bar_lhs <- function(lhs) {
 #'
 #' @param expr A language object
 #' @return A list of language objects (individual terms)
-#' @keywords internal
+#' @noRd
 collect_additive_terms <- function(expr) {
   if (is.call(expr) && identical(expr[[1]], as.name("+"))) {
     c(collect_additive_terms(expr[[2]]), collect_additive_terms(expr[[3]]))
@@ -473,8 +477,8 @@ collect_additive_terms <- function(expr) {
 }
 
 #' Negate an additive term (numeric literal -> its negative; anything else ->
-#' a unary-minus call), for flattening binary `-` in a bar LHS.
-#' @keywords internal
+#' a unary-minus call), for flattening binary `-` in a bar LHS
+#' @noRd
 .negate_term <- function(t) {
   if (is.numeric(t)) return(-t)
   call("-", t)
@@ -485,7 +489,7 @@ collect_additive_terms <- function(expr) {
 #' Used by the print method. Derives the textual form on demand from
 #' the stored language objects so we never store deparsed slope text.
 #'
-#' @keywords internal
+#' @noRd
 format_re_lhs <- function(re) {
   pieces <- character(0)
   if (re$has_intercept) pieces <- c(pieces, "1") else pieces <- c(pieces, "0")
@@ -683,14 +687,41 @@ tulpa_parse_formula <- function(formula) {
   )
 }
 
-#' Build the zero-inflation design matrix from `ziformula`.
+# A categorical predictor with a single level has no contrast, and
+# `model.matrix()` reports that without naming the variable. Name it here, with
+# the level it is stuck at, so a model fitted over many subsets says which
+# subset and which column collapsed.
+.check_contrast_levels <- function(mf, where) {
+  for (v in names(mf)) {
+    col <- mf[[v]]
+    n_levels <- if (is.factor(col)) {
+      nlevels(col)
+    } else if (is.character(col) || is.logical(col)) {
+      length(unique(col[!is.na(col)]))
+    } else {
+      next
+    }
+    if (n_levels < 2L) {
+      only <- if (is.factor(col)) levels(col) else unique(col[!is.na(col)])
+      stop(sprintf(paste0(
+        "`%s` in %s is categorical with %d level%s%s, so it has no contrast. ",
+        "Drop it from the formula, or supply data where it varies."),
+        v, where, n_levels, if (n_levels == 1L) "" else "s",
+        if (length(only)) sprintf(" (only \"%s\")", only[[1L]]) else ""),
+        call. = FALSE)
+    }
+  }
+  invisible(NULL)
+}
+
+#' Build the zero-inflation design matrix from `ziformula`
 #'
 #' A one-sided formula giving the fixed effects of the structural-zero logit.
 #' `~ 1` is the constant-probability model. Random effects in the ZI predictor
 #' are not supported: the compiled kernels share the random-effect block into
 #' the count process only, so a bar here would be silently dropped.
 #'
-#' @keywords internal
+#' @noRd
 .zi_design <- function(ziformula, data, n_obs) {
   if (is.null(ziformula)) return(NULL)
   if (!inherits(ziformula, "formula") || length(ziformula) != 2L) {
@@ -708,6 +739,7 @@ tulpa_parse_formula <- function(formula) {
   # ~ 0 / ~ -1 leaves no columns, which is "no zero inflation" written the long
   # way round; treat it as such rather than building a zero-column process.
   mf <- stats::model.frame(ziformula, data, na.action = stats::na.pass)
+  .check_contrast_levels(mf, "`ziformula`")
   X_zi <- stats::model.matrix(ziformula, mf)
   if (ncol(X_zi) == 0L) return(NULL)
   if (nrow(X_zi) != n_obs) {
@@ -735,6 +767,11 @@ tulpa_parse_formula <- function(formula) {
 #' - RE group index vectors
 #' - RE slope matrices (if applicable)
 #'
+#' Missing values pass through (`na.action = na.pass`), because a prior
+#' predictive may have no response; the fitting doors refuse them. Unused
+#' levels of a grouping factor are dropped, so `n_groups` counts the groups
+#' that have data.
+#'
 #' @param parsed A `tulpa_parsed_formula` object
 #' @param data A data frame
 #' @return A list with:
@@ -747,6 +784,12 @@ tulpa_parse_formula <- function(formula) {
 #'   - `re_terms`: list of RE data structures (group indices, slope matrices)
 #'
 #' @keywords internal
+#' @examples
+#' d <- data.frame(y = rnorm(6), x = 1:6, g = rep(1:2, 3))
+#' parsed <- tulpa_parse_formula(y ~ x + (1 | g))
+#' md <- tulpa_build_model_data(parsed, d)
+#' dim(md$X)
+#' md$n_re_terms
 #' @export
 tulpa_build_model_data <- function(parsed, data) {
   stopifnot(inherits(parsed, "tulpa_parsed_formula"))
@@ -766,40 +809,15 @@ tulpa_build_model_data <- function(parsed, data) {
     }
   }
 
-  # A two-column response is the lme4/glm binomial idiom, cbind(successes,
-  # failures). The kernels take successes plus a denominator, so the pair is
-  # resolved here into a length-n `y` and an `n_trials` vector, and everything
-  # downstream sees the single representation. Leaving the matrix in place
-  # would put 2n response values against the n rows of `X`, which recycles
-  # rather than errors once it reaches the linear algebra.
-  n_trials <- NULL
-  if (!is.null(y) && (is.matrix(y) || is.data.frame(y))) {
-    ym <- as.matrix(y)
-    if (ncol(ym) == 1L) {
-      y <- as.numeric(ym[, 1L])
-    } else if (ncol(ym) == 2L) {
-      successes <- as.numeric(ym[, 1L])
-      failures  <- as.numeric(ym[, 2L])
-      fin <- is.finite(successes) & is.finite(failures)
-      if (any(successes[fin] < 0) || any(failures[fin] < 0)) {
-        stop("A cbind(successes, failures) response must have non-negative ",
-             "entries in both columns.", call. = FALSE)
-      }
-      y <- successes
-      n_trials <- successes + failures
-    } else {
-      stop(sprintf(paste0(
-        "A matrix response must have 2 columns, cbind(successes, failures); ",
-        "got %d. Categorical responses are fit through family = ",
-        "'multinomial' / 'ordinal' with a factor response."), ncol(ym)),
-        call. = FALSE)
-    }
-  }
+  resp <- .decode_response(y)
+  y <- resp$y
+  n_trials <- resp$n_trials
 
   # Fixed-effects design matrix + offset extraction.
   # model.frame parses offset() terms and exposes them via model.offset();
   # model.matrix excludes them from the design.
   mf <- model.frame(parsed$fixed_formula, data, na.action = na.pass)
+  .check_contrast_levels(mf, "the fixed-effects formula")
   X <- model.matrix(parsed$fixed_formula, mf)
   off <- stats::model.offset(mf)
 
@@ -808,7 +826,11 @@ tulpa_build_model_data <- function(parsed, data) {
   for (i in seq_along(parsed$random_effects)) {
     re_spec <- parsed$random_effects[[i]]
 
-    group_factor <- resolve_group_factor(re_spec, data, formula_env)
+    # A level with no rows has no likelihood, so its effect would be the prior
+    # alone, reported by ranef() beside the estimated ones; lme4 drops such
+    # levels and so does this (gcol33/tulpa#881). An NA group stays NA here
+    # and is refused by the fitting doors (`.assert_complete_groups()`).
+    group_factor <- droplevels(resolve_group_factor(re_spec, data, formula_env))
     group_idx <- as.integer(group_factor)
     n_groups <- nlevels(group_factor)
 
@@ -824,6 +846,7 @@ tulpa_build_model_data <- function(parsed, data) {
       }
       slope_formula <- as.formula(call("~", slope_rhs), env = formula_env)
       slope_mf <- model.frame(slope_formula, data, na.action = na.pass)
+      .check_contrast_levels(slope_mf, "a random-slope term")
       slope_mat <- model.matrix(slope_formula, slope_mf)
       intercept_col <- which(colnames(slope_mat) == "(Intercept)")
       if (length(intercept_col) > 0) {
@@ -863,6 +886,85 @@ tulpa_build_model_data <- function(parsed, data) {
   )
 }
 
+# The fixed design with its aliased columns removed. A rank-deficient design
+# was fitted whole, the prior alone identifying the aliased coefficient -- a
+# `poly(x, 2)1` beside `x` read 0.043, a number the data say nothing about
+# (gcol33/tulpa#881). The rule is lm()'s and lme4's: a pivoted QR at lm()'s
+# tolerance keeps the earlier of two aliased columns and drops the later, with
+# a warning naming each dropped column. The design's column names carry the
+# fixed-effect names, so coef() and a `newdata` design rebuilt from the formula
+# (matched by name) see the reduced set.
+#' @keywords internal
+.drop_aliased_fixed <- function(X, tol = 1e-7) {
+  if (NCOL(X) < 2L) return(X)
+  q <- qr(X, tol = tol)
+  if (q$rank == ncol(X)) return(X)
+  drop <- sort(q$pivot[seq.int(q$rank + 1L, ncol(X))])
+  warning(sprintf(paste0(
+    "The fixed-effect design is rank deficient; dropping %d aliased ",
+    "column(s): %s. Their coefficients are not identified by the data."),
+    length(drop), paste(colnames(X)[drop], collapse = ", ")), call. = FALSE)
+  X[, -drop, drop = FALSE]
+}
+
+# A two-column response is the lme4/glm binomial idiom, cbind(successes,
+# failures). The kernels take successes plus a denominator, so the pair is
+# resolved here into a length-n `y` and an `n_trials` vector, and everything
+# downstream sees the single representation. Leaving the matrix in place
+# would put 2n response values against the n rows of `X`, which recycles
+# rather than errors once it reaches the linear algebra -- and reading only
+# its first column, as tulpa_ep() did, fitted the successes against a
+# denominator of 1 (gcol33/tulpa#882). Returns list(y, n_trials), `n_trials`
+# NULL for a single-column response. One reading for tulpa_build_model_data()
+# and the standalone formula fitters.
+#' @keywords internal
+.decode_response <- function(y) {
+  if (is.null(y) || !(is.matrix(y) || is.data.frame(y))) {
+    return(list(y = y, n_trials = NULL))
+  }
+  ym <- as.matrix(y)
+  if (ncol(ym) == 1L) {
+    return(list(y = as.numeric(ym[, 1L]), n_trials = NULL))
+  }
+  if (ncol(ym) != 2L) {
+    stop(sprintf(paste0(
+      "A matrix response must have 2 columns, cbind(successes, failures); ",
+      "got %d. Categorical responses are fit through family = ",
+      "'multinomial' / 'ordinal' with a factor response."), ncol(ym)),
+      call. = FALSE)
+  }
+  successes <- as.numeric(ym[, 1L])
+  failures  <- as.numeric(ym[, 2L])
+  fin <- is.finite(successes) & is.finite(failures)
+  if (any(successes[fin] < 0) || any(failures[fin] < 0)) {
+    stop("A cbind(successes, failures) response must have non-negative ",
+         "entries in both columns.", call. = FALSE)
+  }
+  list(y = successes, n_trials = successes + failures)
+}
+
+# The binomial denominators a fit runs with, given the ones a cbind(successes,
+# failures) response carried (`pair_trials`, from `.decode_response()`) and the
+# `n_trials` argument. Only the binomial families have a denominator, and a
+# user-supplied `n_trials` alongside the pair would be two answers to the same
+# question, so both are refused rather than silently resolved in favour of one.
+#' @keywords internal
+.resolve_pair_trials <- function(family, pair_trials, n_trials) {
+  if (is.null(pair_trials)) return(n_trials)
+  if (!.family_reads_trials(family)) {
+    stop(sprintf(paste0(
+      "A cbind(successes, failures) response is the binomial idiom; ",
+      "family = '%s' takes a single-column response."), family),
+      call. = FALSE)
+  }
+  if (!is.null(n_trials)) {
+    stop("`n_trials` was supplied alongside a cbind(successes, failures) ",
+         "response, which already carries the denominators. Drop one.",
+         call. = FALSE)
+  }
+  pair_trials
+}
+
 #' Resolve a parsed RE spec to a grouping factor
 #'
 #' Three paths, mirroring `resolve_group_rhs`:
@@ -870,7 +972,7 @@ tulpa_build_model_data <- function(parsed, data) {
 #'   - multiple column names (nested `a/b`): `interaction(data[names])`.
 #'   - language expression: evaluate against `data` (e.g., `factor(g)`).
 #'
-#' @keywords internal
+#' @noRd
 resolve_group_factor <- function(re_spec, data, env) {
   if (!is.null(re_spec$group_expr)) {
     val <- eval(re_spec$group_expr, envir = data, enclos = env)
@@ -891,6 +993,9 @@ resolve_group_factor <- function(re_spec, data, env) {
   as.factor(data[[gvars]])
 }
 
+#' @rdname tulpa_parse_formula
+#' @param x A `tulpa_parsed_formula` object.
+#' @param ... Ignored.
 #' @export
 print.tulpa_parsed_formula <- function(x, ...) {
   cat("tulpa parsed formula\n")

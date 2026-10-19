@@ -15,6 +15,8 @@
 # --------------------------------------------------------------------------- #
 
 # Tiny 1D-chain adjacency in CSR (0-based) — keeps the BYM2 prior well-defined.
+skip_on_cran()
+
 .chain_adj <- function(n_s) {
     nbr <- lapply(seq_len(n_s),
                   function(s) setdiff(c(s - 1L, s + 1L), c(0L, n_s + 1L)))
@@ -104,7 +106,7 @@ test_that("joint BYM2 with alpha = 0 leaves beta_occ unchanged from single-arm",
         prior = prior
     )
     expect_s3_class(fit_joint, "tulpa_nested_laplace_joint")
-    expect_true(all(is.finite(fit_joint$log_marginal)))
+    expect_cells_solved(fit_joint)
 
     # Single-arm fit on occ only (no copy, no second arm).
     fit_single_occ <- tulpa_nested_laplace_joint(
@@ -112,7 +114,7 @@ test_that("joint BYM2 with alpha = 0 leaves beta_occ unchanged from single-arm",
         prior = prior,
         copy = NULL
     )
-    expect_true(all(is.finite(fit_single_occ$log_marginal)))
+    expect_cells_solved(fit_single_occ)
 
     # Compare beta_occ posterior weighted mean.
     layout_j <- fit_joint$arm_layout
@@ -171,7 +173,7 @@ test_that("joint BYM2 recovers per-arm betas and locates the alpha mode", {
         prior = prior
     )
     expect_s3_class(fit, "tulpa_nested_laplace_joint")
-    expect_true(all(is.finite(fit$log_marginal)))
+    expect_cells_solved(fit)
 
     layout <- fit$arm_layout
 

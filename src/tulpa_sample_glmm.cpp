@@ -297,11 +297,12 @@ Rcpp::List cpp_tulpa_sample_glmm(
     Rcpp::Nullable<Rcpp::NumericMatrix> init_nullable = R_NilValue,
     Rcpp::Nullable<Rcpp::NumericVector> inv_metric_diag_nullable = R_NilValue,
     std::string mass_matrix = "diag",
-    bool ess_adapt_during_warmup = false,
+    bool ess_adapt_during_warmup = true,
     int ess_adapt_interval = 50,
     int ess_joint_sigma_re = -1,
     double ess_joint_proposal_sd = 0.1,
-    std::string checkpoint_path = ""
+    std::string checkpoint_path = "",
+    double smc_bridge_end = 1.0
 ) {
     // Argument groups (kept out of the signature so Rcpp::compileAttributes does
     // not fold the comments into the generated wrapper):
@@ -309,7 +310,9 @@ Rcpp::List cpp_tulpa_sample_glmm(
     //   SGHMC/SGLD/MCLMC: epsilon (0 => kernel default/adaptation), L,
     //       batch_size (0 => full-data gradient), alpha (SGHMC friction),
     //       mclmc_adjusted
-    //   SMC:   n_particles, n_mcmc_steps, ess_threshold
+    //   SMC:   n_particles, n_mcmc_steps, ess_threshold, smc_bridge_end (the
+    //       likelihood power the path passes through and records the
+    //       population at; 1 = none)
     //   VI:    vi_variant (0=meanfield,1=lowrank,2=fullrank,3=auto),
     //       vi_mc_samples, vi_max_iter, vi_n_draws, vi_max_grad_norm,
     //       vi_tol_grad / vi_tol_rel_elbo / vi_patience (the stopping rule --
@@ -413,7 +416,7 @@ Rcpp::List cpp_tulpa_sample_glmm(
         std::vector<tulpa_hmc::HMCResultCpp> chains = tulpa_hmc::run_hmc_parallel_chains_cpp(
             q_init, inv_metric, in.data, n_iter, n_warmup, /*L=*/0, n_chains,
             (unsigned int)seed, verbose, max_treedepth,
-            metric, adapt_delta, /*riemannian=*/0, checkpoint_path);
+            metric, adapt_delta, /*walnuts=*/nullptr, checkpoint_path);
         tulpa_hmc::StackedChains st = tulpa_hmc::stack_hmc_chains(chains, n_chains, D);
         if (st.n_total > 0) Rcpp::colnames(st.draws) = cn;
         out = Rcpp::List::create(
@@ -431,7 +434,6 @@ Rcpp::List cpp_tulpa_sample_glmm(
             // Post-warmup saturations, summed over chains: written and
             // checkpointed but read by nothing until gcol33/tulpa#703.
             Rcpp::Named("n_max_treedepth") = st.n_max_treedepth,
-            Rcpp::Named("n_softabs_rescued") = st.n_softabs_rescued,
             Rcpp::Named("epsilon") = st.epsilon,
             Rcpp::Named("sampler") = "nuts");
         return out;
@@ -552,14 +554,24 @@ Rcpp::List cpp_tulpa_sample_glmm(
         cfg.n_particles = n_particles; cfg.n_mcmc_steps = n_mcmc_steps;
         cfg.ess_threshold = ess_threshold; cfg.prior_sigma = sigma_beta;
         cfg.seed = (unsigned int)seed; cfg.verbose = verbose;
+        cfg.bridge_end = smc_bridge_end;
         tulpa::SMCDriverResult res = tulpa::run_smc_sampler(
             init, in.data, in.layout, cfg, nullptr, nullptr);
         if (!res.success) Rcpp::stop("smc sampler failed: %s", res.error_msg);
-        const int M = (int)res.particles.size();
-        Rcpp::NumericMatrix draws(M, D);
-        for (int s = 0; s < M; s++)
-            for (int j = 0; j < D; j++) draws(s, j) = res.particles[s][j];
-        if (M > 0) Rcpp::colnames(draws) = cn;
+        auto to_draws = [D, &cn](const std::vector<std::vector<double>>& pop) {
+            const int M = (int)pop.size();
+            Rcpp::NumericMatrix m(M, D);
+            for (int s = 0; s < M; s++)
+                for (int j = 0; j < D; j++) m(s, j) = pop[s][j];
+            if (M > 0) Rcpp::colnames(m) = cn;
+            return m;
+        };
+        Rcpp::NumericMatrix draws = to_draws(res.particles);
+        const int M = draws.nrow();
+        Rcpp::RObject tempered_draws = R_NilValue;
+        if (!res.tempered_particles.empty()) {
+            tempered_draws = to_draws(res.tempered_particles);
+        }
         out = Rcpp::List::create(
             Rcpp::Named("draws") = draws, Rcpp::Named("means") = col_means(draws),
             Rcpp::Named("n_samples") = M, Rcpp::Named("n_params") = D,
@@ -569,6 +581,9 @@ Rcpp::List cpp_tulpa_sample_glmm(
             Rcpp::Named("log_weights") = Rcpp::wrap(res.log_weights),
             Rcpp::Named("log_evidence") =
                 res.log_evidence_valid ? res.log_evidence : NA_REAL,
+            Rcpp::Named("tempered_draws") = tempered_draws,
+            Rcpp::Named("tempered_beta") =
+                res.tempered_particles.empty() ? NA_REAL : res.tempered_beta,
             Rcpp::Named("sampler") = "smc");
         return out;
     }

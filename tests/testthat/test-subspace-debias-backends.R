@@ -26,6 +26,8 @@
 
 # Rare-event binomial logit, unreached iid block: the regime the inner Laplace
 # is skewed in, on the multi-block grid driver (run_multi_block_nested_laplace).
+skip_on_cran()
+
 .sd306_rare_data <- function(seed = 3L, n = 120L, b = c(-3.2, 0.9)) {
   set.seed(seed)
   x <- rnorm(n)
@@ -76,7 +78,7 @@
 # Total absolute error of a fit's reported interval endpoints against a
 # reference, over both coefficients.
 .sd306_endpoint_err <- function(fit, ref, level = 0.95) {
-  s <- summary(fit, level = level)
+  s <- coef(summary(fit, level = level))
   sum(abs(c(s[1L, 3L] - ref$a[1L], s[1L, 4L] - ref$a[2L],
             s[2L, 3L] - ref$b[1L], s[2L, 4L] - ref$b[2L])))
 }
@@ -123,7 +125,7 @@ test_that("an empty S leaves the grid backend bit-for-bit", {
   expect_identical(plain$modes, empty$modes)
   expect_identical(plain$grid_modes, empty$grid_modes)
   expect_identical(plain$grid_hessians, empty$grid_hessians)
-  expect_identical(summary(plain), summary(empty))
+  expect_identical(coef(summary(plain)), coef(summary(empty)))
   expect_identical(vcov(plain), vcov(empty))
 })
 
@@ -153,7 +155,7 @@ test_that("an empty S leaves the single-block grid kernel bit-for-bit", {
   expect_null(empty$draws)
   expect_identical(plain$log_marginal, empty$log_marginal)
   expect_identical(plain$modes, empty$modes)
-  expect_identical(summary(plain), summary(empty))
+  expect_identical(coef(summary(plain)), coef(summary(empty)))
 
   # And with the selector on, the correction reaches every integrated cell.
   set.seed(9)
@@ -188,7 +190,7 @@ test_that("an empty S leaves the joint backends bit-for-bit", {
   expect_identical(plain$modes, empty$modes)
   expect_identical(plain$grid_modes, empty$grid_modes)
   expect_identical(plain$grid_hessians, empty$grid_hessians)
-  expect_identical(summary(plain), summary(empty))
+  expect_identical(coef(summary(plain)), coef(summary(empty)))
 })
 
 test_that("an empty S leaves a single-block joint fit bit-for-bit", {
@@ -224,7 +226,7 @@ test_that("an empty S leaves a single-block joint fit bit-for-bit", {
   expect_null(empty$draws)
   expect_identical(plain$log_marginal, empty$log_marginal)
   expect_identical(plain$modes, empty$modes)
-  expect_identical(summary(plain), summary(empty))
+  expect_identical(coef(summary(plain)), coef(summary(empty)))
 })
 
 # --------------------------------------------------------------------------- #

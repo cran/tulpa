@@ -2,7 +2,7 @@
 #
 #   Tier 1  structural   (no gate)           shape / class / dispatch / formula /
 #                                             closed-form / finite-difference-gradient
-#                                             checks; sub-second; runs everywhere
+#                                             checks; under 0.1 s; runs everywhere
 #                                             including CRAN.
 #   Tier 2  recovery      skip_on_cran()      one (or a few) fits to convergence,
 #                                             parameter recovery vs a single simulated
@@ -25,7 +25,7 @@
 #   devtools::test()                                   # tiers 1 + 2  (default dev loop)
 #   Sys.setenv(TULPA_FAST = "1"); test()               # tier 1 only  (fast smoke)
 #   Sys.setenv(TULPA_SLOW_TESTS = "true"); test()      # tiers 1 + 2 + 3  (full validation)
-#   R CMD check / CRAN                                 # tier 1 only
+#   R CMD check / CRAN                                 # tier 1 of the smoke files
 #
 # RELEASE GATE. Tier 3 holds the recovery / coverage / sampler-calibration
 # evidence and is opt-in, so a routine test() or R CMD check runs plumbing only
@@ -47,7 +47,44 @@
 # behind skip_on_cran() / skip_if_not_slow() is collapsed by TULPA_FAST=1 with no
 # extra wiring.
 #
-# A tier-1 block is sub-second, and a structural identity swept over a large
+# The 0.1 s bound is what keeps the CRAN check inside its time budget: tier 1 is
+# some 1700 blocks over 480 files, and the check farm runs it 1.3x slower than a
+# desktop on top of a fixed per-file cost. A block that measures above it under
+# the CRAN profile takes skip_on_cran() as its first line.
+#
+# CRAN runs a narrower slice of tier 1 than that bound admits. win-builder R-devel
+# spends some 640 s on the whole check against CRAN's 600 s, and the tests are the
+# share of it the package decides; so a tier-1 block that measures over 15 ms
+# under the CRAN profile, on the lower of two runs, also skips on CRAN. It stays
+# tier 1 everywhere else: its gate is skip_on_cran_budget(), which reads NOT_CRAN
+# alone, so the dev loop and TULPA_FAST=1 both run it. Such blocks sit between
+# the CRAN-run part of a file and its skip_on_cran() section, behind a top-level
+# skip_on_cran_budget(), and each carries that gate as its first line as well.
+#
+# CRAN also runs only the smoke files, one per subsystem (CRAN_SMOKE_FILES
+# below): tests/testthat.R hands cran_smoke_filter() to test_check(), so no other
+# file is sourced there. Sourcing a file costs more than its tier-1 blocks do --
+# the 245 files CRAN ran held 4 s of block time and took 43 s on win-builder --
+# so the file count is what the budget reads. A smoke file is one whose tier-1
+# part covers its subsystem's constructors and closed forms cheaply; the CI check
+# matrix (TULPA_CRAN_BUDGET=off) and every other profile run all files.
+#
+# A skipped block is not free: test_that() sets up its test context (a temporary
+# directory, the locale, the reproducible-output options) before the gate in the
+# body runs, about 10 ms a block, and the suite gates over a thousand of them. A
+# file none of whose blocks is tier 1 therefore also carries skip_on_cran() at
+# top level, before its first expression, which skips the file in one step and
+# reports it as one skip. The block gates stay, so moving a block to another
+# file keeps it gated. A tier-1 block added to such a file goes in another file,
+# or the file gate comes off.
+#
+# A file that holds tier-1 blocks as well puts them, and every top-level
+# statement, first; a top-level skip_on_cran() follows, and the gated blocks
+# come after it. CRAN then runs the tier-1 part in the order it is written and
+# skips the rest in one step. A new gated block goes below that line, a new
+# tier-1 block or fixture above it.
+#
+# A tier-1 block is under 0.1 s, and a structural identity swept over a large
 # parameter grid is not. That is a fixture size rather than a tier: size the grid
 # through cran_fixture() (below) instead of gating the block, so CRAN keeps
 # reading the identity on a small grid and the dev loop keeps sweeping the whole
@@ -84,6 +121,42 @@ skip_on_cran <- function() {
   testthat::skip_on_cran()
 }
 
+# CRAN time-budget gate: a tier-1 block over the CRAN budget (see the header).
+# It skips on CRAN only, so TULPA_FAST=1 still runs the block, and
+# TULPA_CRAN_BUDGET=off opens it under the CRAN profile too, which is how the CI
+# check matrix runs the whole of tier 1 on every platform.
+skip_on_cran_budget <- function() {
+  if (!cran_budget_applies()) {
+    return(invisible())
+  }
+  testthat::skip_on_cran()
+}
+
+# TRUE under the CRAN profile, unless TULPA_CRAN_BUDGET=off opens the budget.
+cran_budget_applies <- function() {
+  !identical(Sys.getenv("NOT_CRAN"), "true") &&
+    !identical(tolower(Sys.getenv("TULPA_CRAN_BUDGET")), "off")
+}
+
+# The CRAN smoke set: one file per subsystem, named without "test-" and ".R".
+CRAN_SMOKE_FILES <- c(
+  "adjacency", "formula", "family-count-extensions", "prior-predict",
+  "spatial-spde-api", "temporal", "nested-laplace-joint-multi", "beta-nuts",
+  "methods-interop", "diagnostics", "posterior-sbc", "psis", "tgmrf",
+  "control-check", "simulate", "autodiff-primitives", "re-cov-prior",
+  "nested-posterior-draws", "criteria-tulpa-fit", "em-laplace",
+  "pg-index-validation", "pg-nngp-conditional", "st-hsgp-prior", "mcar-prior",
+  "ccd-modefind-budget", "auto-grid-provenance"
+)
+
+# test_check()'s file filter: the smoke set under the CRAN budget, else every file.
+cran_smoke_filter <- function() {
+  if (!cran_budget_applies()) {
+    return(NULL)
+  }
+  paste0("^(", paste(CRAN_SMOKE_FILES, collapse = "|"), ")$")
+}
+
 # Tier-1 fixture size. A structural identity read over a grid of parameter
 # combinations -- a closed form against quadrature, a score against finite
 # differences, a normalizer summed over its support -- is tier 1 by nature, and
@@ -105,7 +178,8 @@ cran_fixture <- function() {
 # builtin when a test file calls it bare: globalenv is searched ahead of the
 # attached testthat package, whereas a helper-scoped binding is not. Mirrors the
 # namespace-aliasing in helper-internal.R.
-for (.nm in c("skip_if_fast", "skip_if_not_slow", "skip_on_cran", "cran_fixture")) {
+for (.nm in c("skip_if_fast", "skip_if_not_slow", "skip_on_cran", "skip_on_cran_budget",
+              "cran_budget_applies", "cran_fixture")) {
   assign(.nm, get(.nm), envir = globalenv())
 }
 rm(.nm)

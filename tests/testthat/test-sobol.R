@@ -91,13 +91,25 @@ sob_max_dim <- tulpa:::cpp_sobol_max_dim()
   out
 }
 
+test_that("the sequence is a prefix sequence and is deterministic", {
+  long <- sob(1000L, 7L)
+  expect_equal(sob(37L, 7L), long[1:37, , drop = FALSE], tolerance = 0)
+  expect_equal(sob(1000L, 7L), long, tolerance = 0)
+  # A coordinate does not depend on how many dimensions were asked for.
+  expect_equal(sob(200L, 3L), sob(200L, 40L)[1:200, 1:3], tolerance = 0)
+})
+
+skip_on_cran_budget()
+
 # ---------------------------------------------------------------------------
 
 test_that("the generator matches an independent R construction of the recurrence", {
+  skip_on_cran_budget()
   expect_equal(sob(128L, 6L), .ref_points(128L, 6L), tolerance = 0)
 })
 
 test_that("points lie strictly inside the unit cube", {
+  skip_on_cran_budget()
   P <- sob(4096L, 64L)
   expect_true(all(is.finite(P)))
   expect_true(all(P > 0))
@@ -110,6 +122,7 @@ test_that("points lie strictly inside the unit cube", {
 })
 
 test_that("dimension 1 is the bit-reversed Gray code, and a van der Corput permutation", {
+  skip_on_cran_budget()
   # X_i = reverse_bits_32(i XOR (i >> 1)) / 2^32, computed here from the bit
   # pattern of i rather than from the generator's own recurrence.
   revbits <- function(v) {
@@ -128,35 +141,8 @@ test_that("dimension 1 is the bit-reversed Gray code, and a van der Corput permu
                tolerance = 0)
 })
 
-test_that("each one-dimensional projection is an elementary-interval net", {
-  # X_0 .. X_(2^m - 1) put exactly one point in every interval
-  # [j / 2^m, (j + 1) / 2^m). The origin is not emitted, so the returned
-  # 2^m - 1 points fill intervals 1 .. 2^m - 1 once each and leave interval 0
-  # empty. Any error in the direction numbers or in the Gray-code index breaks
-  # this immediately.
-  # CRAN reads the lowest and highest m -- the first and the last direction
-  # number bits a net of that size depends on; the dev loop reads every m.
-  ms <- if (cran_fixture()) c(4L, 12L) else c(4L, 6L, 8L, 10L, 12L)
-  for (m in ms) {
-    n <- 2L^m - 1L
-    P <- sob(n, 32L)
-    cell <- floor(P * 2^m)
-    for (j in seq_len(ncol(P))) {
-      expect_identical(sort(cell[, j]), as.numeric(seq_len(2L^m - 1L)),
-                       info = sprintf("m = %d, dimension %d", m, j))
-    }
-  }
-})
-
-test_that("the sequence is a prefix sequence and is deterministic", {
-  long <- sob(1000L, 7L)
-  expect_equal(sob(37L, 7L), long[1:37, , drop = FALSE], tolerance = 0)
-  expect_equal(sob(1000L, 7L), long, tolerance = 0)
-  # A coordinate does not depend on how many dimensions were asked for.
-  expect_equal(sob(200L, 3L), sob(200L, 40L)[1:200, 1:3], tolerance = 0)
-})
-
 test_that("integration error decays faster than Monte Carlo", {
+  skip_on_cran_budget()
   # The arbiter for low discrepancy: a smooth integrand over [0, 1]^d whose
   # value is available in closed form,
   #   int exp(-sum u_i^2) du = (sqrt(pi) / 2 * erf(1))^d,
@@ -204,6 +190,7 @@ test_that("integration error decays faster than Monte Carlo", {
 })
 
 test_that("dimensions outside the table are refused", {
+  skip_on_cran_budget()
   expect_identical(sob_max_dim, 1024L)
   expect_error(sob(16L, sob_max_dim + 1L), "exceeds the tabulated maximum")
   expect_error(sob(16L, 0L), "d must be positive")
@@ -212,4 +199,27 @@ test_that("dimensions outside the table are refused", {
   expect_error(sob(-1L, 4L), "n must be positive")
   # The last tabulated dimension is reachable.
   expect_equal(dim(sob(8L, sob_max_dim)), c(8L, sob_max_dim))
+})
+
+skip_on_cran()
+
+test_that("each one-dimensional projection is an elementary-interval net", {
+  skip_on_cran()
+  # X_0 .. X_(2^m - 1) put exactly one point in every interval
+  # [j / 2^m, (j + 1) / 2^m). The origin is not emitted, so the returned
+  # 2^m - 1 points fill intervals 1 .. 2^m - 1 once each and leave interval 0
+  # empty. Any error in the direction numbers or in the Gray-code index breaks
+  # this immediately.
+  # CRAN reads the lowest and highest m -- the first and the last direction
+  # number bits a net of that size depends on; the dev loop reads every m.
+  ms <- if (cran_fixture()) c(4L, 12L) else c(4L, 6L, 8L, 10L, 12L)
+  for (m in ms) {
+    n <- 2L^m - 1L
+    P <- sob(n, 32L)
+    cell <- floor(P * 2^m)
+    for (j in seq_len(ncol(P))) {
+      expect_identical(sort(cell[, j]), as.numeric(seq_len(2L^m - 1L)),
+                       info = sprintf("m = %d, dimension %d", m, j))
+    }
+  }
 })

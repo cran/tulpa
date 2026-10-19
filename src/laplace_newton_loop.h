@@ -12,6 +12,7 @@
 
 #include "laplace_cholesky.h"
 #include "laplace_family_link.h"
+#include "laplace_profile.h"   // TULPA_PROFILE_PHASE (newton_step)
 #include <Rcpp.h>
 #include <algorithm>
 #include <cmath>
@@ -244,6 +245,23 @@ inline double newton_decrement(const std::vector<double>& grad,
     double d = 0.0;
     for (int j = 0; j < n_x; j++) d += grad[j] * delta[j];
     return d;
+}
+
+// The gain the Newton step `step` actually delivers from x: the objective at
+// x + step less `obj_at_x`, the objective at x itself, with `x_try` as
+// scratch. Half the decrement is that gain to second order, which holds near
+// the mode and has no bound away from it: two inner steps from a far warm
+// start on the full 25 km occu_cover fit left a decrement predicting 8491 nats
+// where the converged solve gained 86. NaN where the trial point's objective
+// is not finite.
+template <typename EvalObj>
+inline double newton_step_gain(const Rcpp::NumericVector& x, const double* step,
+                               int n_x, double obj_at_x, EvalObj eval_objective,
+                               Rcpp::NumericVector& x_try) {
+    for (int j = 0; j < n_x; j++) x_try[j] = x[j] + step[j];
+    const double obj = eval_objective(x_try);
+    const double gain = obj - obj_at_x;
+    return std::isfinite(gain) ? gain : std::numeric_limits<double>::quiet_NaN();
 }
 
 // Near-mode gate and patience for the stalled-step convergence path below.
@@ -481,6 +499,10 @@ inline bool newton_step_tail(
 // whichever container holds it and writes `scratch.delta`. Everything else is
 // newton_damped_fallback and newton_step_tail above, which the sparse joint
 // driver calls directly around its own factor-reuse block.
+//
+// The factorize and line-search profiler scopes live here, so both drivers
+// report them under one name; the eta / scatter split is the driver's, since
+// only it can see inside `refresh_grad_hess`.
 template <typename Scratch, typename RefreshFn, typename SolveFn,
           typename EvalObj>
 inline bool newton_step(
@@ -497,12 +519,16 @@ inline bool newton_step(
 ) {
     refresh_grad_hess();
 
-    if (!cholesky_solve()) {
+    bool solved;
+    { TULPA_PROFILE_PHASE(PHASE_FACTORIZE);
+      solved = cholesky_solve(); }
+    if (!solved) {
         newton_damped_fallback(x, scratch.delta, n_x, obj_valid);
         n_iter_out = iter + 1;
         return false;
     }
 
+    TULPA_PROFILE_PHASE(PHASE_LINE_SEARCH);
     return newton_step_tail(x, scratch, n_x, iter, tol, eval_objective,
                             obj_current, obj_valid, conv_state, n_iter_out);
 }

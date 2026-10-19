@@ -147,37 +147,42 @@ cholmod_sparse* SparseCholeskySolver::refill_from_dense(
     // re-analyze each time. Discarding instead would factor a matrix that is
     // missing curvature, and the Newton direction, log|H| and the standard
     // errors would all inherit it.
+    //
+    // The walk is in ROW order. H is row-major, so a column-order walk of its
+    // lower triangle reads it at stride n; row i instead reads H[i][0..i]
+    // contiguously, and the CSC slot for (i, j) is the next unread one in
+    // column j, because each column's row indices ascend. One cursor per column
+    // tracks it. The check and the fill are one pass: an entry off the pattern
+    // stops the walk, and the grown pattern is then rebuilt from H itself, so
+    // the slots already written are simply overwritten.
     const int* Ap = static_cast<const int*>(A_owned_->p);
     const int* Ai = static_cast<const int*>(A_owned_->i);
     double* Ax    = static_cast<double*>(A_owned_->x);
+    refill_cursor_.assign(Ap, Ap + n);
+    int* cur = refill_cursor_.data();
     bool grow = false;
-    for (int j = 0; j < n && !grow; j++) {
-        int idx = Ap[j];
-        const int end = Ap[j + 1];
-        for (int i = j; i < n; i++) {
-            const double v = H[i][j];
-            if (idx < end && Ai[idx] == i) {
-                idx++;
-            } else if (i == j || std::abs(v) > drop_tol) {
+    for (int i = 0; i < n && !grow; i++) {
+        const double* row = H[i];
+        for (int j = 0; j <= i; j++) {
+            const int idx = cur[j];
+            if (idx < Ap[j + 1] && Ai[idx] == i) {
+                Ax[idx] = row[j];
+                cur[j] = idx + 1;
+            } else if (i == j || std::abs(row[j]) > drop_tol) {
                 grow = true;
                 break;
             }
         }
     }
+    if (!grow) return A_owned_;
 
-    if (grow) {
-        // Union with the cached pattern, so an entry that mattered at an
-        // earlier cell keeps its slot even where it vanishes at this one.
-        if (build_owned_pattern(H, n, drop_tol, A_owned_)) return A_owned_;
-        // Out of memory for the grown pattern. Keep the cached one and record
-        // what it cannot hold, so the enclosing HessianPatternGuard reports a
-        // factorization that is missing curvature instead of it passing
-        // silently.
-        Ap = static_cast<const int*>(A_owned_->p);
-        Ai = static_cast<const int*>(A_owned_->i);
-        Ax = static_cast<double*>(A_owned_->x);
-    }
+    // Union with the cached pattern, so an entry that mattered at an earlier
+    // cell keeps its slot even where it vanishes at this one.
+    if (build_owned_pattern(H, n, drop_tol, A_owned_)) return A_owned_;
 
+    // Out of memory for the grown pattern. Keep the cached one and record what
+    // it cannot hold, so the enclosing HessianPatternGuard reports a
+    // factorization that is missing curvature instead of it passing silently.
     for (int j = 0; j < n; j++) {
         int idx = Ap[j];
         const int end = Ap[j + 1];
@@ -195,6 +200,18 @@ cholmod_sparse* SparseCholeskySolver::refill_from_dense(
 }
 
 void SparseCholeskySolver::analyze(cholmod_sparse* A) {
+    analyze(A, 0ULL);
+}
+
+bool SparseCholeskySolver::ensure_analyzed(cholmod_sparse* A,
+                                           unsigned long long pattern_tag) {
+    if (!analyzed_ || pattern_tag_ != pattern_tag) analyze(A, pattern_tag);
+    return analyzed_;
+}
+
+void SparseCholeskySolver::analyze(cholmod_sparse* A,
+                                   unsigned long long pattern_tag) {
+    pattern_tag_ = pattern_tag;
     if (factor_) {
         M_cholmod_free_factor(&factor_, &common_);
         factor_ = nullptr;
@@ -209,6 +226,29 @@ bool SparseCholeskySolver::factorize(cholmod_sparse* A) {
     int ok = M_cholmod_factorize(A, factor_, &common_);
     factored_ = (ok != 0) && (common_.status == CHOLMOD_OK);
     return factored_;
+}
+
+void SparseCholeskySolver::use_simplicial_ldl() {
+    common_.supernodal = CHOLMOD_SIMPLICIAL;
+    common_.final_ll = 0;
+}
+
+bool SparseCholeskySolver::ldl_inertia(int& n_neg, double& log_abs_det) const {
+    n_neg = 0;
+    log_abs_det = 0.0;
+    if (!factored_ || !factor_ || factor_->is_ll || factor_->is_super) return false;
+    // Simplicial LDL': D_jj is the first entry of column j (the unit diagonal of
+    // L is not stored).
+    const int* Lp = static_cast<const int*>(factor_->p);
+    const double* Lx = static_cast<const double*>(factor_->x);
+    const int n = static_cast<int>(factor_->n);
+    for (int j = 0; j < n; ++j) {
+        const double d = Lx[Lp[j]];
+        if (!std::isfinite(d) || d == 0.0) return false;
+        if (d < 0.0) ++n_neg;
+        log_abs_det += std::log(std::fabs(d));
+    }
+    return true;
 }
 
 std::size_t SparseCholeskySolver::analyzed_factor_bytes() const {
@@ -408,6 +448,17 @@ bool takahashi_partial_inverse_csc(
 
     if (!takahashi_valid_factor(n, Lp, Li)) return false;
 
+    // Column j needs Z on struct(j) x struct(j), struct(j) = {i > j : L[i,j]
+    // != 0}, and every such entry sits in a later column: Z[i,k] with
+    // j < k <= i is stored in column k at row i. Each column k of struct(j) is
+    // walked once and its entries at rows in struct(j) are scattered into the
+    // row sums. `col_val` holds L[i,j] by row over struct(j) (zero elsewhere,
+    // `in_struct` marking membership) and `row_sum[i]` accumulates
+    // sum_{k in struct(j)} L[k,j] Z[i,k]. An entry outside pattern(L)
+    // contributes zero, as the recursion requires.
+    std::vector<char> in_struct(n, 0);
+    std::vector<double> col_val(n, 0.0), row_sum(n, 0.0);
+
     for (int j = n - 1; j >= 0; j--) {
         int col_start = Lp[j];
         int col_end = Lp[j + 1];
@@ -424,32 +475,36 @@ bool takahashi_partial_inverse_csc(
         }
         double Ljj_inv = 1.0 / Ljj;
 
-        // Off-diagonal entries Z[i,j] for i > j (bottom-up within column j).
-        for (int idx_i = col_end - 1; idx_i > col_start; idx_i--) {
-            int i = Li[idx_i];
+        for (int idx_i = col_start + 1; idx_i < col_end; idx_i++) {
+            const int i = Li[idx_i];
+            in_struct[i] = 1;
+            col_val[i] = Lx[idx_i];
+            row_sum[i] = 0.0;
+        }
 
-            // Z[i,j] = -1/L[j,j] * Σ_{k>j, L[k,j]≠0} L[k,j] * Z[i,k].
-            // Z is stored in lower triangle: Z[hi, lo] in column lo at row hi.
-            double sum = 0.0;
-            for (int idx_k = col_start + 1; idx_k < col_end; idx_k++) {
-                int k = Li[idx_k];
-
-                int lo = std::min(i, k);
-                int hi = std::max(i, k);
-
-                double z_ik = 0.0;
-                if (lo == hi) {
-                    z_ik = Zx_out[Lp[lo]];  // diagonal
-                } else {
-                    for (int s = Lp[lo]; s < Lp[lo + 1]; s++) {
-                        if (Li[s] == hi) { z_ik = Zx_out[s]; break; }
-                        if (Li[s] > hi) break;
-                    }
-                }
-
-                sum += Lx[idx_k] * z_ik;
+        // Z[i,j] = -1/L[j,j] * sum_{k in struct(j)} L[k,j] * Z[i,k], i in
+        // struct(j). Column k's entry at row r >= k is Z[r,k]: it is row r's
+        // term k, and for r > k also row k's term r through Z[k,r] = Z[r,k].
+        for (int idx_k = col_start + 1; idx_k < col_end; idx_k++) {
+            const int k = Li[idx_k];
+            const double Lkj = Lx[idx_k];
+            const int k_start = Lp[k], k_end = Lp[k + 1];
+            if (k_start >= k_end) continue;
+            row_sum[k] += Lkj * Zx_out[k_start];
+            for (int s = k_start + 1; s < k_end; s++) {
+                const int r = Li[s];
+                if (!in_struct[r]) continue;
+                const double z = Zx_out[s];
+                row_sum[r] += Lkj * z;
+                row_sum[k] += col_val[r] * z;
             }
-            Zx_out[idx_i] = -Ljj_inv * sum;
+        }
+
+        for (int idx_i = col_start + 1; idx_i < col_end; idx_i++) {
+            const int i = Li[idx_i];
+            Zx_out[idx_i] = -Ljj_inv * row_sum[i];
+            in_struct[i] = 0;
+            col_val[i] = 0.0;
         }
 
         // Diagonal: Z[j,j] = 1/L[j,j] * (1/L[j,j] - Σ_{k>j} L[k,j] * Z[k,j]).

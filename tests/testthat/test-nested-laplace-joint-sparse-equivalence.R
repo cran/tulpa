@@ -172,8 +172,8 @@ test_that("sparse path matches dense on joint CAR_proper", {
 # had to do anything.
 
 .expect_equiv_fixed <- function(fit_dense, fit_sparse, tol = 1e-7) {
-    sd_ <- summary(fit_dense)
-    ss_ <- summary(fit_sparse)
+    sd_ <- coef(summary(fit_dense))
+    ss_ <- coef(summary(fit_sparse))
     expect_equal(as.numeric(ss_$estimate), as.numeric(sd_$estimate),
                  tolerance = tol, info = "fixed-effect estimates")
     expect_equal(as.numeric(ss_$std.error), as.numeric(sd_$std.error),
@@ -223,7 +223,8 @@ test_that("the export survives the sum-to-zero rank-1 storage", {
     # With the augmentation's 1 1' left OFF the stored H and folded in at solve
     # time instead, the sparse loop's factorization is of a matrix whose
     # constant direction is unpinned -- the arrangement the export was taken
-    # from. TULPA_S2Z_DENSIFY_MAX = 0 forces it at any field size.
+    # from. TULPA_S2Z_DENSIFY_MAX = 0 forces it at any field size, and a large
+    # value stores the augmentation at any size.
     old <- Sys.getenv("TULPA_S2Z_DENSIFY_MAX", unset = NA)
     on.exit(if (is.na(old)) Sys.unsetenv("TULPA_S2Z_DENSIFY_MAX")
             else Sys.setenv(TULPA_S2Z_DENSIFY_MAX = old), add = TRUE)
@@ -231,6 +232,7 @@ test_that("the export survives the sum-to-zero rank-1 storage", {
     sim   <- .sim_joint_small(seed = 12L, alpha_true = 1.0)
     prior <- c(list(type = "icar", sigma_grid = c(0.5, 0.7)), sim$adj)
 
+    Sys.setenv(TULPA_S2Z_DENSIFY_MAX = "100000")
     dense_store <- .fit_joint_pair(prior, sim$responses)[[2]]
     Sys.setenv(TULPA_S2Z_DENSIFY_MAX = "0")
     fits <- .fit_joint_pair(prior, sim$responses)
@@ -238,8 +240,8 @@ test_that("the export survives the sum-to-zero rank-1 storage", {
 
     # ... and the rank-1 storage gives the same standard errors as storing the
     # augmentation exactly, so the fold is not silently shrinking them.
-    expect_equal(as.numeric(summary(fits[[2]])$std.error),
-                 as.numeric(summary(dense_store)$std.error),
+    expect_equal(as.numeric(coef(summary(fits[[2]]))$std.error),
+                 as.numeric(coef(summary(dense_store))$std.error),
                  tolerance = 1e-6)
 })
 

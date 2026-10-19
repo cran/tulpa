@@ -17,6 +17,8 @@
 # The CCD grid the fit then laid at the mode topped out at range 1.53 and
 # carried zero weight above 100, which is why the coefficients do not move.
 
+skip_on_cran()
+
 .svn_sim <- function(n = 120L, seed = 2L) {
   set.seed(seed)
   L <- cbind(lon = runif(n, 0, 10), lat = runif(n, 0, 10))
@@ -107,5 +109,5 @@ test_that("a fractional fit runs clean and integrates no declined coordinate", {
   ext <- sqrt(sum(apply(as.matrix(d[, c("lon", "lat")]), 2,
                         function(z) diff(range(z)))^2))
   expect_lt(max(fit$nested$range_grid), ext)
-  expect_true(all(is.finite(fit$log_marginal)))
+  expect_cells_solved(fit)
 })

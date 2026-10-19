@@ -58,6 +58,89 @@ test_that("sigma_re warns wherever the fit determines the scale itself", {
     "ignored for mode = 'agq'")
 })
 
+test_that("the ziformula RE guard walks the AST", {
+  # gcol33/tulpa#680: a regex on deparsed code false-positives on a `|` inside a
+  # string literal and is papered over by any() when the deparse wraps.
+  dd <- data.frame(y = rpois(20, 2), x = rnorm(20), g = gl(4, 5),
+                   lab = rep("a|b", 20), stringsAsFactors = FALSE)
+  expect_error(tulpa:::.zi_design(~ 1 + (1 | g), dd, 20L),
+               "fixed effects only")
+  # A `|` that is not a bar term is not a random effect.
+  expect_silent(tulpa:::.zi_design(~ x, dd, 20L))
+})
+
+test_that("the temporal field constructor warns on shared = FALSE like its twin", {
+  # gcol33/tulpa#702: .warn_nonshared() exists because the same input warned or
+  # stayed silent depending only on which constructor it went to.
+  expect_warning(tulpa:::.temporal_field_spec(~ 1 || t, structure = "rw1",
+                                              shared = FALSE),
+                 "Non-shared")
+})
+
+test_that("every Matern constructor checks nu at construction", {
+  # gcol33/tulpa#701: spatial_gp() validated it and spatial_multiscale() stored
+  # anything, deferring the error into the fit.
+  expect_error(spatial_gp(~ lon + lat, cov = "matern", nu = 7), "nu in")
+  expect_error(spatial_multiscale(~ lon + lat, cov = "matern", nu = 7), "nu in")
+  expect_s3_class(spatial_multiscale(~ lon + lat, cov = "matern", nu = 2.5),
+                  "tulpa_spatial")
+})
+
+skip_on_cran_budget()
+
+test_that("a family object maps to the engine's own family name", {
+  skip_on_cran_budget()
+  expect_identical(tulpa:::.family_object_to_name(stats::binomial()), "binomial")
+  expect_identical(tulpa:::.family_object_to_name(stats::poisson()), "poisson")
+  expect_identical(tulpa:::.family_object_to_name(stats::gaussian()), "gaussian")
+  # A non-canonical link rides the name in the `<base>_<link>` convention rather
+  # than being silently fitted at the canonical one.
+  expect_identical(tulpa:::.family_object_to_name(stats::binomial("probit")),
+                   "binomial_probit")
+})
+
+test_that("a family object's link is never replaced by the engine's default", {
+  skip_on_cran_budget()
+  # gcol33/tulpa#873: the suffix was decided against stats' canonical link, and
+  # stats' Gamma() defaults to inverse where tulpa's bare "gamma" means log, so
+  # Gamma() fitted a log link in silence.
+  f <- tulpa:::.family_object_to_name
+  expect_identical(f(stats::Gamma()), "gamma_inverse")
+  expect_identical(f(stats::Gamma("log")), "gamma")
+  expect_identical(f(stats::Gamma("identity")), "gamma_identity")
+  # stats spells the family with a dot and its default link as "1/mu^2".
+  expect_identical(f(stats::inverse.gaussian()), "inverse_gaussian_1mu2")
+  expect_identical(f(stats::inverse.gaussian("log")), "inverse_gaussian")
+  expect_identical(f(stats::gaussian("log")), "gaussian_log")
+  expect_identical(f(stats::poisson("sqrt")), "poisson_sqrt")
+  # Every mapped name resolves in the registry: nothing reaches "Unknown family".
+  for (fam in list(stats::Gamma(), stats::inverse.gaussian(),
+                   stats::inverse.gaussian("inverse"))) {
+    expect_no_error(tulpa:::.family_or_stop(tulpa:::.canonical_family(f(fam))))
+  }
+  # A link the base does not admit is refused naming the object, not fitted.
+  expect_error(f(stats::poisson("identity")), NA)
+  expect_error(f(stats::binomial("identity")), "not available for binomial")
+})
+
+test_that("an NNGP spec carries the amplitude anchors the door accepts", {
+  skip_on_cran_budget()
+  # gcol33/tulpa#700: they were validated and stored on the HSGP branch only, so
+  # an NNGP user's anchors were neither used nor refused, and the sampler spec
+  # hardcoded a second default that disagreed with the engine's.
+  sp <- spatial_gp(~ lon + lat, sigma_prior_U = 3, sigma_prior_alpha = 0.02)
+  expect_equal(sp$sigma2_prior_U, 3)
+  expect_equal(sp$sigma2_prior_alpha, 0.02)
+  expect_error(spatial_gp(~ lon + lat, sigma_prior_U = -1))
+
+  # The default is the engine's own (1, 0.01) -- one anchor, one default.
+  d0 <- spatial_gp(~ lon + lat)
+  expect_equal(d0$sigma2_prior_U, 1)
+  expect_equal(d0$sigma2_prior_alpha, 0.01)
+})
+
+skip_on_cran()
+
 test_that("n_trials is read the same way on every door", {
   # gcol33/tulpa#677: a scalar errored at the C++ boundary on `laplace` and was
   # recycled on `mala` / `imh_laplace`, and n_trials with a non-binomial family
@@ -93,55 +176,14 @@ test_that("front-door misuse names the argument, not an R internal", {
                "`family` must be a single family name")
 })
 
-test_that("a family object maps to the engine's own family name", {
-  expect_identical(tulpa:::.family_object_to_name(stats::binomial()), "binomial")
-  expect_identical(tulpa:::.family_object_to_name(stats::poisson()), "poisson")
-  expect_identical(tulpa:::.family_object_to_name(stats::gaussian()), "gaussian")
-  # A non-canonical link rides the name in the `<base>_<link>` convention rather
-  # than being silently fitted at the canonical one.
-  expect_identical(tulpa:::.family_object_to_name(stats::binomial("probit")),
-                   "binomial_probit")
-})
-
-test_that("the ziformula RE guard walks the AST", {
-  # gcol33/tulpa#680: a regex on deparsed code false-positives on a `|` inside a
-  # string literal and is papered over by any() when the deparse wraps.
-  dd <- data.frame(y = rpois(20, 2), x = rnorm(20), g = gl(4, 5),
-                   lab = rep("a|b", 20), stringsAsFactors = FALSE)
-  expect_error(tulpa:::.zi_design(~ 1 + (1 | g), dd, 20L),
-               "fixed effects only")
-  # A `|` that is not a bar term is not a random effect.
-  expect_silent(tulpa:::.zi_design(~ x, dd, 20L))
-})
-
-test_that("the temporal field constructor warns on shared = FALSE like its twin", {
-  # gcol33/tulpa#702: .warn_nonshared() exists because the same input warned or
-  # stayed silent depending only on which constructor it went to.
-  expect_warning(tulpa:::.temporal_field_spec(~ 1 || t, structure = "rw1",
-                                              shared = FALSE),
-                 "Non-shared")
-})
-
-test_that("every Matern constructor checks nu at construction", {
-  # gcol33/tulpa#701: spatial_gp() validated it and spatial_multiscale() stored
-  # anything, deferring the error into the fit.
-  expect_error(spatial_gp(~ lon + lat, cov = "matern", nu = 7), "nu in")
-  expect_error(spatial_multiscale(~ lon + lat, cov = "matern", nu = 7), "nu in")
-  expect_s3_class(spatial_multiscale(~ lon + lat, cov = "matern", nu = 2.5),
-                  "tulpa_spatial")
-})
-
-test_that("an NNGP spec carries the amplitude anchors the door accepts", {
-  # gcol33/tulpa#700: they were validated and stored on the HSGP branch only, so
-  # an NNGP user's anchors were neither used nor refused, and the sampler spec
-  # hardcoded a second default that disagreed with the engine's.
-  sp <- spatial_gp(~ lon + lat, sigma_prior_U = 3, sigma_prior_alpha = 0.02)
-  expect_equal(sp$sigma2_prior_U, 3)
-  expect_equal(sp$sigma2_prior_alpha, 0.02)
-  expect_error(spatial_gp(~ lon + lat, sigma_prior_U = -1))
-
-  # The default is the engine's own (1, 0.01) -- one anchor, one default.
-  d0 <- spatial_gp(~ lon + lat)
-  expect_equal(d0$sigma2_prior_U, 1)
-  expect_equal(d0$sigma2_prior_alpha, 0.01)
+test_that("family = Gamma() fits the inverse link glm() fits", {
+  skip_on_cran()
+  set.seed(9)
+  n <- 300; x <- stats::runif(n)
+  d <- data.frame(y = stats::rgamma(n, 5, 5 * (0.5 + x)), x = x)
+  ref <- stats::coef(stats::glm(y ~ x, stats::Gamma(), d))
+  fit <- suppressWarnings(tulpa(y ~ x, d, family = stats::Gamma(),
+                                mode = "laplace", phi = 5))
+  expect_identical(fit$family, "gamma_inverse")
+  expect_equal(unname(coef(fit)), unname(ref), tolerance = 0.05)
 })

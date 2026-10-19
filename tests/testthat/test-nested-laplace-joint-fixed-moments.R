@@ -37,30 +37,6 @@
   list(d = d, fit = fit, beta_prec = beta_prec)
 }
 
-test_that("a coupled multi-block joint fit reports the exact fixed-effect covariance", {
-  skip_on_cran()
-  skip_if_not_installed("numDeriv")
-  coupled_occ_register()
-  o <- .j305_coupled_fit()
-  fit <- o$fit
-  expect_s3_class(fit, "tulpa_nested_laplace_joint_multi")
-  expect_true(is.na(fit$grid_fixed_declined))
-
-  tab <- tulpa:::.fit_fixed_table(fit)
-  expect_true(all(is.finite(tab$std.error)))
-  expect_true(all(is.finite(tab$conf.low)))
-  expect_true(all(is.finite(tab$conf.high)))
-
-  lp <- coupled_occ_log_post(o$d, o$beta_prec)
-  mode_ab <- fit$modes[1L, 1:2]
-  # The engine's mode is a stationary point of that same density.
-  expect_lt(max(abs(numDeriv::grad(function(v) lp(v[1], v[2]), mode_ab))), 1e-6)
-
-  V_ref <- solve(-numDeriv::hessian(function(v) lp(v[1], v[2]), mode_ab))
-  expect_equal(unname(vcov(fit)), V_ref, tolerance = 1e-6)
-  expect_equal(tab$std.error, sqrt(diag(V_ref)), tolerance = 1e-6)
-})
-
 # --------------------------------------------------------------------------- #
 # (2) Single-block joint over a real multi-cell grid: the mixture is the law   #
 #     of total covariance, carrying BOTH within-cell curvature and between-    #
@@ -103,6 +79,84 @@ test_that("a coupled multi-block joint fit reports the exact fixed-effect covari
     list(max_iter = 100L, tol = 1e-8, diagnose_k = FALSE), list(...))
   tulpa_nested_laplace_joint(d$responses, d$prior, control = ctrl)
 }
+
+# --------------------------------------------------------------------------- #
+# (6) The block is extracted inside each cell's own solve (gcol33/tulpa#307).  #
+# --------------------------------------------------------------------------- #
+
+# Reference: the block read the way #305 read it -- off the STORED per-cell
+# precision, through the R-level `cpp_joint_inner_vcov_blocks()` entry. The
+# in-loop extraction hands the same cell CSC to the same routine, so the two
+# agree entry for entry, not to a tolerance.
+.j307_reference_blocks <- function(fq) {
+  p <- fq$n_fixed
+  n_x <- as.integer(fq$Q_csc_n)
+  cpp_joint_inner_vcov_blocks(
+    fq$Q_csc_p_per_grid, fq$Q_csc_i_per_grid, fq$Q_csc_x_per_grid,
+    n_x = n_x, idx = seq_len(p), n_dense = p,
+    A_cols_list = tulpa:::.joint_constraint_cols(fq$arm_layout, n_x),
+    field_marginal = FALSE, n_threads = 1L)
+}
+
+skip_on_cran_budget()
+
+# --------------------------------------------------------------------------- #
+# (5) Which cells the shared marginalizer sums over, and under what weights.   #
+# --------------------------------------------------------------------------- #
+
+test_that(".nested_fixed_moments ignores zero-weight and empty cells", {
+  skip_on_cran_budget()
+  H <- matrix(c(4, 1, 1, 2), 2, 2)
+  base <- list(weights = c(0.25, 0.75),
+               grid_modes = list(c(1, 2), c(3, 4)),
+               grid_hessians = list(H, H))
+  ref <- tulpa:::.nested_fixed_moments(base)
+
+  # A third cell with zero weight contributes nothing, whether or not it
+  # carries a block.
+  padded <- list(weights = c(0.25, 0.75, 0),
+                 grid_modes = list(c(1, 2), c(3, 4), NULL),
+                 grid_hessians = list(H, H, NULL))
+  got <- tulpa:::.nested_fixed_moments(padded)
+  expect_equal(got$mean, ref$mean)
+  expect_equal(got$cov,  ref$cov)
+
+  # A per-cell array that does not describe the grid is refused outright
+  # rather than recycled against it.
+  expect_null(tulpa:::.nested_fixed_moments(
+    list(weights = c(0.5, 0.5), grid_modes = list(c(1, 2)),
+         grid_hessians = list(H))))
+
+  # A complete grid retains all of its weight.
+  expect_equal(ref$mass, 1, tolerance = 1e-14)
+  expect_equal(got$mass, 1, tolerance = 1e-14)
+})
+
+skip_on_cran()
+
+test_that("a coupled multi-block joint fit reports the exact fixed-effect covariance", {
+  skip_on_cran()
+  skip_if_not_installed("numDeriv")
+  coupled_occ_register()
+  o <- .j305_coupled_fit()
+  fit <- o$fit
+  expect_s3_class(fit, "tulpa_nested_laplace_joint_multi")
+  expect_true(is.na(fit$grid_fixed_declined))
+
+  tab <- tulpa:::.fit_fixed_table(fit)
+  expect_true(all(is.finite(tab$std.error)))
+  expect_true(all(is.finite(tab$conf.low)))
+  expect_true(all(is.finite(tab$conf.high)))
+
+  lp <- coupled_occ_log_post(o$d, o$beta_prec)
+  mode_ab <- fit$modes[1L, 1:2]
+  # The engine's mode is a stationary point of that same density.
+  expect_lt(max(abs(numDeriv::grad(function(v) lp(v[1], v[2]), mode_ab))), 1e-6)
+
+  V_ref <- solve(-numDeriv::hessian(function(v) lp(v[1], v[2]), mode_ab))
+  expect_equal(unname(vcov(fit)), V_ref, tolerance = 1e-6)
+  expect_equal(tab$std.error, sqrt(diag(V_ref)), tolerance = 1e-6)
+})
 
 test_that("the single-block joint mixture matches the independent law-of-total-covariance", {
   skip_on_cran()
@@ -253,43 +307,13 @@ test_that("a coupled joint fit declines the correction for want of a location te
                matrix(as.numeric(ci_g), nrow(ci_g)), tolerance = 1e-12)
 })
 
-# --------------------------------------------------------------------------- #
-# (5) Which cells the shared marginalizer sums over, and under what weights.   #
-# --------------------------------------------------------------------------- #
-
-test_that(".nested_fixed_moments ignores zero-weight and empty cells", {
-  H <- matrix(c(4, 1, 1, 2), 2, 2)
-  base <- list(weights = c(0.25, 0.75),
-               grid_modes = list(c(1, 2), c(3, 4)),
-               grid_hessians = list(H, H))
-  ref <- tulpa:::.nested_fixed_moments(base)
-
-  # A third cell with zero weight contributes nothing, whether or not it
-  # carries a block.
-  padded <- list(weights = c(0.25, 0.75, 0),
-                 grid_modes = list(c(1, 2), c(3, 4), NULL),
-                 grid_hessians = list(H, H, NULL))
-  got <- tulpa:::.nested_fixed_moments(padded)
-  expect_equal(got$mean, ref$mean)
-  expect_equal(got$cov,  ref$cov)
-
-  # A per-cell array that does not describe the grid is refused outright
-  # rather than recycled against it.
-  expect_null(tulpa:::.nested_fixed_moments(
-    list(weights = c(0.5, 0.5), grid_modes = list(c(1, 2)),
-         grid_hessians = list(H))))
-
-  # A complete grid retains all of its weight.
-  expect_equal(ref$mass, 1, tolerance = 1e-14)
-  expect_equal(got$mass, 1, tolerance = 1e-14)
-})
-
 # A cell that carries POSITIVE weight and no retained block is the other case
 # (gcol33/tulpa#342). Its mass is gone, so the moments are renormalized over
 # what survived and report the posterior conditional on those cells; summing the
 # whole-grid weights over the survivors instead would shrink the mean toward the
 # origin by exactly the dropped mass.
 test_that(".nested_fixed_moments renormalizes over the cells it kept", {
+  skip_on_cran()
   # The symmetric reproduction from the issue: two identical cells, one of them
   # dropped. The truth is unmoved, and the pre-#342 answer was half of it.
   H <- matrix(c(4, 1, 1, 2), 2, 2)
@@ -360,24 +384,6 @@ test_that(".nested_fixed_moments renormalizes over the cells it kept", {
   expect_equal(o$mass, 0.5, tolerance = 1e-14)
 })
 
-# --------------------------------------------------------------------------- #
-# (6) The block is extracted inside each cell's own solve (gcol33/tulpa#307).  #
-# --------------------------------------------------------------------------- #
-
-# Reference: the block read the way #305 read it -- off the STORED per-cell
-# precision, through the R-level `cpp_joint_inner_vcov_blocks()` entry. The
-# in-loop extraction hands the same cell CSC to the same routine, so the two
-# agree entry for entry, not to a tolerance.
-.j307_reference_blocks <- function(fq) {
-  p <- fq$n_fixed
-  n_x <- as.integer(fq$Q_csc_n)
-  cpp_joint_inner_vcov_blocks(
-    fq$Q_csc_p_per_grid, fq$Q_csc_i_per_grid, fq$Q_csc_x_per_grid,
-    n_x = n_x, idx = seq_len(p), n_dense = p,
-    A_cols_list = tulpa:::.joint_constraint_cols(fq$arm_layout, n_x),
-    field_marginal = FALSE, n_threads = 1L)
-}
-
 test_that("the in-loop block is the stored-precision block, entry for entry", {
   skip_on_cran()
   d <- .j305_icar_data()
@@ -386,7 +392,7 @@ test_that("the in-loop block is the stored-precision block, entry for entry", {
   expect_length(V, length(fq$weights))
 
   for (k in seq_along(V)) {
-    expect_identical(fq$grid_hessians[[k]], solve(V[[k]]))
+    expect_identical(fq$grid_hessians[[k]], tulpa:::.spd_inverse(V[[k]]))
   }
 
   # The probe is live: the same routine WITHOUT the field sum-to-zero groups
@@ -427,7 +433,7 @@ test_that("a coupled multi-block joint fit extracts the same block in the loop",
     control = list(max_iter = 100L, tol = 1e-10, diagnose_k = FALSE,
                    store_Q = TRUE))
   V <- .j307_reference_blocks(fq)
-  for (k in seq_along(V)) expect_identical(fq$grid_hessians[[k]], solve(V[[k]]))
+  for (k in seq_along(V)) expect_identical(fq$grid_hessians[[k]], tulpa:::.spd_inverse(V[[k]]))
 })
 
 test_that("the retention no longer needs the precision materialised at all", {
@@ -460,7 +466,7 @@ test_that("the sparse joint loop extracts the same block as the dense one", {
   expect_equal(unname(vcov(dense)), unname(vcov(sparse)), tolerance = 1e-8)
   for (k in seq_along(sparse$weights)) {
     expect_identical(sparse$grid_hessians[[k]],
-                     solve(.j307_reference_blocks(sparse)[[k]]))
+                     tulpa:::.spd_inverse(.j307_reference_blocks(sparse)[[k]]))
   }
 })
 
@@ -503,7 +509,7 @@ test_that("a real multi-cell fit reports mixture-CDF bounds beside its moments",
 
   # The moments are untouched, so the two reads differ only in the quantile
   # step -- and on a grid this spread they do differ.
-  est <- coef(fit); se <- summary(fit)$std.error
+  est <- coef(fit); se <- coef(summary(fit))$std.error
   gauss <- cbind(est + stats::qnorm(0.025) * se, est + stats::qnorm(0.975) * se)
   expect_gt(max(abs(matrix(as.numeric(ci), p, 2L) - gauss)), 1e-6)
 })
@@ -525,7 +531,7 @@ test_that("the mixture bounds are the ones the fit's own posterior draws carry",
   expect_equal(ci, unname(emp), tolerance = 0.02)
 
   # And the collapsed Gaussian read is the one that misses them.
-  est <- coef(fit); se <- summary(fit)$std.error
+  est <- coef(fit); se <- coef(summary(fit))$std.error
   gauss <- cbind(est + stats::qnorm(0.025) * se, est + stats::qnorm(0.975) * se)
   expect_gt(max(abs(gauss - emp)), max(abs(ci - emp)))
 })

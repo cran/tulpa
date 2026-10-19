@@ -51,6 +51,11 @@ struct CenterFold {
     double amount      = 0.0;
 };
 
+// Relative tolerance for accepting a design column as the weight a field's
+// centering constant folds into: tight enough to catch a wrong column, loose
+// enough for a design assembled in floating point.
+inline constexpr double kAliasColumnTol = 1e-9;
+
 // The common case: a block seen uniformly by its observations removes one
 // constant, which aliases with the arm intercept. Centres [start, start+length)
 // in place and reports the fold.
@@ -223,6 +228,19 @@ struct LatentBlock {
     // change eta instead of preserving it.
     std::function<std::vector<CenterFold>(Rcpp::NumericVector&)> center;
 
+    // True when `center` removes the constant null direction of an INTRINSIC
+    // prior (ICAR, the BYM2 structured component, RW1 / RW2), set only through
+    // centre_intrinsic_level() below. The model such a block stands for carries
+    // that direction as a HARD sum-to-zero constraint: the solve's augmentation
+    // gives it a finite precision only so the Hessian is invertible, and the
+    // centring then puts the level in the intercept. A covariance read off the
+    // stored precision therefore has to be conditioned on the block's sum, or
+    // the augmentation's 1 / (tau J) variance on the level lands in the
+    // intercept's standard error (gcol33/tulpa#901). A proper block (SPDE,
+    // NNGP) that centres for identifiability leaves this false: its constant
+    // carries a real prior variance.
+    bool intrinsic_level = false;
+
     // ----- Sparse-builder fields -----
     //
     // The defaults describe an areal block: one block-local DOF per
@@ -336,12 +354,18 @@ struct LatentBlock {
 //
 // Reading it off the blocks makes the requirement a property of the block
 // rather than something each caller has to remember to pass as force_sparse.
-inline bool blocks_require_sparse(const std::vector<LatentBlock>& blocks) {
+inline bool blocks_have_sparse_only_prior(const std::vector<LatentBlock>& blocks) {
     for (const auto& b : blocks) {
-        if (b.contrib_kind != BlockContribKind::INDEXED_SINGLE) return true;
         if (b.add_prior_sparse && !b.add_prior) return true;
     }
     return false;
+}
+
+inline bool blocks_require_sparse(const std::vector<LatentBlock>& blocks) {
+    for (const auto& b : blocks) {
+        if (b.contrib_kind != BlockContribKind::INDEXED_SINGLE) return true;
+    }
+    return blocks_have_sparse_only_prior(blocks);
 }
 
 // The block's per-row design weight at observation i on arm k_arm, 1 where the
@@ -375,6 +399,39 @@ inline Rcpp::LogicalVector block_center_flags(
     Rcpp::LogicalVector out((R_xlen_t)blocks.size());
     for (std::size_t b = 0; b < blocks.size(); b++) {
         out[(R_xlen_t)b] = static_cast<bool>(blocks[b].center);
+    }
+    return out;
+}
+
+// Give an INTRINSIC block its centring: the block's constant is removed and
+// folded into the intercept (center_intercept), and the block is marked as
+// carrying that direction as a hard constraint (intrinsic_level). One setter,
+// so no factory can centre an intrinsic field without declaring the
+// constraint the covariance read has to honour.
+inline void centre_intrinsic_level(LatentBlock& blk) {
+    const int start = blk.start;
+    const int size  = blk.size;
+    blk.center = [start, size](Rcpp::NumericVector& x) {
+        return center_intercept(x, start, size);
+    };
+    blk.intrinsic_level = true;
+}
+
+// The sum-to-zero constraint groups of a block list, one per intrinsic block:
+// the 1-based latent indices [start + 1, start + size] whose sum is fixed at
+// zero. The same `A_cols_list` contract cpp_joint_inner_vcov_blocks() reads, so
+// a single-arm grid's fixed-effect covariance is conditioned by the same
+// kriging correction as a joint fit's (gcol33/tulpa#901). Empty where no block
+// is intrinsic.
+inline Rcpp::List intrinsic_constraint_cols(
+    const std::vector<LatentBlock>& blocks
+) {
+    Rcpp::List out;
+    for (const auto& b : blocks) {
+        if (!b.intrinsic_level || b.size <= 0) continue;
+        Rcpp::IntegerVector cols(b.size);
+        for (int j = 0; j < b.size; j++) cols[j] = b.start + j + 1;
+        out.push_back(cols);
     }
     return out;
 }

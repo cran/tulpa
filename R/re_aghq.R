@@ -226,6 +226,7 @@ tulpa_re_aghq <- function(theta0, re_terms, Sigma0,
                           gradient = c("fd", "analytic"),
                           max_iter = 200L) {
   gradient <- match.arg(gradient)
+  .check_lkj_eta(lkj_eta, "lkj_eta", "tulpa_re_aghq()")
   native <- !is.null(oracle)
   if (!native && (is.null(make_site) == is.null(make_group))) {
     stop("Supply exactly one of `make_site` (single-arm), `make_group` ",
@@ -420,7 +421,7 @@ tulpa_re_aghq <- function(theta0, re_terms, Sigma0,
     return(NULL)
   }
 
-  V <- tryCatch(solve(opt$hessian), error = function(e) NULL)
+  V <- tryCatch(.spd_inverse(opt$hessian), error = function(e) NULL)
   if (is.null(V) || any(!is.finite(opt$par))) {
     warning("tulpa_re_aghq: the joint optimum is singular or non-finite ",
             "(no usable exact-marginal Hessian); returning NULL.",

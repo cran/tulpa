@@ -140,14 +140,9 @@ temporal_tvc <- function(time_var,
 }
 
 
-#' Print method for tulpa_tvc
-#'
-#' @param x A tulpa_tvc object
-#' @param ... Ignored
-#'
-#' @return The input `x`, returned invisibly. Called for the side effect of
-#'   printing the temporally-varying-coefficient specification to the console.
-#'
+#' @rdname temporal_tvc
+#' @param x A `tulpa_tvc` specification.
+#' @param ... Ignored.
 #' @export
 print.tulpa_tvc <- function(x, ...) {
   cat("tulpa temporally-varying coefficients\n")
@@ -206,7 +201,7 @@ print.tulpa_tvc <- function(x, ...) {
 #' @param X Design matrix (to resolve term names)
 #'
 #' @return Updated tulpa_tvc object with computed structure
-#' @keywords internal
+#' @noRd
 validate_tvc <- function(tvc, data, X) {
   if (is.null(tvc)) return(NULL)
   if (!inherits(tvc, "tulpa_tvc")) return(tvc)
@@ -222,13 +217,12 @@ validate_tvc <- function(tvc, data, X) {
 
   # Get time values and create indices
   time_vals <- data[[tvc$time_var]]
-  unique_times <- NULL
-  if (is.factor(time_vals)) {
-    time_factor <- time_vals
-  } else {
-    unique_times <- sort(unique(time_vals))
-    time_factor <- factor(time_vals, levels = unique_times)
-  }
+  .check_time_complete(time_vals, tvc$time_var)
+  time_factor <- .resolve_time_index(time_vals, tvc$time_var)
+  # The distinct instants in chain order, as values (NULL for a factor, which
+  # states an order and no spacing).
+  unique_times <- if (is.factor(time_vals)) NULL else
+    time_vals[match(levels(time_factor), as.character(time_vals))]
 
   tvc$n_times <- nlevels(time_factor)
   tvc$time_index <- as.integer(time_factor)
@@ -248,10 +242,6 @@ validate_tvc <- function(tvc, data, X) {
            "which read the index as a position on a grid.", call. = FALSE)
     }
     tvals <- as.numeric(unique_times)
-    if (anyNA(tvals)) {
-      stop("`temporal_tvc(structure = \"gp\")`: time variable '", tvc$time_var,
-           "' has missing values.", call. = FALSE)
-    }
     # Scaled the way temporal_gp() scales its own: the lengthscale then lives on
     # one support whatever units the time variable is measured in. `period` is a
     # LAG stated in the raw units and makes the same trip; centring cancels in a
@@ -268,6 +258,11 @@ validate_tvc <- function(tvc, data, X) {
     tvc$time_values <- tvals
     tvc$period_scaled <- if (is.null(tvc$period)) NULL else
       as.numeric(tvc$period) / tvc$time_scale
+    # The lengthscale support on the spread of the times the kernel sees, as
+    # temporal_gp() lays its own out (gcol33/tulpa#907).
+    phi_b <- .gp_phi_bounds(stats::sd(as.numeric(time_vals)) / tvc$time_scale)
+    tvc$phi_prior_lower <- phi_b[["lower"]]
+    tvc$phi_prior_upper <- phi_b[["upper"]]
   }
 
   # Handle grouping
@@ -424,15 +419,8 @@ tvc.tulpa_fit <- function(object, terms = NULL, summary = FALSE,
 }
 
 
-#' Print method for tulpa_tvc_posterior
-#'
-#' @param x A tulpa_tvc_posterior object
-#' @param ... Ignored
-#'
-#' @return The input `x`, returned invisibly. Called for the side effect of
-#'   printing a summary of the temporally-varying-coefficient posterior to the
-#'   console.
-#'
+#' @rdname tvc
+#' @param x A `tulpa_tvc_posterior` or `tulpa_tvc_summary` object.
 #' @export
 print.tulpa_tvc_posterior <- function(x, ...) {
   .print_varying_coef(
@@ -443,17 +431,18 @@ print.tulpa_tvc_posterior <- function(x, ...) {
   )
 }
 
+#' @rdname tvc
+#' @export
+print.tulpa_tvc_summary <- function(x, ...) {
+  .print_effect_table(x, "Temporally varying coefficient posterior summary",
+                      ...)
+}
 
-#' Summary method for tulpa_tvc_posterior
-#'
-#' @param object A tulpa_tvc_posterior object
-#' @param probs Quantiles to compute
-#' @param ... Ignored
-#'
-#' @return A `tulpa_tvc_summary` data frame with one row per time point and
-#'   term, holding the posterior mean, SD, and requested quantiles of each
-#'   temporally-varying coefficient.
-#'
+
+#' @rdname tvc
+#' @return `summary()` on a `tulpa_tvc_posterior` returns a `tulpa_tvc_summary`
+#'   data frame with one row per time point and term, holding the posterior
+#'   mean, SD and requested quantiles of each temporally varying coefficient.
 #' @export
 summary.tulpa_tvc_posterior <- function(object, probs = c(0.025, 0.5, 0.975), ...) {
   .summary_varying_coef(

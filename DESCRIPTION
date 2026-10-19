@@ -1,14 +1,18 @@
 Package: tulpa
 Title: Templated Unified Library for Posterior Approximation in
         Bayesian Hierarchical Models
-Version: 0.6.0
+Version: 0.7.5
 Authors@R: c(
     person("Gilles", "Colling", , "gilles.colling051@gmail.com", role = c("aut", "cre", "cph"),
            comment = c(ORCID = "0000-0003-3070-6066")),
     person("Frances Y.", "Kuo", role = c("ctb", "cph"),
            comment = "Sobol direction numbers in src/sobol_direction_numbers.h, BSD-3-clause"),
     person("Stephen", "Joe", role = c("ctb", "cph"),
-           comment = "Sobol direction numbers in src/sobol_direction_numbers.h, BSD-3-clause"))
+           comment = "Sobol direction numbers in src/sobol_direction_numbers.h, BSD-3-clause"),
+    person("Arm Limited", role = "cph",
+           comment = "exp and log routines in src/fastmath.h and src/fastmath_data.cpp, MIT"),
+    person("The Walnutpie Developers", role = "cph",
+           comment = "WALNUTS transition in inst/include/tulpa/walnuts.h, ported from walnutpie, MIT"))
 Description: A general-purpose engine for fitting Bayesian hierarchical models
     with spatial fields, temporal effects, spatially varying coefficients, and
     multiple inference backends. Scalable spatial structure includes Hilbert
@@ -34,10 +38,11 @@ SystemRequirements: C++17
 Depends: R (>= 4.1.0)
 Imports: Rcpp (>= 1.0.12), Matrix, tulpaMesh (>= 0.1.3), generics,
         stats, tools, utils, methods, graphics, grDevices
-Suggests: testthat (>= 3.0.0), bayesplot, ggplot2, sf, terra, knitr,
-        rmarkdown, posterior (>= 1.5.0), loo (>= 2.7.0), rstantools,
-        lme4, nlme, lmtest, numDeriv, spdep, MASS, betareg, glmmTMB,
-        pscl, tweedie, fmesher, patchwork, stars, statmod, withr
+Suggests: testthat (>= 3.0.0), bayesplot, coda, ggplot2, sf, terra,
+        knitr, rmarkdown, posterior (>= 1.5.0), loo (>= 2.7.0),
+        rstantools, lme4, nlme, lmtest, numDeriv, spdep, MASS, betareg,
+        glmmTMB, pscl, tweedie, fmesher, patchwork, stars, statmod,
+        withr
 LinkingTo: Rcpp, RcppEigen, Matrix
 Config/testthat/edition: 3
 VignetteBuilder: knitr
@@ -45,13 +50,17 @@ URL: https://github.com/gcol33/tulpa, https://gillescolling.com/tulpa/
 BugReports: https://github.com/gcol33/tulpa/issues
 Config/roxygen2/version: 8.1.0
 NeedsCompilation: yes
-Packaged: 2026-09-23 22:48:47 UTC; Gilles Colling
+Packaged: 2026-10-19 14:14:50 UTC; Gilles Colling
 Author: Gilles Colling [aut, cre, cph] (ORCID:
     <https://orcid.org/0000-0003-3070-6066>),
   Frances Y. Kuo [ctb, cph] (Sobol direction numbers in
     src/sobol_direction_numbers.h, BSD-3-clause),
   Stephen Joe [ctb, cph] (Sobol direction numbers in
-    src/sobol_direction_numbers.h, BSD-3-clause)
+    src/sobol_direction_numbers.h, BSD-3-clause),
+  Arm Limited [cph] (exp and log routines in src/fastmath.h and
+    src/fastmath_data.cpp, MIT),
+  The Walnutpie Developers [cph] (WALNUTS transition in
+    inst/include/tulpa/walnuts.h, ported from walnutpie, MIT)
 Maintainer: Gilles Colling <gilles.colling051@gmail.com>
 Repository: CRAN
-Date/Publication: 2026-09-24 09:10:02 UTC
+Date/Publication: 2026-10-19 16:00:02 UTC

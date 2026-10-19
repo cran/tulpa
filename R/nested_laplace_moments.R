@@ -11,8 +11,8 @@
 # summary alongside mean +/- SD. Median is the recommended summary for
 # right-skewed posteriors: `mean` of a weakly-identified positive ratio
 # is pulled up by the right tail; `median` matches truth at small n.
-.nl_posterior_moments <- function(res, type, within = .NL_WITHIN_CELL) {
-  within <- match.arg(within)
+.nl_posterior_moments <- function(res, type, within = NULL) {
+  within <- .nl_within_cell_mode(within)
   w <- res$weights
   tg <- res$theta_grid
   if (is.matrix(tg)) {
@@ -34,7 +34,7 @@
   qs <- .nl_axis_quantiles(tg, res$log_marginal, res$refining_axis,
                            log_quad = res$log_quad,
                            domains = geo$domain, within = within,
-                           atoms = geo$atom)
+                           atoms = geo$atom, sd = TRUE)
   res$theta_median <- qs$median
   res$theta_ci_lo  <- qs$ci_lo
   res$theta_ci_hi  <- qs$ci_hi
@@ -63,6 +63,23 @@
 #' @return `res$theta_grid` as an `[n_cells x n_axes]` matrix with axis names
 #'   as column names, or `NULL` if the fit has no grid.
 #' @seealso [tulpa_grid_log_quad()], [tulpa_normalise_weights_safe()]
+#' @examples
+#' \donttest{
+#' set.seed(1)
+#' S <- 30L                                   # spatial units in a chain
+#' nb <- lapply(seq_len(S), function(s) setdiff(c(s - 1L, s + 1L), c(0L, S + 1L)))
+#' nn <- lengths(nb)
+#' field <- as.numeric(scale(cumsum(rnorm(S, 0, 0.4))))
+#' idx <- rep(seq_len(S), each = 6L); n <- length(idx); x <- rnorm(n)
+#' y <- rbinom(n, 1L, plogis(-0.2 + 0.6 * x + field[idx]))
+#' prior <- list(type = "icar", n_spatial_units = S, spatial_idx = idx,
+#'               adj_row_ptr = c(0L, cumsum(nn)), adj_col_idx = unlist(nb) - 1L,
+#'               n_neighbors = nn, tau_grid = c(0.5, 1, 2, 4, 8))
+#' fit <- tulpa_nested_laplace(y, rep(1L, n), cbind(1, x), prior = prior,
+#'                             family = "binomial",
+#'                             control = list(progress = FALSE))
+#' tulpa_theta_matrix(fit)
+#' }
 #' @export
 tulpa_theta_matrix <- function(res) .nl_theta_matrix(res)
 
@@ -141,30 +158,18 @@ tulpa_theta_matrix <- function(res) .nl_theta_matrix(res)
   q
 }
 
-# The cells an axis read may sum. A read carrying the cell measure sums every
-# cell, each holding its own box's mass. A read with no measure sums raw
-# `log_marginal`, which is a mass only where every level of an axis appears in
-# every row of the others, so it reads the base tensor (`refining == ""`) and
-# leaves the refinement slice cells out.
-.nl_axis_read_cells <- function(refining, n, measured) {
-  if (is.null(refining) || measured) return(rep(TRUE, n))
-  !nzchar(.hyper_slice_home(refining, n))
-}
-
 # Marginal log-density along a single hyperparameter axis (logsumexp over
 # the other-axis cells at each unique value). `vals` and `log_marg` are
-# length n_cells; `keep` is an optional logical mask
-# (`.nl_axis_read_cells()`). Returns sorted unique axis values and the matching
-# marginal log-density.
+# length n_cells; `keep` is an optional logical mask. Returns sorted unique
+# axis values and the matching marginal log-density.
 # Weighted quantile on a discrete (value, weight) distribution. Uses
 # midpoint-of-mass cumulative probability (Type 7-like) plus linear
 # interpolation, so quantiles vary smoothly with weights rather than
 # snapping to grid cells.
 #
 #  * Aggregates duplicate values: weights at equal `values` are summed
-#    before interpolation. Idempotent on already-unique axes; needed when
-#    the joint grid carries repeated values (e.g. slice-cell refinement
-#    re-uses the modal axis value across multiple Newton-Laplace cells).
+#    before interpolation. Idempotent on already-unique axes; needed on a
+#    tensor grid, where every level of an axis repeats once per row.
 #  * Filters non-finite values and non-positive weights.
 #  * Returns `NA` per requested `probs` when the support is empty;
 #    returns the unique support value when only one survives.
@@ -578,80 +583,54 @@ tulpa_theta_matrix <- function(res) .nl_theta_matrix(res)
   e
 }
 
-# The rows of one axis a refinement pass re-tiled, as the partition each cell's
-# box is read from. A refined grid is measured cell by cell
-# (`.hyper_refined_log_quad()`): slice points on axis `j` re-tile only the row
-# of the base tensor they were placed in, and every other row keeps the base
-# levels' cells. So a cell's box is not the box of its value in one partition
-# laid over every distinct value the axis carries; in a row the pass never
-# touched that partition would hand a base cell the narrow box of a slice point's
-# neighbour while the cell still holds its whole base box's mass.
-#
-# `row` is 0 for a cell whose row along `j` was not re-tiled and the index of its
-# re-tiled row otherwise (cells sharing their coordinates off `j`); `base` marks
-# the cells on the axis's declared levels, everything but its slice cells. NULL
-# when no slice cell sits on `j`, where the one partition over the axis's
-# coordinates IS every cell's box.
-.nl_axis_cell_rows <- function(tg, j, refining) {
+# The levels an axis was DECLARED on, where a refinement pass added others
+# (`refining`, `.hyper_slice_home()`); NULL on an axis of a grid no pass
+# refined. A pass adds levels, so the grid stays a tensor and every cell's box
+# is the box of its value in one partition over the axis's levels; the declared
+# levels fix that partition's outer edges (`.nl_level_edges()`), as they fix the
+# measure's (`.hyper_span_coord_bounds()`).
+.nl_axis_declared_levels <- function(tg, j, refining) {
   if (is.null(refining) || is.null(dim(tg))) return(NULL)
-  n <- nrow(tg)
-  slice <- .hyper_slice_home(refining, n) == colnames(tg)[j]
-  if (!any(slice)) return(NULL)
+  added <- nzchar(.hyper_slice_home(refining, nrow(tg)))
+  if (!any(added)) return(NULL)
+  sort(unique(as.numeric(tg[!added, j])))
+}
+
+# The row of the grid each cell lies on along axis `j`: one integer per cell,
+# shared by the cells whose coordinates on every OTHER axis agree, so a row is
+# the line through the grid that the axis's conditional density lives on. A
+# single-axis grid is one row.
+.nl_axis_row_id <- function(tg, j) {
+  if (is.null(dim(tg))) return(rep(1L, length(tg)))
   others <- tg[, -j, drop = FALSE]
-  key <- if (ncol(others) == 0L) rep("", n) else
-    do.call(paste, c(lapply(seq_len(ncol(others)),
-                            function(k) sprintf("%.17g", others[, k])),
-                     sep = "|"))
-  retiled <- unique(key[slice])
-  row <- match(key, retiled)
-  row[is.na(row)] <- 0L
-  list(row = as.integer(row), base = !slice)
+  if (ncol(others) == 0L) return(rep(1L, nrow(tg)))
+  key <- do.call(paste, c(lapply(seq_len(ncol(others)),
+                                 function(k) sprintf("%.17g", others[, k])),
+                          sep = "|"))
+  match(key, unique(key))
 }
 
-# The cells of `rows` (`.nl_axis_cell_rows()`) that `keep` selects, NULL when
-# the selection holds no slice cell and so no re-tiled row.
-.nl_cell_rows_subset <- function(rows, keep) {
-  if (is.null(rows) || all(rows$base[keep])) return(NULL)
-  list(row = rows$row[keep], base = rows$base[keep])
-}
-
-# The box each cell owns on one axis, per cell on the natural scale, under the
-# partition its row carries. A row the refinement never re-tiled is tiled by the
-# declared levels (`.nl_box_edges()` on the base levels); a re-tiled row by the
-# declared levels joined to its own slice points, with its outer edges no
-# narrower than the declared levels' -- the fibre `.hyper_fibre_tiling()`
-# measures, whose outer edges are the wider of the base edges and the fibre's
-# own mirror. With every cell in unrefined rows this is `.nl_box_edges()` on the
-# axis's coordinates.
-#
-# `v` is the axis's continuum: a declared point mass is not a cell and is split
-# off by the caller. NULL where a partition does not tile, for the caller to
-# decline on as `.nl_box_edges_from()` does. `coord` / `declined` are the
-# declared levels' partition's, the edges every unrefined row is read on.
-.nl_cell_boxes <- function(v, domain = NA_character_, rows) {
-  fin <- is.finite(v)
-  base_lev <- sort(unique(v[fin & rows$base]))
-  if (length(base_lev) < 2L) return(NULL)
-  pt <- .nl_cell_partition(base_lev, domain)
-  eb <- .nl_box_edges_from(pt, base_lev)
-  if (is.null(eb)) return(NULL)
-  lo <- hi <- rep(NA_real_, length(v))
-  place <- function(sel, lev, e) {
-    k <- match(v[sel], lev)
-    lo[sel] <<- e[k]
-    hi[sel] <<- e[k + 1L]
+# The edges of one partition over an axis's continuum levels `uv`
+# (`.nl_box_edges_from()`), with its outer edges no narrower than the declared
+# levels' partition (`.nl_axis_declared_levels()`): a level a refinement pass
+# laid beside an outer node shortens that node's own mirror, and the span the
+# axis was declared over does not move for it. A declared level outside `uv` --
+# the point mass, split off by the caller -- is left out. Returns the edges with
+# the partition they came from, or NULL where the partition does not tile.
+.nl_level_edges <- function(uv, domain = NA_character_, declared = NULL) {
+  pt <- .nl_cell_partition(uv, domain)
+  e <- .nl_box_edges_from(pt, uv)
+  if (is.null(e)) return(NULL)
+  d <- sort(unique(as.numeric(declared)))
+  d <- d[is.finite(d) & d >= uv[1L] & d <= uv[length(uv)]]
+  if (length(d) >= 2L) {
+    ed <- .nl_box_edges(d, domain)
+    if (!is.null(ed)) {
+      e[1L] <- min(e[1L], ed[1L])
+      e[length(e)] <- max(e[length(e)], ed[length(ed)])
+    }
   }
-  place(fin & rows$row == 0L, base_lev, eb)
-  for (r in setdiff(unique(rows$row[fin]), 0L)) {
-    sel <- fin & rows$row == r
-    lev <- sort(unique(c(base_lev, v[sel])))
-    e <- .nl_box_edges_from(.nl_cell_partition(lev, domain), lev)
-    if (is.null(e)) return(NULL)
-    e[1L] <- min(e[1L], eb[1L])
-    e[length(e)] <- max(e[length(e)], eb[length(eb)])
-    place(sel, lev, e)
-  }
-  list(lo = lo, hi = hi, coord = pt$coord, declined = pt$declined)
+  list(e = e, pt = pt)
 }
 
 # Quantiles of a piecewise-uniform density on a tiling: box `k` owns
@@ -677,53 +656,6 @@ tulpa_theta_matrix <- function(res) .nl_theta_matrix(res)
     if (m[k] <= 0) return(e[k])
     e[k] + (p - cf[k]) / m[k] * (e[k + 1L] - e[k])
   }, numeric(1))
-}
-
-# The box read of an axis whose boxes overlap across rows (`.nl_cell_boxes()`):
-# each cell's mass uniform on its own box. The union of every box edge tiles
-# the axis finer than any one row does, each cell's mass splits across the fine
-# segments its box covers in proportion to their widths, and the quantile is
-# the tiled read on that tiling -- so the density is the sum of the cells'
-# uniforms exactly, and the one-partition read is the case where every box is
-# one segment.
-.nl_box_quantile_rows <- function(v, w, probs, domain, atom, rows) {
-  fin <- is.finite(v)
-  wpos <- fin & is.finite(w) & w > 0
-  tot <- sum(w[wpos])
-  lev <- if (length(atom) == 1L && is.finite(atom) && any(v[fin] == atom) &&
-             !any(v[fin] < atom)) atom else NA_real_
-  if (!is.na(lev)) {
-    ia <- fin & v == lev
-    mass <- sum(w[wpos & ia]) / tot
-    if (mass >= 1) {
-      return(list(q = rep(lev, length(probs)), declined = "single_node"))
-    }
-    bx <- .nl_box_quantile_rows(v[!ia], w[!ia],
-                                .nl_atom_rescale(probs, mass), domain,
-                                NA_real_, .nl_cell_rows_subset(rows, !ia))
-    if (!is.null(bx$q)) bx$q[probs <= mass] <- lev
-    return(bx)
-  }
-  bx <- .nl_cell_boxes(v, domain, rows)
-  if (is.null(bx)) return(list(q = NULL, declined = "boxes_do_not_tile"))
-  ok <- wpos & is.finite(bx$lo) & is.finite(bx$hi)
-  if (!any(ok)) {
-    return(list(q = rep(NA_real_, length(probs)), declined = "no_usable_node"))
-  }
-  br <- sort(unique(c(bx$lo[fin], bx$hi[fin])))
-  i0 <- match(bx$lo[ok], br)
-  i1 <- match(bx$hi[ok], br) - 1L
-  wc <- w[ok] / sum(w[ok])
-  span <- bx$hi[ok] - bx$lo[ok]
-  seg <- unlist(Map(seq.int, i0, i1), use.names = FALSE)
-  cell <- rep(seq_along(i0), i1 - i0 + 1L)
-  share <- wc[cell] * (br[seg + 1L] - br[seg]) / span[cell]
-  m <- as.numeric(tapply(share, factor(seg, levels = seq_len(length(br) - 1L)),
-                         sum))
-  m[is.na(m)] <- 0
-  m <- m / sum(m)
-  list(q = .nl_box_cdf_quantile(br, m, probs), declined = NA_character_,
-       edge_coord = bx$coord, edge_declined = bx$declined)
 }
 
 # The BOX-UNIFORM within-cell read: each cell's shipped mass spread uniformly
@@ -761,20 +693,15 @@ tulpa_theta_matrix <- function(res) .nl_theta_matrix(res)
 # NA when it did. The caller falls back to the chord read on any decline, so an
 # axis the partition could not be built for still reports an interval.
 #
-# `rows` (`.nl_axis_cell_rows()`) is the row structure of a refined axis, NULL
-# for one no refinement re-tiled: each cell then reads the box its own row's
-# partition gives it (`.nl_box_quantile_rows()`).
+# `declared` is `.nl_level_edges()`'s.
 .nl_box_quantile <- function(values, weights, probs, domain = NA_character_,
-                             atom = NA_real_, rows = NULL) {
+                             atom = NA_real_, declared = NULL) {
   v <- as.numeric(values)
   w <- as.numeric(weights)
   fin  <- is.finite(v)
   wpos <- fin & is.finite(w) & w > 0
   if (!any(wpos)) {
     return(list(q = rep(NA_real_, length(probs)), declined = "no_usable_node"))
-  }
-  if (!is.null(rows)) {
-    return(.nl_box_quantile_rows(v, w, probs, domain, atom, rows))
   }
   uv <- sort(unique(v[fin]))
   m <- as.numeric(tapply(w[wpos], factor(match(v[wpos], uv),
@@ -796,18 +723,18 @@ tulpa_theta_matrix <- function(res) .nl_theta_matrix(res)
     if (length(sp$v) < 1L || sp$mass >= 1) {
       return(list(q = rep(sp$value, length(probs)), declined = "single_node"))
     }
-    bx <- .nl_box_quantile(sp$v, sp$w, .nl_atom_rescale(probs, sp$mass), domain)
+    bx <- .nl_box_quantile(sp$v, sp$w, .nl_atom_rescale(probs, sp$mass), domain,
+                           declared = declared)
     if (!is.null(bx$q)) bx$q[probs <= sp$mass] <- sp$value
     return(bx)
   }
   if (length(uv) < 2L) {
     return(list(q = rep(uv[1L], length(probs)), declined = "single_node"))
   }
-  pt <- .nl_cell_partition(uv, domain)
-  e <- .nl_box_edges_from(pt, uv)
-  if (is.null(e)) return(list(q = NULL, declined = "boxes_do_not_tile"))
-  list(q = .nl_box_cdf_quantile(e, m, probs), declined = NA_character_,
-       edge_coord = pt$coord, edge_declined = pt$declined)
+  le <- .nl_level_edges(uv, domain, declared)
+  if (is.null(le)) return(list(q = NULL, declined = "boxes_do_not_tile"))
+  list(q = .nl_box_cdf_quantile(le$e, m, probs), declined = NA_character_,
+       edge_coord = le$pt$coord, edge_declined = le$pt$declined)
 }
 
 # The `.NL_DOMAIN_TRANSFORM` entry a DECLARED `c(lower, upper)` support is, or
@@ -966,7 +893,8 @@ tulpa_theta_matrix <- function(res) .nl_theta_matrix(res)
 #    width, which is the same reason its `outside` policy clamps.
 #  * `moment_rule` -- never reaches the quantile read at all.
 .NL_SUPPORT <- list(
-  density     = list(outside = "extend",      within = c("box_uniform", "chord")),
+  density     = list(outside = "extend",
+                     within = c("box_uniform", "log_quadratic", "chord")),
   moment_rule = list(outside = NA_character_, within = "chord"),
   mixed       = list(outside = "extend",      within = "chord"),
   sample      = list(outside = "clamp",       within = "chord")
@@ -987,7 +915,7 @@ tulpa_theta_matrix <- function(res) .nl_theta_matrix(res)
 # is the subset it admits, and is held to this vocabulary by
 # `test-within-cell-box-uniform.R` the same way `outside` is held to
 # `.nl_wtd_quantile()`'s.
-.NL_WITHIN_CELL <- c("box_uniform", "chord")
+.NL_WITHIN_CELL <- c("box_uniform", "log_quadratic", "chord")
 
 # Median and interval of one quantity, given what KIND of node set carries it.
 #
@@ -1025,10 +953,11 @@ tulpa_theta_matrix <- function(res) .nl_theta_matrix(res)
 .nl_summary_quantile <- function(values, weights, probs,
                                  domain = NA_character_,
                                  support = .NL_SUPPORT_KINDS,
-                                 within = .NL_WITHIN_CELL,
-                                 atom = NA_real_, rows = NULL) {
+                                 within = NULL,
+                                 atom = NA_real_, declared = NULL, row_id = NULL,
+                                 log_density = NULL) {
   .nl_summary_quantile_read(values, weights, probs, domain, support, within,
-                            atom, rows)$q
+                            atom, declared, row_id, log_density)$q
 }
 
 # The same dispatch, returning what actually RAN alongside the numbers: the
@@ -1039,10 +968,11 @@ tulpa_theta_matrix <- function(res) .nl_theta_matrix(res)
 .nl_summary_quantile_read <- function(values, weights, probs,
                                       domain = NA_character_,
                                       support = .NL_SUPPORT_KINDS,
-                                      within = .NL_WITHIN_CELL,
-                                      atom = NA_real_, rows = NULL) {
+                                      within = NULL,
+                                      atom = NA_real_, declared = NULL,
+                                      row_id = NULL, log_density = NULL) {
   support <- match.arg(support)
-  within  <- match.arg(within)
+  within  <- .nl_within_cell_mode(within)
   chord <- function(declined = NA_character_) {
     outside <- .NL_SUPPORT[[support]]$outside
     ep <- NULL
@@ -1070,13 +1000,43 @@ tulpa_theta_matrix <- function(res) .nl_theta_matrix(res)
   if (!within %in% .NL_SUPPORT[[support]]$within) {
     return(chord(paste0("support_", support)))
   }
-  bx <- .nl_box_quantile(values, weights, probs, domain, atom, rows)
-  if (is.na(bx$declined)) {
-    return(list(q = bx$q, within = within, declined = NA_character_,
-                edge_coord    = bx$edge_coord    %||% NA_character_,
-                edge_declined = bx$edge_declined %||% NA_character_))
+  ran <- function(r, what, declined) {
+    list(q = r$q, within = what, declined = declined,
+         edge_coord    = r$edge_coord    %||% NA_character_,
+         edge_declined = r$edge_declined %||% NA_character_)
   }
+  # The log-quadratic read declines to the box read, which declines to the
+  # chord read; the reason recorded is the requested read's own, unless the box
+  # read declined too, whose reason then names why neither ran.
+  lq_declined <- NA_character_
+  if (identical(within, "log_quadratic")) {
+    lq <- .nl_lq_quantile(values, weights, probs, domain, atom, declared,
+                          row_id, log_density)
+    if (is.na(lq$declined)) return(ran(lq, within, NA_character_))
+    lq_declined <- lq$declined
+  }
+  bx <- .nl_box_quantile(values, weights, probs, domain, atom, declared)
+  if (is.na(bx$declined)) return(ran(bx, "box_uniform", lq_declined))
   chord(bx$declined)
+}
+
+# The standard deviation of the distribution `.nl_summary_quantile_read()` reads
+# an interval off, taken from that read's own quantile function by the midpoint
+# rule over `.nl_diag("read_sd_nodes")` probabilities. The same dispatch with
+# the same arguments takes the same construction -- box, chord, moment rule, a
+# point mass split off -- so the SD and the interval describe one distribution
+# whichever of them ran. NA where the read has no finite quantile function.
+.nl_read_sd <- function(values, weights, domain = NA_character_,
+                        support = .NL_SUPPORT_KINDS,
+                        within = NULL,
+                        atom = NA_real_, declared = NULL, row_id = NULL,
+                        log_density = NULL) {
+  k <- as.integer(.nl_diag("read_sd_nodes"))
+  q <- .nl_summary_quantile_read(values, weights, (seq_len(k) - 0.5) / k,
+                                 domain, support, within, atom, declared,
+                                 row_id, log_density)$q
+  if (is.null(q) || !all(is.finite(q))) return(NA_real_)
+  sqrt(mean((q - mean(q))^2))
 }
 
 # What kind of node set the producer left behind. `integration` names what RAN,
@@ -1313,15 +1273,13 @@ tulpa_theta_matrix <- function(res) .nl_theta_matrix(res)
 # theta_ci_hi` alongside `theta_mean / theta_sd` for every hyperparameter.
 #
 # `tg` is a vector or matrix; `log_marginal` aligns with `tg` rows;
-# `refining` is the per-cell refining-axis tag from mode-tracked
-# refinement (NULL or all-"" outside the joint path).
+# `refining` is the per-cell refinement tag (`.hyper_slice_home()`, NULL or
+# all-"" on a grid no pass refined).
 #
 # The cell masses are the posterior measure: `weights` where the caller holds
-# them, `log_marginal + log_quad` otherwise. Every cell, slice cells included,
-# then carries its own box's mass (`.hyper_refined_log_quad()`), so an axis is
-# read off all of them. With no measure at all a cell's `log_marginal` is not a
-# mass, and only the base tensor, where every level appears in every row, can be
-# summed as one; slice cells are left out of that read (`.nl_axis_read_cells()`).
+# them, `log_marginal + log_quad` otherwise. `refining` says which levels were
+# declared, which fix the partition's outer edges
+# (`.nl_axis_declared_levels()`).
 #
 # Returns list(median = named_vec, ci_lo = named_vec, ci_hi = named_vec).
 # For scalar tg the returned vectors are length-1 with names = "value".
@@ -1350,10 +1308,10 @@ tulpa_theta_matrix <- function(res) .nl_theta_matrix(res)
                                 weights = NULL, log_quad = NULL,
                                 support = .NL_SUPPORT_KINDS,
                                 domains = NULL,
-                                within = .NL_WITHIN_CELL,
-                                atoms = NULL) {
+                                within = NULL,
+                                atoms = NULL, sd = FALSE) {
   support <- match.arg(support)
-  within  <- match.arg(within)
+  within  <- .nl_within_cell_mode(within)
   if (is.null(dim(tg))) {
     tg <- matrix(as.numeric(tg), ncol = 1L,
                  dimnames = list(NULL, "value"))
@@ -1366,13 +1324,17 @@ tulpa_theta_matrix <- function(res) .nl_theta_matrix(res)
     return(list(median = empty, ci_lo = empty, ci_hi = empty,
                 within = empty_c, within_declined = empty_c,
                 edge_coord = empty_c, edge_declined = empty_c,
-                outside_nodes = empty_c))
+                outside_nodes = empty_c, sd = empty, ess = empty))
   }
   nms <- .nl_axis_names(tg)
   n_ax <- length(nms)
   lo  <- setNames(rep(NA_real_, n_ax), nms)
   med <- setNames(rep(NA_real_, n_ax), nms)
   hi  <- setNames(rep(NA_real_, n_ax), nms)
+  # The SD of the distribution each interval is read off, and the effective
+  # number of levels its marginal spreads over; filled only when `sd` asks.
+  rsd <- setNames(rep(NA_real_, n_ax), nms)
+  ess <- setNames(rep(NA_real_, n_ax), nms)
   wc  <- setNames(rep(NA_character_, n_ax), nms)
   wcd <- setNames(rep(NA_character_, n_ax), nms)
   ec  <- setNames(rep(NA_character_, n_ax), nms)
@@ -1389,14 +1351,15 @@ tulpa_theta_matrix <- function(res) .nl_theta_matrix(res)
   # say so.
   onn <- setNames(rep(NA_character_, n_ax), nms)
   if (!is.null(log_quad) && length(log_quad) != nrow(tg)) log_quad <- NULL
+  # The node density, before any cell measure is folded in: what the
+  # log-quadratic read interpolates.
+  log_density <- if (length(log_marginal) == nrow(tg)) log_marginal else NULL
   if (is.null(weights) && !is.null(log_quad)) {
     log_marginal <- log_marginal + log_quad
     log_marginal[is.na(log_marginal)] <- -Inf
   }
-  keep <- .nl_axis_read_cells(refining, nrow(tg),
-                              measured = !is.null(weights) || !is.null(log_quad))
   for (j in seq_len(n_ax)) {
-    use   <- keep & is.finite(tg[, j])
+    use   <- is.finite(tg[, j])
     if (sum(use) == 0L) next
     # Precomputed integration weights (CCD design weights * exp(log-marginal),
     # passed for scattered node sets where the per-axis softmax of the raw
@@ -1415,9 +1378,17 @@ tulpa_theta_matrix <- function(res) .nl_theta_matrix(res)
     }
     dm <- if (length(domains) < j) NA_character_ else domains[[j]]
     at <- if (length(atoms) < j) NA_real_ else atoms[[j]]
-    rows <- .nl_cell_rows_subset(.nl_axis_cell_rows(tg, j, refining), use)
+    dcl  <- .nl_axis_declared_levels(tg, j, refining)
+    rid  <- .nl_axis_row_id(tg, j)[use]
+    lmd  <- log_density[use]
     rd <- .nl_summary_quantile_read(as.numeric(tg[use, j]), ws, probs, dm,
-                                    support, within, at, rows)
+                                    support, within, at, dcl, rid, lmd)
+    if (isTRUE(sd)) {
+      rsd[j] <- .nl_read_sd(as.numeric(tg[use, j]), ws, dm, support, within,
+                            at, dcl, rid, lmd)
+      lev <- as.numeric(tapply(ws, as.numeric(tg[use, j]), sum))
+      ess[j] <- .nl_axis_quad_ess(log(lev))
+    }
     qs <- rd$q
     lo[j]  <- qs[1L]
     med[j] <- qs[2L]
@@ -1439,7 +1410,7 @@ tulpa_theta_matrix <- function(res) .nl_theta_matrix(res)
   list(median = med, ci_lo = lo, ci_hi = hi,
        within = wc, within_declined = wcd,
        edge_coord = ec, edge_declined = ecd,
-       outside_nodes = onn)
+       outside_nodes = onn, sd = rsd, ess = ess)
 }
 
 # The RESOLUTION of each outer-grid axis: its cell width `h`, the posterior SD
@@ -1471,8 +1442,8 @@ tulpa_theta_matrix <- function(res) .nl_theta_matrix(res)
 # posterior mode, a stronger statement about the fit than any ratio, while
 # `too_few_nodes` is an axis too short to fit a parabola on. Reported per axis
 # rather than folded into the NA, because the reader's next move differs.
-.nl_axis_resolution <- function(tg, log_marginal, refining = NULL,
-                                domains = NULL, atoms = NULL) {
+.nl_axis_resolution <- function(tg, log_marginal, domains = NULL,
+                                atoms = NULL) {
   if (is.null(dim(tg))) {
     tg <- matrix(as.numeric(tg), ncol = 1L, dimnames = list(NULL, "value"))
   }
@@ -1484,9 +1455,8 @@ tulpa_theta_matrix <- function(res) .nl_theta_matrix(res)
   if (n_ax == 0L) {
     return(list(h = h, sd = sd, h_over_sd = h, declined = dec))
   }
-  keep <- .nl_axis_read_cells(refining, nrow(tg), measured = FALSE)
   for (j in seq_len(n_ax)) {
-    marg <- .nl_axis_marginal_logdensity(tg[, j], log_marginal, keep)
+    marg <- .nl_axis_marginal_logdensity(tg[, j], log_marginal)
     v  <- marg$vals
     lm <- marg$log_marg
     # A declared point mass owns no cell, so it has no width to contribute and
@@ -1560,12 +1530,13 @@ tulpa_theta_matrix <- function(res) .nl_theta_matrix(res)
   res$theta_cell_edge_coord      <- qs$edge_coord
   res$theta_cell_edge_declined   <- qs$edge_declined
   if (identical(res$theta_interval_read, "density")) {
-    rs <- .nl_axis_resolution(tg, res$log_marginal, res$refining_axis, domains,
+    rs <- .nl_axis_resolution(tg, res$log_marginal, domains,
                               atoms)
     res$outer_grid_cell_width <- rs$h
     res$outer_grid_axis_sd    <- rs$sd
     res$outer_grid_h_over_sd  <- rs$h_over_sd
     res$outer_grid_resolution_declined <- rs$declined
+    res <- .nl_align_unresolved_sd(res, qs)
   }
   # An axis whose grid does not contain its own mode is a placement fact, and
   # `.nl_axis_rail()` reads it off the stored weights alone. Attached here so a
@@ -1579,6 +1550,41 @@ tulpa_theta_matrix <- function(res) .nl_theta_matrix(res)
   # on it, so it is named on its own rather than only when it also rails.
   res$outer_grid_edge_mass_axes <- res$outer_grid_edge_mass_axes %||%
     .nl_edge_mass_axes(res)
+  res
+}
+
+# An axis the grid did not resolve reports the SD of the distribution its
+# interval is read off. Below `.nl_diag("axis_sd_ess")` the weighted read is
+# not a spread, and where no parabola could be formed either it stayed the
+# reported number -- zero on an axis collapsed onto one node, beside an interval
+# the within-cell read spreads over that node's whole cell (gcol33/tulpa#919).
+# The replacement is `qs$sd`, the SD `.nl_axis_quantiles()` took off the very
+# read that produced `theta_ci_lo` / `theta_ci_hi`, and the axis's
+# `theta_sd_source` says `"within_cell"`. A finite parabola is kept: it is a
+# curvature the grid measured, which the cell width is not.
+#
+# A path that stamps no `theta_sd_source` reported the weighted read on every
+# axis, and says so once one is aligned.
+.nl_align_unresolved_sd <- function(res, qs) {
+  sd <- res$theta_sd
+  if (is.null(sd) || is.null(qs$sd) || length(qs$sd) != length(sd)) return(res)
+  src <- res$theta_sd_source
+  if (length(src) != length(sd)) src <- rep("weighted", length(sd))
+  names(src) <- names(sd)
+  min_ess <- .nl_diag("axis_sd_ess")
+  hit <- FALSE
+  for (j in seq_along(sd)) {
+    e <- qs$ess[[j]]
+    r <- qs$sd[[j]]
+    if (!is.finite(e) || e >= min_ess || !is.finite(r)) next
+    if (identical(unname(src[j]), "stencil")) next
+    sd[[j]] <- r
+    src[j]  <- "within_cell"
+    hit     <- TRUE
+  }
+  if (!hit) return(res)
+  res$theta_sd        <- sd
+  res$theta_sd_source <- src
   res
 }
 
@@ -1600,100 +1606,6 @@ tulpa_theta_matrix <- function(res) .nl_theta_matrix(res)
   d <- ncol(tg)
   if (d == 0L) return(character(0))
   colnames(tg) %||% paste0("V", seq_len(d))
-}
-
-# One axis's marginal mass on a grid carrying refinement slice cells, collected
-# on the boxes of all its levels.
-#
-# A level's cells do not share one box along the axis there. A row whose fibre
-# carries slice cells is tiled by its own nodes (nearest node on `tr`'s
-# coordinate, the outer edges the wider of the base boxes' and the fibre's own
-# mirror); every other row keeps the base levels' boxes. Summing mass by level
-# puts the mass of every row's wide base box at a base coordinate beside a slice
-# level that holds one row's narrow box, so a read treating a level's mass as
-# spread over that level's box sees a spike at the base node. Each cell's mass is
-# instead spread uniformly over the box its row gives it and re-collected on the
-# level boxes `.nl_box_edges()` builds for the whole level set.
-#
-# `w` are the cells' masses (non-negative, any scale), `home` the per-cell
-# refinement home (`.hyper_slice_home()`). Returns the sorted levels and their
-# masses, or NULL where the boxes cannot be formed.
-.nl_axis_row_projection <- function(tg, j, w, home, tr) {
-  v <- as.numeric(tg[, j])
-  ok <- is.finite(v) & is.finite(w) & w > 0
-  if (!any(ok)) return(NULL)
-  lv <- sort(unique(v[is.finite(v)]))
-  base_lv <- sort(unique(v[is.finite(v) & !nzchar(home)]))
-  if (length(lv) < 2L || length(base_lv) < 2L) return(NULL)
-  edges_of <- function(x) {
-    ux <- tr$to(x)
-    n <- length(ux)
-    c(ux[1L] - (ux[2L] - ux[1L]) / 2, ux[-1L] / 2 + ux[-n] / 2,
-      ux[n] + (ux[n] - ux[n - 1L]) / 2)
-  }
-  base_e <- edges_of(base_lv)
-  others <- tg[, -j, drop = FALSE]
-  key <- if (ncol(others)) {
-    apply(others, 1L, function(r) paste(sprintf("%.17g", r), collapse = "|"))
-  } else rep("", nrow(tg))
-  lo <- hi <- rep(NA_real_, nrow(tg))
-  for (idx in split(which(is.finite(v)), key[is.finite(v)])) {
-    fv <- sort(unique(v[idx]))
-    if (all(base_lv %in% fv) && length(fv) > length(base_lv)) {
-      fe <- edges_of(fv)
-      fe[1L] <- min(fe[1L], base_e[1L])
-      fe[length(fe)] <- max(fe[length(fe)], base_e[length(base_e)])
-      k <- match(v[idx], fv)
-      lo[idx] <- fe[k]; hi[idx] <- fe[k + 1L]
-    } else {
-      k <- match(v[idx], base_lv)
-      in_base <- !is.na(k)
-      lo[idx[in_base]] <- base_e[k[in_base]]
-      hi[idx[in_base]] <- base_e[k[in_base] + 1L]
-    }
-  }
-  ok <- ok & is.finite(lo) & is.finite(hi) & hi > lo
-  if (!any(ok)) return(NULL)
-  le <- edges_of(lv)
-  le[1L] <- min(le[1L], lo[ok])
-  le[length(le)] <- max(le[length(le)], hi[ok])
-  if (!all(is.finite(le)) || is.unsorted(le, strictly = TRUE)) return(NULL)
-  m <- numeric(length(lv))
-  for (i in which(ok)) {
-    ov <- pmax(0, pmin(hi[i], le[-1L]) - pmax(lo[i], le[-length(le)]))
-    m <- m + w[i] * ov / (hi[i] - lo[i])
-  }
-  list(vals = lv, mass = m)
-}
-
-# The default coordinate an axis's boxes are laid on where no domain is declared:
-# log on an all-positive axis, the value itself otherwise -- the same guess
-# `.nl_laplace_at_mode_sd_axis()` makes.
-.nl_axis_default_tr <- function(v) {
-  v <- v[is.finite(v)]
-  if (length(v) && all(v > 0)) .NL_DOMAIN_TRANSFORM$positive
-  else .NL_DOMAIN_TRANSFORM$unbounded
-}
-
-# One axis's marginal as `.nl_axis_marginal_logdensity()` returns it, taken
-# through `.nl_axis_row_projection()` on a grid carrying refinement slice cells.
-# `lm_eff` is the per-cell log mass. Any other grid, or a projection that cannot
-# form its boxes, reads the level sums unchanged.
-.nl_axis_marginal_read <- function(tg, j, lm_eff, keep, home) {
-  if (is.character(j)) j <- match(j, colnames(tg))
-  if (any(nzchar(home))) {
-    m <- max(lm_eff[keep])
-    if (is.finite(m)) {
-      w <- exp(lm_eff - m)
-      w[!keep | !is.finite(w)] <- 0
-      pr <- .nl_axis_row_projection(tg, j, w, home,
-                                    .nl_axis_default_tr(tg[keep, j]))
-      if (!is.null(pr)) {
-        return(list(vals = pr$vals, log_marg = log(pr$mass)))
-      }
-    }
-  }
-  .nl_axis_marginal_logdensity(tg[, j], lm_eff, keep)
 }
 
 .nl_axis_marginal_logdensity <- function(vals, log_marg, keep = NULL) {
@@ -1847,7 +1759,7 @@ tulpa_theta_matrix <- function(res) .nl_theta_matrix(res)
 }
 
 # Which estimator produced a reported axis SD.
-.NL_AXIS_SD_SOURCE <- c("weighted", "stencil")
+.NL_AXIS_SD_SOURCE <- c("weighted", "stencil", "within_cell")
 
 # The SD to report for ONE axis, and which estimator produced it.
 #
@@ -1860,11 +1772,11 @@ tulpa_theta_matrix <- function(res) .nl_theta_matrix(res)
 # discrete spread is not a spread. `.nl_diag("axis_sd_ess")` carries the
 # measured threshold and the ladder it came off.
 #
-# `stencil_ok = FALSE` withholds the parabola entirely. A design-weighted grid
-# is the case: a central-composite design's nodes are not a per-axis lattice, so
-# a 3-point profile across them is not the curvature of anything, while the
-# corrected design weights reproduce the Gaussian moments and the weighted read
-# IS the calibrated SD there.
+# `stencil_ok = FALSE` withholds the parabola entirely, and `stencil_declined`
+# names why. A design-weighted grid is one case: a central-composite design's
+# nodes are not a per-axis lattice, so a 3-point profile across them is not the
+# curvature of anything, while the corrected design weights reproduce the
+# Gaussian moments and the weighted read IS the calibrated SD there.
 #
 # Returns the SD, its source, the ESS the choice was made on, and -- where the
 # parabola was wanted and could not be formed -- the reason it declined, so a
@@ -1872,7 +1784,8 @@ tulpa_theta_matrix <- function(res) .nl_theta_matrix(res)
 # than reporting a floor as a spread.
 .nl_axis_sd_choice <- function(vals, log_marg, log_axis = NULL, coord = NULL,
                                min_ess = .nl_diag("axis_sd_ess"),
-                               stencil_ok = TRUE, mass = FALSE) {
+                               stencil_ok = TRUE, mass = FALSE,
+                               stencil_declined = "design_weighted") {
   out <- list(sd = NA_real_, source = NA_character_, ess = NA_real_,
               declined = NA_character_)
   if (!length(vals)) return(out)
@@ -1890,7 +1803,7 @@ tulpa_theta_matrix <- function(res) .nl_theta_matrix(res)
   resolved <- is.finite(ess) && ess >= min_ess
   if (resolved && is.finite(out$sd)) return(out)
   if (!isTRUE(stencil_ok)) {
-    out$declined <- "design_weighted"
+    out$declined <- stencil_declined
     return(out)
   }
   sd_sten <- .nl_laplace_at_mode_sd_axis(vals, log_marg, log_axis = log_axis,
@@ -1907,17 +1820,16 @@ tulpa_theta_matrix <- function(res) .nl_theta_matrix(res)
 # Report `theta_sd` (and `block_moments[[b]]$sd` when present) per axis, each
 # from the estimator its own resolution calls for (`.nl_axis_sd_choice()`).
 #
-# Called from `.nl_posterior_moments()`, so every nested path -- single-block,
-# spatiotemporal, joint, joint multi-block -- reports one rule, and separately
-# by `tulpa_hyper_grid()`, which assembles its own moments.
+# Called from `.nl_posterior_moments()` (single-block, spatiotemporal, joint),
+# from the two multi-block moment builders (`.nl_posterior_moments_multi()`,
+# `.joint_posterior_moments_multi()`), and by `tulpa_hyper_grid()`, which
+# assembles its own moments -- so every nested path reports one rule.
 #
-# The marginal carries the fit's cell measure `log_quad`, under which every cell
-# of a refined grid holds its own box's mass, so every cell is read; a grid with
-# no measure is read off its base tensor alone (`.nl_axis_read_cells()`).
+# The marginal carries the fit's cell measure `log_quad` where the fit has one.
 # `theta_sd_source` / `theta_sd_ess` /
 # `theta_sd_stencil_declined` travel on the fit, so which estimator produced a
 # reported SD is a property of the fit rather than of the reader's assumption.
-.nl_attach_axis_sd <- function(res, refining = NULL) {
+.nl_attach_axis_sd <- function(res) {
   # A design-weighted grid carries no per-axis lattice for a parabola to read.
   stencil_ok <- !any(res$weight_kind %in% "design")
   if (is.null(res$theta_grid) || is.null(res$log_marginal)) return(res)
@@ -1941,10 +1853,6 @@ tulpa_theta_matrix <- function(res) .nl_theta_matrix(res)
     res$theta_sd_stencil_declined <- ch$declined
     return(res)
   }
-  if (is.null(refining)) refining <- res$refining_axis
-  keep <- .nl_axis_read_cells(refining, nrow(tg), measured = measured)
-  home <- if (measured && stencil_ok) .hyper_slice_home(refining, nrow(tg))
-          else rep("", nrow(tg))
   col_names <- colnames(tg)
   if (!is.null(col_names) && !is.null(res$theta_sd)) {
     src <- stats::setNames(rep(NA_character_, length(col_names)), col_names)
@@ -1952,10 +1860,11 @@ tulpa_theta_matrix <- function(res) .nl_theta_matrix(res)
     dec <- src
     for (col in col_names) {
       if (!col %in% names(res$theta_sd)) next
-      marg <- .nl_axis_marginal_read(tg, match(col, col_names), lm_eff, keep,
-                                     home)
+      j <- match(col, col_names)
+      marg <- .nl_axis_marginal_logdensity(tg[, j], lm_eff)
       ch <- .nl_axis_sd_choice(marg$vals, marg$log_marg,
-                               stencil_ok = stencil_ok, mass = measured)
+                               stencil_ok = stencil_ok, mass = measured,
+                               stencil_declined = "design_weighted")
       if (is.finite(ch$sd)) res$theta_sd[[col]] <- ch$sd
       src[[col]] <- ch$source
       ess[[col]] <- ch$ess
@@ -1972,9 +1881,10 @@ tulpa_theta_matrix <- function(res) .nl_theta_matrix(res)
       if (is.null(axis_cols) || length(axis_cols) == 0L) next
       for (j in seq_along(axis_cols)) {
         col_ix <- axis_cols[j]
-        marg <- .nl_axis_marginal_read(tg, col_ix, lm_eff, keep, home)
+        marg <- .nl_axis_marginal_logdensity(tg[, col_ix], lm_eff)
         ch <- .nl_axis_sd_choice(marg$vals, marg$log_marg,
-                                 stencil_ok = stencil_ok, mass = measured)
+                                 stencil_ok = stencil_ok, mass = measured,
+                                 stencil_declined = "design_weighted")
         if (is.finite(ch$sd)) res$block_moments[[b]]$sd[[j]] <- ch$sd
         res$block_moments[[b]]$sd_source[j] <- ch$source
       }
@@ -1987,8 +1897,8 @@ tulpa_theta_matrix <- function(res) .nl_theta_matrix(res)
 #  * joint moments: across all axes (same as single-block 2D scatter).
 #  * per-block marginal moments: integrate out the other blocks' axes.
 .nl_posterior_moments_multi <- function(out, prepared, axis_offsets, joint_grid,
-                                        within = .NL_WITHIN_CELL) {
-  within <- match.arg(within)
+                                        within = NULL) {
+  within <- .nl_within_cell_mode(within)
   w  <- out$weights
   tg <- joint_grid
   out$theta_mean <- as.numeric(crossprod(w, tg))
@@ -2023,6 +1933,9 @@ tulpa_theta_matrix <- function(res) .nl_theta_matrix(res)
     )
   }
   out$block_moments <- per_block_moments
+  # Each axis's SD from the estimator its own resolution calls for, the rule
+  # `.nl_posterior_moments()` applies on every other nested path.
+  out <- .nl_attach_axis_sd(out)
 
   # Weighted-quantile median + 2.5/97.5 CI per axis (calibrated summary
   # for right-skewed scale-like hyperparameters; see `.nl_axis_quantiles`).
@@ -2031,7 +1944,7 @@ tulpa_theta_matrix <- function(res) .nl_theta_matrix(res)
                                    blocks = prepared))
   qs <- .nl_axis_quantiles(
     joint_grid, out$log_marginal, out$refining_axis, log_quad = out$log_quad,
-    domains = geo$domain, within = within, atoms = geo$atom)
+    domains = geo$domain, within = within, atoms = geo$atom, sd = TRUE)
   out$theta_median <- qs$median
   out$theta_ci_lo  <- qs$ci_lo
   out$theta_ci_hi  <- qs$ci_hi

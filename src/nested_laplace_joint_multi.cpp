@@ -51,6 +51,7 @@
 // offset.
 
 #include "areal_input_check.h"    // check_areal_adjacency
+#include "block_projector.h"       // projected areal fields (RSR)
 #include "bym2_mixing.h"           // BYM2_RHO_EPS + the mixing amplitudes
 #include "cell_coupling_registry.h"
 #include "cell_curvature3.h"        // coupled-cell gamma_3 tensor contraction
@@ -69,9 +70,11 @@
 #include "nl_entry_inputs.h"        // nl_attach_fitted_eta_single_arm
 #include "unit_precision_block.h"
 #include "car_proper_block.h"
+#include "field_block_priors.h"
 #include "nested_laplace_joint_batch.h"   // fused batched scatter
 #include "sparse_hessian.h"
 #include "hsgp_block_factory.h"
+#include "nngp_block_factory.h"
 #include "hsgp_mo_block_factory.h"
 #include "latent_factor_block_factory.h"
 #include "mcar_block_factory.h"
@@ -95,6 +98,18 @@
 #endif
 
 namespace {
+
+// control$hessian's step curvature as R codes it: 0 observed ("lm" / "psd"),
+// 1 expected ("fisher"), 2 auto.
+tulpa::StepCurvature step_curvature_from_code(int code) {
+    switch (code) {
+    case 0: return tulpa::StepCurvature::Observed;
+    case 1: return tulpa::StepCurvature::Expected;
+    case 2: return tulpa::StepCurvature::Auto;
+    default:
+        Rcpp::stop("step_curvature_mode must be 0, 1 or 2 (got %d).", code);
+    }
+}
 
 // The coupled-cell gamma_3 contraction for one joint solve.
 // Snapshots the coupled arms' response pointers, family tags and the dispersion
@@ -281,11 +296,6 @@ make_field_center_fn(int start, int size, int beta_offset) {
     };
 }
 
-// Relative tolerance for accepting a design column as the weight the field's
-// centering constant folds into: tight enough to catch a wrong column, loose
-// enough for a design assembled in floating point.
-inline constexpr double kAliasColumnTol = 1e-9;
-
 // Defensive check that a block's alias column really carries the weight the
 // field is seen through, so a wrong beta_offset cannot silently shift eta.
 //
@@ -326,7 +336,7 @@ inline void check_alias_column(
         for (int i = 0; i < m; ++i) {
             const double wi  = weight_list ? w[i] : 1.0;
             const double xij = pa.X(i, beta_offset);
-            if (std::abs(xij - wi) > kAliasColumnTol * (1.0 + std::abs(wi))) {
+            if (std::abs(xij - wi) > tulpa::kAliasColumnTol * (1.0 + std::abs(wi))) {
                 Rcpp::stop("Block %d (%s): the centering constant folds into "
                            "coefficient %d, whose design column must carry the "
                            "field weight; arm %d obs %d has %g against %g. An "
@@ -337,6 +347,47 @@ inline void check_alias_column(
                            i + 1, xij, wi);
             }
         }
+    }
+}
+
+// The per-arm projector of an areal block (`projector` on its spec), or null
+// when the block reads its units through `spatial_idx`; arm k's row count is
+// its observation count.
+inline std::shared_ptr<std::vector<tulpa::ARows>> read_joint_block_projector(
+    const Rcpp::List& bs, int n_arms, int size, int block_index,
+    const std::string& type, const std::vector<tulpa::JointArm>* arms_ptr
+) {
+    if (!bs.containsElementNamed("projector") || Rf_isNull(bs["projector"]))
+        return nullptr;
+    if (!arms_ptr || static_cast<int>(arms_ptr->size()) != n_arms) {
+        Rcpp::stop("Block %d (type '%s'): a projector needs the arms' "
+                   "observation counts.", block_index + 1, type.c_str());
+    }
+    Rcpp::IntegerVector n_obs(n_arms);
+    for (int k = 0; k < n_arms; k++) n_obs[k] = (*arms_ptr)[k].N;
+    return tulpa::read_block_projector(bs, n_obs, size, block_index, type);
+}
+
+// Centerer of a projected intrinsic field, placed where tulpa::projected_level()
+// reads the field's level. `centre_uniform` is false where the gathered field
+// installs no centerer (a replicated L > 1 ICAR); the fold is then withheld the
+// same way.
+inline void install_projected_field_center(
+    tulpa::LatentBlock& block, int start, int size,
+    const std::vector<tulpa::ParsedArm>& parsed,
+    const std::vector<tulpa::ARows>& rows_per_arm, bool centre_uniform
+) {
+    const tulpa::ProjectedLevel level = tulpa::projected_level(
+        rows_per_arm, [&parsed](int k, int i, double& x0) {
+            const tulpa::ParsedArm& pa = parsed[k];
+            if (pa.p == 0 || i >= pa.X.nrow()) return false;
+            x0 = pa.X(i, 0);
+            return true;
+        });
+    if (level == tulpa::ProjectedLevel::ABSENT) {
+        block.center = make_field_center_fn(start, size, /*no fold=*/-1);
+    } else if (level == tulpa::ProjectedLevel::INTERCEPT && centre_uniform) {
+        block.center = make_field_center_fn(start, size, /*intercept=*/0);
     }
 }
 
@@ -359,8 +410,14 @@ inline void install_field_center(
     tulpa::LatentBlock& block, const Rcpp::List& bs, int start, int size,
     const std::vector<tulpa::ParsedArm>& parsed, int block_index,
     std::function<std::vector<tulpa::CenterFold>(Rcpp::NumericVector&)>
-        uniform_center
+        uniform_center,
+    const std::vector<tulpa::ARows>* projector = nullptr
 ) {
+    if (projector) {
+        install_projected_field_center(block, start, size, parsed, *projector,
+                                       static_cast<bool>(uniform_center));
+        return;
+    }
     const std::string what = bs.containsElementNamed("type")
                              ? Rcpp::as<std::string>(bs["type"])
                              : std::string("field");
@@ -479,7 +536,6 @@ int build_joint_blocks_from_spec(
 
     if (type == "icar") {
         int size = Rcpp::as<int>(bs["n_spatial_units"]);
-        Rcpp::List spatial_idx_list = bs["spatial_idx"];
         Rcpp::IntegerVector adj_rp = bs["adj_row_ptr"];
         Rcpp::IntegerVector adj_ci = bs["adj_col_idx"];
         Rcpp::IntegerVector n_nbr  = bs["n_neighbors"];
@@ -493,10 +549,14 @@ int build_joint_blocks_from_spec(
             size, adj_rp.begin(), adj_ci.begin());
         int start = latent_offset;
 
+        const auto projector = read_joint_block_projector(bs, n_arms, size,
+                                                          block_index, type, arms_ptr);
+
         tulpa::LatentBlock block;
         block.start = start;
         block.size  = size;
-        block.idx   = make_per_arm_idx_fn(spatial_idx_list, n_arms,
+        if (!projector)
+            block.idx = make_per_arm_idx_fn(bs["spatial_idx"], n_arms,
                                             "spatial_idx", block_index, arms_ptr);
         block.row_weight = make_per_arm_row_weight_fn(bs, n_arms, block_index, arms_ptr);
 
@@ -505,23 +565,6 @@ int build_joint_blocks_from_spec(
             block.d_fac = [](int) -> double { return 1.0; };
             block.arm_scale = make_copy_arm_scale_fn(
                 copy_arm, axis0, axis0 + 1, theta_grid, arms_ptr);
-            block.add_prior = [start, size, adj_rp, adj_ci, n_nbr, sp_part](
-                tulpa::DenseVec& grad, tulpa::DenseMat& H,
-                const Rcpp::NumericVector& x, int /*k*/) {
-                tulpa::add_icar_prior(grad, H, x, start, size, /*tau=*/1.0,
-                                       adj_rp, adj_ci, n_nbr, sp_part);
-            };
-            block.add_prior_sparse = [start, size, adj_rp, adj_ci, n_nbr, sp_part](
-                tulpa::SparseHessianBuilder& H, tulpa::DenseVec& grad,
-                const Rcpp::NumericVector& x, int /*k*/) {
-                tulpa::add_icar_prior_sparse(grad, H, x, start, size, /*tau=*/1.0,
-                                              adj_rp, adj_ci, n_nbr, sp_part);
-            };
-            block.log_prior = [start, size, adj_rp, adj_ci, n_nbr, sp_part](
-                const Rcpp::NumericVector& x, int /*k*/) -> double {
-                return tulpa::log_prior_icar(x, start, size, /*tau=*/1.0,
-                                              adj_rp, adj_ci, n_nbr, sp_part);
-            };
         } else {
             require_axes(1);  // (tau,)
             block.d_fac = [](int) -> double { return 1.0; };
@@ -533,36 +576,16 @@ int build_joint_blocks_from_spec(
             if (any_nontrivial_field_coef) {
                 block.arm_scale = make_field_coef_arm_scale_fn(arms_ptr);
             }
-            block.add_prior = [start, size, axis0, theta_grid,
-                                adj_rp, adj_ci, n_nbr, sp_part](
-                tulpa::DenseVec& grad, tulpa::DenseMat& H,
-                const Rcpp::NumericVector& x, int k) {
-                double tau = theta_grid(k, axis0);
-                tulpa::add_icar_prior(grad, H, x, start, size, tau,
-                                       adj_rp, adj_ci, n_nbr, sp_part);
-            };
-            block.add_prior_sparse = [start, size, axis0, theta_grid,
-                                       adj_rp, adj_ci, n_nbr, sp_part](
-                tulpa::SparseHessianBuilder& H, tulpa::DenseVec& grad,
-                const Rcpp::NumericVector& x, int k) {
-                double tau = theta_grid(k, axis0);
-                tulpa::add_icar_prior_sparse(grad, H, x, start, size, tau,
-                                              adj_rp, adj_ci, n_nbr, sp_part);
-            };
-            block.log_prior = [start, size, axis0, theta_grid,
-                                adj_rp, adj_ci, n_nbr, sp_part](
-                const Rcpp::NumericVector& x, int k) -> double {
-                double tau = theta_grid(k, axis0);
-                return tulpa::log_prior_icar(x, start, size, tau,
-                                              adj_rp, adj_ci, n_nbr, sp_part);
-            };
         }
         block.contrib_kind = tulpa::BlockContribKind::INDEXED_SINGLE;
-        block.prior_kind   = tulpa::PriorFillKind::ADJACENCY;
-        block.add_prior_pattern = [start, size, adj_rp, adj_ci, sp_part](
-            std::vector<std::pair<int,int>>& out) {
-            tulpa::add_icar_pattern(out, start, size, adj_rp, adj_ci, sp_part);
-        };
+        // A copy block holds tau at 1, its amplitude riding arm_scale.
+        tulpa::set_icar_block_priors(
+            block, start, size,
+            [is_copy_block, theta_grid, axis0](int k) {
+                return is_copy_block ? 1.0 : theta_grid(k, axis0);
+            },
+            adj_rp, adj_ci, n_nbr, sp_part);
+        if (projector) tulpa::apply_block_projector(block, projector);
         // Uniform ICAR: the global constant aliases with the arm intercept -- a
         // single connected component folds it into offset 0; a replicated L > 1
         // field leaves the L per-component means to the precision augmentation (a
@@ -575,7 +598,8 @@ int build_joint_blocks_from_spec(
             sp_part.n_components() > 1
                 ? std::function<std::vector<tulpa::CenterFold>(
                       Rcpp::NumericVector&)>()
-                : make_field_center_fn(start, size, /*intercept=*/0));
+                : make_field_center_fn(start, size, /*intercept=*/0),
+            projector.get());
         blocks.push_back(block);
         return start + size;
     }
@@ -650,7 +674,6 @@ int build_joint_blocks_from_spec(
 
     if (type == "bym2") {
         int size = Rcpp::as<int>(bs["n_spatial_units"]);
-        Rcpp::List spatial_idx_list = bs["spatial_idx"];
         Rcpp::IntegerVector adj_rp = bs["adj_row_ptr"];
         Rcpp::IntegerVector adj_ci = bs["adj_col_idx"];
         Rcpp::IntegerVector n_nbr  = bs["n_neighbors"];
@@ -661,9 +684,18 @@ int build_joint_blocks_from_spec(
         int theta_start = phi_start + size;
         const tulpa::GraphPartition sp_part = tulpa::graph_partition(
             size, adj_rp.begin(), adj_ci.begin());
+        // Per-component BYM2 scaling beyond the reference scale_factor (#902).
+        const std::vector<double> node_prec = tulpa::read_node_prec(
+            bs.containsElementNamed("node_prec") ? SEXP(bs["node_prec"])
+                                                 : R_NilValue,
+            size, "blocks_spec (bym2)");
 
-        auto idx_fn = make_per_arm_idx_fn(spatial_idx_list, n_arms,
-                                           "spatial_idx", block_index, arms_ptr);
+        const auto projector = read_joint_block_projector(bs, n_arms, size,
+                                                          block_index, type, arms_ptr);
+        std::function<int(int, int)> idx_fn;
+        if (!projector)
+            idx_fn = make_per_arm_idx_fn(bs["spatial_idx"], n_arms,
+                                         "spatial_idx", block_index, arms_ptr);
         auto row_weight_fn = make_per_arm_row_weight_fn(bs, n_arms,
                                                         block_index, arms_ptr);
 
@@ -717,38 +749,17 @@ int build_joint_blocks_from_spec(
         phi_block.d_fac = d_fac_phi_fn;
         if (arm_scale_fn)  phi_block.arm_scale  = arm_scale_fn;
         if (row_weight_fn) phi_block.row_weight = row_weight_fn;
-        phi_block.add_prior = [phi_start, size, adj_rp, adj_ci, n_nbr, sp_part](
-            tulpa::DenseVec& grad, tulpa::DenseMat& H,
-            const Rcpp::NumericVector& x, int /*k*/) {
-            tulpa::add_icar_prior(grad, H, x, phi_start, size, /*tau=*/1.0,
-                                   adj_rp, adj_ci, n_nbr, sp_part);
-        };
-        phi_block.add_prior_sparse = [phi_start, size, adj_rp, adj_ci, n_nbr, sp_part](
-            tulpa::SparseHessianBuilder& H, tulpa::DenseVec& grad,
-            const Rcpp::NumericVector& x, int /*k*/) {
-            tulpa::add_icar_prior_sparse(grad, H, x, phi_start, size,
-                                          /*tau=*/1.0,
-                                          adj_rp, adj_ci, n_nbr, sp_part);
-        };
         phi_block.contrib_kind = tulpa::BlockContribKind::INDEXED_SINGLE;
-        phi_block.prior_kind   = tulpa::PriorFillKind::ADJACENCY;
-        phi_block.add_prior_pattern = [phi_start, size, adj_rp, adj_ci, sp_part](
-            std::vector<std::pair<int,int>>& out) {
-            tulpa::add_icar_pattern(out, phi_start, size, adj_rp, adj_ci, sp_part);
-        };
-        phi_block.log_prior = [phi_start, size, adj_rp, adj_ci, n_nbr, sp_part](
-            const Rcpp::NumericVector& x, int /*k*/) -> double {
-            // Structured ICAR component (tau = 1); shares the quadratic form and
-            // the sum-to-zero penalty with add_icar_prior so the objective stays
-            // consistent with the gradient, instead of re-deriving them inline.
-            return tulpa::log_prior_icar_structured(x, phi_start, size, /*tau=*/1.0,
-                                                    adj_rp, adj_ci, n_nbr, sp_part);
-        };
+        tulpa::set_icar_block_priors(
+            phi_block, phi_start, size, [](int) { return 1.0; },
+            adj_rp, adj_ci, n_nbr, sp_part, node_prec, /*structured=*/true);
         // BYM2's structured component aliases like a plain ICAR (uniform: arm
         // intercept; weighted areal SVC: the covariate coefficient). The
         // unstructured theta component below stays uncentred (proper N(0, I)).
+        if (projector) tulpa::apply_block_projector(phi_block, projector);
         install_field_center(phi_block, bs, phi_start, size, parsed, block_index,
-                             make_field_center_fn(phi_start, size, /*intercept=*/0));
+                             make_field_center_fn(phi_start, size, /*intercept=*/0),
+                             projector.get());
         blocks.push_back(phi_block);
 
         tulpa::LatentBlock theta_block;
@@ -764,23 +775,26 @@ int build_joint_blocks_from_spec(
         // No add_prior_pattern: prior is diagonal, builder adds it
         // unconditionally.
         // theta has no centering: prior is symmetric.
+        if (projector) tulpa::apply_block_projector(theta_block, projector);
         blocks.push_back(theta_block);
         return theta_start + size;
     }
 
     if (type == "car_proper") {
         int size = Rcpp::as<int>(bs["n_spatial_units"]);
-        Rcpp::List spatial_idx_list = bs["spatial_idx"];
         Rcpp::IntegerVector adj_rp = bs["adj_row_ptr"];
         Rcpp::IntegerVector adj_ci = bs["adj_col_idx"];
         Rcpp::IntegerVector n_nbr  = bs["n_neighbors"];
         check_adjacency(adj_rp, adj_ci, n_nbr, size);
         int start = latent_offset;
+        const auto projector = read_joint_block_projector(bs, n_arms, size,
+                                                          block_index, type, arms_ptr);
 
         tulpa::LatentBlock block;
         block.start = start;
         block.size  = size;
-        block.idx   = make_per_arm_idx_fn(spatial_idx_list, n_arms,
+        if (!projector)
+            block.idx = make_per_arm_idx_fn(bs["spatial_idx"], n_arms,
                                             "spatial_idx", block_index, arms_ptr);
         block.row_weight = make_per_arm_row_weight_fn(bs, n_arms, block_index, arms_ptr);
         block.d_fac = [](int) -> double { return 1.0; };
@@ -821,6 +835,7 @@ int build_joint_blocks_from_spec(
         }
         block.contrib_kind = tulpa::BlockContribKind::INDEXED_SINGLE;
         block.prior_kind   = tulpa::PriorFillKind::ADJACENCY;
+        if (projector) tulpa::apply_block_projector(block, projector);
         blocks.push_back(block);
         return start + size;
     }
@@ -864,57 +879,12 @@ int build_joint_blocks_from_spec(
         // pin that identifies the level against the intercept. A copy block
         // pins at tau = 1 like the rest of its precision, the scale riding on
         // the copy coefficient.
-        if (type == "rw1") {
-            block.add_prior = [start, size, axis0, theta_grid, cyclic,
-                                is_copy_block](
-                tulpa::DenseVec& grad, tulpa::DenseMat& H,
-                const Rcpp::NumericVector& x, int k) {
-                double tau = is_copy_block ? 1.0 : theta_grid(k, axis0);
-                tulpa::add_rw1_field(grad, H, x, start, 1, size, tau, cyclic);
-            };
-            block.add_prior_sparse = [start, size, axis0, theta_grid, cyclic,
-                                       is_copy_block](
-                tulpa::SparseHessianBuilder& H, tulpa::DenseVec& grad,
-                const Rcpp::NumericVector& x, int k) {
-                double tau = is_copy_block ? 1.0 : theta_grid(k, axis0);
-                tulpa::add_rw1_field_sparse(grad, H, x, start, 1, size, tau, cyclic);
-            };
-            block.add_prior_pattern = [start, size, cyclic](
-                std::vector<std::pair<int,int>>& out) {
-                tulpa::add_rw1_field_pattern(out, start, 1, size, cyclic);
-            };
-            block.log_prior = [start, size, axis0, theta_grid, cyclic,
-                                is_copy_block](
-                const Rcpp::NumericVector& x, int k) -> double {
-                double tau = is_copy_block ? 1.0 : theta_grid(k, axis0);
-                return tulpa::log_prior_rw1_field(x, start, 1, size, tau, cyclic);
-            };
-        } else {
-            block.add_prior = [start, size, axis0, theta_grid, cyclic,
-                               is_copy_block](
-                tulpa::DenseVec& grad, tulpa::DenseMat& H,
-                const Rcpp::NumericVector& x, int k) {
-                double tau = is_copy_block ? 1.0 : theta_grid(k, axis0);
-                tulpa::add_rw2_field(grad, H, x, start, 1, size, tau, cyclic);
-            };
-            block.add_prior_sparse = [start, size, axis0, theta_grid, cyclic,
-                                       is_copy_block](
-                tulpa::SparseHessianBuilder& H, tulpa::DenseVec& grad,
-                const Rcpp::NumericVector& x, int k) {
-                double tau = is_copy_block ? 1.0 : theta_grid(k, axis0);
-                tulpa::add_rw2_field_sparse(grad, H, x, start, 1, size, tau, cyclic);
-            };
-            block.add_prior_pattern = [start, size, cyclic](
-                std::vector<std::pair<int,int>>& out) {
-                tulpa::add_rw2_field_pattern(out, start, 1, size, cyclic);
-            };
-            block.log_prior = [start, size, axis0, theta_grid, cyclic,
-                               is_copy_block](
-                const Rcpp::NumericVector& x, int k) -> double {
-                double tau = is_copy_block ? 1.0 : theta_grid(k, axis0);
-                return tulpa::log_prior_rw2_field(x, start, 1, size, tau, cyclic);
-            };
-        }
+        tulpa::set_temporal_block_priors(
+            block, type, start, /*n_groups=*/1, size,
+            [is_copy_block, theta_grid, axis0](int k) {
+                return is_copy_block ? 1.0 : theta_grid(k, axis0);
+            },
+            [](int) { return 0.0; }, cyclic);
         block.contrib_kind = tulpa::BlockContribKind::INDEXED_SINGLE;
         block.prior_kind   = tulpa::PriorFillKind::ADJACENCY;
         // Uniform RW folds its constant into the intercept; a temporal SVC (TVC)
@@ -959,35 +929,14 @@ int build_joint_blocks_from_spec(
             }
             axis_rho = axis0 + 1;
         }
-        block.add_prior = [start, size, axis0, axis_rho, theta_grid,
-                            is_copy_block](
-            tulpa::DenseVec& grad, tulpa::DenseMat& H,
-            const Rcpp::NumericVector& x, int k) {
-            double tau = is_copy_block ? 1.0 : theta_grid(k, axis0);
-            double rho = theta_grid(k, axis_rho);
-            tulpa::add_ar1_precision(grad, H, x, start, size, tau, rho);
-        };
-        block.add_prior_sparse = [start, size, axis0, axis_rho, theta_grid,
-                                   is_copy_block](
-            tulpa::SparseHessianBuilder& H, tulpa::DenseVec& grad,
-            const Rcpp::NumericVector& x, int k) {
-            double tau = is_copy_block ? 1.0 : theta_grid(k, axis0);
-            double rho = theta_grid(k, axis_rho);
-            tulpa::add_ar1_precision_sparse(grad, H, x, start, size, tau, rho);
-        };
         block.contrib_kind = tulpa::BlockContribKind::INDEXED_SINGLE;
-        block.prior_kind   = tulpa::PriorFillKind::ADJACENCY;
-        block.add_prior_pattern = [start, size](
-            std::vector<std::pair<int,int>>& out) {
-            tulpa::add_ar1_pattern(out, start, size);
-        };
-        block.log_prior = [start, size, axis0, axis_rho, theta_grid,
-                            is_copy_block](
-            const Rcpp::NumericVector& x, int k) -> double {
-            double tau = is_copy_block ? 1.0 : theta_grid(k, axis0);
-            double rho = theta_grid(k, axis_rho);
-            return tulpa::log_prior_ar1(x, start, size, tau, rho);
-        };
+        tulpa::set_temporal_block_priors(
+            block, type, start, /*n_groups=*/1, size,
+            [is_copy_block, theta_grid, axis0](int k) {
+                return is_copy_block ? 1.0 : theta_grid(k, axis0);
+            },
+            [theta_grid, axis_rho](int k) { return theta_grid(k, axis_rho); },
+            /*cyclic=*/false);
         // AR1's precision is full rank for |rho| < 1, so the field level is
         // identified by the prior and nothing is centered -- the same rule the
         // proper-CAR branch above follows.
@@ -1106,6 +1055,63 @@ int build_joint_blocks_from_spec(
         return latent_offset + size;
     }
 
+    if (type == "nngp") {
+        if (is_copy_block) {
+            Rcpp::stop("Block %d: copy semantics for NNGP blocks are not "
+                       "supported (spatial copy only on icar / "
+                       "bym2 / car_proper).",
+                       block_index + 1);
+        }
+        require_axes(2);  // (sigma2, phi_gp)
+        tulpa::nl_grid_axis_positive("nngp sigma2 axis", theta_grid, axis0);
+        tulpa::nl_grid_axis_positive("nngp phi_gp axis", theta_grid,
+                                     axis0 + 1);
+        const int n_spatial = Rcpp::as<int>(bs["n_spatial"]);
+        const auto projector = read_joint_block_projector(
+            bs, n_arms, n_spatial, block_index, type, arms_ptr);
+
+        // Per-arm unit index and row count. A projected field reaches no unit
+        // through the gather: every row of every arm reads 0 ("no field on
+        // this row") until the projector replaces it.
+        Rcpp::List sidx_per_arm(n_arms);
+        Rcpp::IntegerVector n_obs_per_arm(n_arms);
+        if (projector) {
+            for (int k = 0; k < n_arms; k++) {
+                n_obs_per_arm[k] = (*arms_ptr)[k].N;
+                sidx_per_arm[k] = Rcpp::IntegerVector(n_obs_per_arm[k], 0);
+            }
+        } else {
+            Rcpp::List given = bs["spatial_idx"];
+            if (static_cast<int>(given.size()) != n_arms) {
+                Rcpp::stop("blocks_spec[[%d]]$spatial_idx must be a list of "
+                           "length n_arms (%d), got %d.", block_index + 1,
+                           n_arms, static_cast<int>(given.size()));
+            }
+            for (int k = 0; k < n_arms; k++) {
+                Rcpp::IntegerVector sidx = given[k];
+                n_obs_per_arm[k] = (arms_ptr && k < static_cast<int>(arms_ptr->size()))
+                                   ? (*arms_ptr)[k].N
+                                   : static_cast<int>(sidx.size());
+                sidx_per_arm[k] = sidx;
+            }
+        }
+        tulpa::LatentBlock block = tulpa::make_nngp_block(
+            latent_offset, n_spatial, sidx_per_arm, n_obs_per_arm, n_arms,
+            block_index, Rcpp::as<int>(bs["nn"]), Rcpp::as<int>(bs["cov_type"]),
+            Rcpp::as<Rcpp::NumericMatrix>(bs["coords"]),
+            Rcpp::as<Rcpp::IntegerMatrix>(bs["nn_idx"]),
+            Rcpp::as<Rcpp::NumericMatrix>(bs["nn_dist"]),
+            Rcpp::as<Rcpp::IntegerVector>(bs["nn_order"]),
+            /*axis_sigma2=*/axis0, /*axis_phi_gp=*/axis0 + 1, theta_grid);
+        block.row_weight = make_per_arm_row_weight_fn(bs, n_arms, block_index,
+                                                      arms_ptr);
+        // The NNGP prior is proper and carries its own level, so nothing is
+        // centred, projected or not.
+        if (projector) tulpa::apply_block_projector(block, projector);
+        blocks.push_back(block);
+        return latent_offset + n_spatial;
+    }
+
     if (type == "hsgp") {
         if (is_copy_block) {
             Rcpp::stop("Block %d: copy semantics for HSGP blocks are not "
@@ -1113,7 +1119,10 @@ int build_joint_blocks_from_spec(
                        "bym2 / car_proper).",
                        block_index + 1);
         }
-        require_axes(2);  // (log_sigma2, log_lengthscale)
+        require_axes(2);  // (sigma2, lengthscale)
+        tulpa::nl_grid_axis_positive("hsgp sigma2 axis", theta_grid, axis0);
+        tulpa::nl_grid_axis_positive("hsgp lengthscale axis", theta_grid,
+                                     axis0 + 1);
 
         int m_total = Rcpp::as<int>(bs["m_total"]);
         Rcpp::List phi_per_arm = bs["phi"];
@@ -1124,8 +1133,8 @@ int build_joint_blocks_from_spec(
             latent_offset, m_total,
             phi_per_arm, n_obs_per_arm, n_arms, block_index,
             eigenvalues,
-            /*axis_log_sigma2=*/axis0,
-            /*axis_log_ell=*/axis0 + 1,
+            /*axis_sigma2=*/axis0,
+            /*axis_ell=*/axis0 + 1,
             theta_grid
         );
         blocks.push_back(block);
@@ -1396,7 +1405,8 @@ Rcpp::List cpp_nested_laplace_joint_multi(
     int                 inner_sparse_override = 0,
     int                 screen_iters = 2,  // cheap-screen Newton steps per cell
     Rcpp::Nullable<Rcpp::NumericVector> screen_log_offset = R_NilValue,  // per-cell screen offset
-    bool                compute_fitted_var = true  // per-cell predictive variance of eta; see want_eta_var below
+    bool                compute_fitted_var = true,  // per-cell predictive variance of eta; see want_eta_var below
+    bool                screen_only = false  // return the screened surface, no full pass (run_nested_laplace_grid)
 ) {
     const tulpa::JointFixedBlockRequest fixed_block_req =
         parse_joint_fixed_block_request(fixed_block_p, fixed_block_constraints);
@@ -1516,12 +1526,10 @@ Rcpp::List cpp_nested_laplace_joint_multi(
     tulpa::JointPDMode pd_mode =
         (hessian_pd_mode == 1) ? tulpa::JointPDMode::PSD : tulpa::JointPDMode::LM;
 
-    // Inner Newton step curvature: Expected = complete-data Fisher (PSD by
-    // construction) when control$hessian = "fisher"; otherwise the observed
-    // mixture Hessian. The final mode-pass always uses Observed regardless.
-    tulpa::CurvatureMode step_curvature =
-        (step_curvature_mode == 1) ? tulpa::CurvatureMode::Expected
-                                   : tulpa::CurvatureMode::Observed;
+    // Inner Newton step curvature (control$hessian; joint_pd_step.h). The
+    // final mode-pass always uses Observed regardless.
+    const tulpa::StepCurvature step_curvature =
+        step_curvature_from_code(step_curvature_mode);
 
     // Build the reporter when either channel is wanted: the console line under
     // `progress` (the verbose/TTY channel), or the heartbeat file whenever
@@ -1645,8 +1653,8 @@ Rcpp::List cpp_nested_laplace_joint_multi(
         inner_sparse_override,
         screen_iters,
         want_eta_var,
-        screen_log_offset.isNull() ? std::vector<double>()
-            : Rcpp::as<std::vector<double>>(screen_log_offset)
+        tulpa::read_screen_offset(screen_log_offset),
+        screen_only
     );
     // Per-cell eta at each cell's own mode. The driver leaves `modes` behind
     // but no linear predictor, so a fit through this entry carried nothing for
@@ -1774,8 +1782,7 @@ Rcpp::List cpp_nested_laplace_joint_multi_batch(
         n_grid, n_batch, arms, parsed, blocks, n_x_after_re, buf,
         max_iter, tol, spec, store_Q,
         (hessian_pd_mode == 1) ? tulpa::JointPDMode::PSD : tulpa::JointPDMode::LM,
-        (step_curvature_mode == 1) ? tulpa::CurvatureMode::Expected
-                                   : tulpa::CurvatureMode::Observed,
+        step_curvature_from_code(step_curvature_mode),
         force_sparse,
         fixed_block_req.active() ? &fixed_block_req : nullptr,
         compute_fitted_var);
@@ -1803,7 +1810,7 @@ Rcpp::List cpp_nested_laplace_joint_multi_batch(
 // a Matrix::sparseMatrix from it and assert exact pattern equality against
 // hand-computed references.
 //
-// No Newton iteration, no scatter, no factorization — pure pattern. Use
+// No Newton iteration, no scatter, no factorization ? pure pattern. Use
 // theta_grid with a single dummy row when the block factory needs a
 // theta_grid (axis_offsets must still cover the schema for each block
 // type's prep callback to validate at parse time).
@@ -2092,7 +2099,7 @@ Rcpp::List tulpa::run_multi_block_nested_laplace_joint(
     bool                             force_sparse,
     std::shared_ptr<CellCouplingSpec> cell_coupling_spec,
     JointPDMode                      pd_mode,
-    CurvatureMode                    step_curvature,
+    StepCurvature                    step_curvature,
     int                              hessian_refresh,
     tulpa_progress::GridProgress*    progress,
     GridCheckpoint*                  checkpoint,
@@ -2108,7 +2115,8 @@ Rcpp::List tulpa::run_multi_block_nested_laplace_joint(
     int                              inner_sparse_override,
     int                              screen_iters,
     bool                             compute_eta_var,
-    const std::vector<double>&       screen_log_offset) {
+    const ScreenOffset&              screen_log_offset,
+    bool                             screen_only) {
     const int n_arms = static_cast<int>(arms.size());
     if (static_cast<int>(parsed.size()) != n_arms) {
         Rcpp::stop("parsed and arms vectors must have the same length.");
@@ -2176,7 +2184,7 @@ Rcpp::List tulpa::run_multi_block_nested_laplace_joint(
             step_curvature, hessian_refresh, n_threads_outer, progress,
             checkpoint, x_init_per_cell,
             compute_skew, skew_probe_idx, fixed_block, debias, cila,
-            screen_iters, compute_eta_var, screen_log_offset
+            screen_iters, compute_eta_var, screen_log_offset, screen_only
         );
     }
 
@@ -2252,6 +2260,7 @@ Rcpp::List tulpa::run_multi_block_nested_laplace_joint(
                                    = nullptr,
                                    int cheap_worker = 0) -> LaplaceResult
     {
+        const int n_inner = tulpa::nl_cell_solve_threads(n_threads, n_threads_inner_eff);
         // A cheap-screen call (scratch_override != nullptr) uses its worker's
         // private specs view; the full solve uses the shared `specs`.
         const bool is_cheap = (scratch_override != nullptr);
@@ -2332,19 +2341,18 @@ Rcpp::List tulpa::run_multi_block_nested_laplace_joint(
                 // tulpa_parallel_for takes a plain loop rather than entering
                 // libgomp for a team of one. Each row
                 // is independent, so the two routes compute the same numbers.
-                tulpa_parallel_for(n_threads_inner_eff, N_k, [&](int i) {
+                tulpa_parallel_for(n_inner, N_k, [&](int i) {
                     etas[k_arm][i] = row_eta(i);
                 });
             }
         };
 
-        // `finalize` selects the coupled-cell curvature: the inner Newton step
-        // uses `step_curvature` (Expected = Fisher scoring when
-        // control$hessian = "fisher"); the final mode-pass uses the observed
-        // Hessian for log_det_Q and the SEs.
+        // `cm` is the coupled-cell curvature the Newton loop asks for: the
+        // inner step's under `step_curvature` (joint_pd_step.h), the observed
+        // Hessian on the final mode-pass for log_det_Q and the SEs.
         auto scatter_joint = [&](const Rcpp::NumericVector& x,
                                  const std::vector<Rcpp::NumericVector>& etas,
-                                 DenseVec& grad, DenseMat& H, bool finalize) {
+                                 DenseVec& grad, DenseMat& H, CurvatureMode cm) {
             for (int k_arm = 0; k_arm < n_arms; k_arm++) {
                 // Cell-coupled arms route through the per-cell branch
                 // below; skip their per-obs scatter.
@@ -2356,8 +2364,6 @@ Rcpp::List tulpa::run_multi_block_nested_laplace_joint(
                 );
             }
             if (any_coupling) {
-                const CurvatureMode cm =
-                    finalize ? CurvatureMode::Observed : step_curvature;
                 scatter_cell_coupling_dense_branch(
                     *cell_coupling_spec, coupled_arms, cell_rows, n_cells,
                     arms, parsed, etas, blocks, k_grid, grad, H, cm
@@ -2391,14 +2397,14 @@ Rcpp::List tulpa::run_multi_block_nested_laplace_joint(
                                        ? *scratch_override
                                        : scratch_pool[tid];
 
-        JointSpecLogLik joint_ll{&specs_use.views, n_threads_inner_eff};
+        JointSpecLogLik joint_ll{&specs_use.views, n_inner};
         if (any_coupling) {
             joint_ll.skip_arm = &arm_is_coupled;
             joint_ll.cell_coupling_log_lik_fn =
                 [&](const std::vector<Rcpp::NumericVector>& e) {
                     return eval_cell_coupling_log_lik(
                         *cell_coupling_spec, coupled_arms, cell_rows, n_cells,
-                        arms, e
+                        arms, e, /*phi_override=*/nullptr, n_inner
                     );
                 };
         }
@@ -2432,6 +2438,7 @@ Rcpp::List tulpa::run_multi_block_nested_laplace_joint(
             compute_eta_joint, scatter_joint, center_joint, log_prior_joint,
             joint_ll, scratch, prev_mode, shared_solver,
             store_Q, pd_mode,
+            effective_step_curvature(step_curvature, any_coupling),
             compute_skew && !is_cheap, skew_probe_idx,
             (compute_skew && !is_cheap) ? &skew_curvature3_fns : nullptr,
             is_cheap ? nullptr : fixed_block,
@@ -2489,7 +2496,8 @@ Rcpp::List tulpa::run_multi_block_nested_laplace_joint(
         n_grid, n_x, solve_at_theta, x_init, store_modes, n_outer,
         tile_ids, tile_pilot_cells,
         cheap_eval, prune_tol, progress, checkpoint, x_init_per_cell,
-        screen_iters, tulpa::NoResumeRefill{}, screen_log_offset
+        screen_iters, tulpa::NoResumeRefill{}, screen_log_offset,
+        screen_only
     );
     pattern_guard.check("the joint nested-Laplace outer grid");
     return out;
@@ -2516,7 +2524,7 @@ Rcpp::List tulpa::run_multi_block_nested_laplace_joint_sparse_impl(
     const std::vector<std::vector<std::vector<int>>>& cell_rows,
     int                              n_cells,
     JointPDMode                      pd_mode,
-    CurvatureMode                    step_curvature,
+    StepCurvature                    step_curvature,
     int                              hessian_refresh,
     int                              n_threads_outer,
     tulpa_progress::GridProgress*    progress,
@@ -2529,7 +2537,8 @@ Rcpp::List tulpa::run_multi_block_nested_laplace_joint_sparse_impl(
     const CilaOptions*               cila,
     int                              screen_iters,
     bool                             compute_eta_var,
-    const std::vector<double>&       screen_log_offset
+    const ScreenOffset&              screen_log_offset,
+    bool                             screen_only
 ) {
     const int n_arms = static_cast<int>(arms.size());
     const int B      = static_cast<int>(blocks.size());
@@ -2543,8 +2552,10 @@ Rcpp::List tulpa::run_multi_block_nested_laplace_joint_sparse_impl(
     // Outer-grid parallelism. Each full per-cell solve owns mutable state that
     // cannot be shared across concurrent cells -- the sparse Hessian builder,
     // the Newton scratch, the per-arm likelihood specs (whose built-in
-    // dispersion the phi-grid axis rewrites per cell), the scatter index cache,
-    // and the DENSE_BASIS scratch -- so each outer thread gets its own. The
+    // dispersion the phi-grid axis rewrites per cell) and the DENSE_BASIS
+    // scratch -- so each outer thread gets its own. The scatter index cache and
+    // the coupled scatter plan are read-only offsets into the shared pattern,
+    // so one of each serves every thread. The
     // cheap-screen sweep is not serial either -- it chains per-tile across the
     // same outer workers -- so it is worker-indexed the same way and SHARES
     // these pools slot for slot, the two phases being disjoint in time; only
@@ -2569,9 +2580,9 @@ Rcpp::List tulpa::run_multi_block_nested_laplace_joint_sparse_impl(
     // The pattern is fit-level invariant; a builder copy shares the read-only
     // entry_map (shared_ptr, O(1)) and deep-copies only the per-thread CSC
     // arrays + the mutable `values`, so the copies cost a memcpy rather than a
-    // re-enumeration. The scatter cache's flat slots are identical across
-    // builders sharing the pattern, so it too is built once and copied,
-    // re-pointed at the owning builder.
+    // re-enumeration. The scatter cache's and the coupled plan's flat slots are
+    // identical across builders sharing the pattern, and both are keyed on the
+    // pattern rather than on a builder, so each is built once and shared.
     std::vector<SparseHessianBuilder> H_builders(1);
     if (progress) progress->note("preparing joint Hessian sparsity pattern");
     { TULPA_PROFILE_PHASE(PHASE_PATTERN_BUILD);
@@ -2619,10 +2630,11 @@ Rcpp::List tulpa::run_multi_block_nested_laplace_joint_sparse_impl(
         // a fixed 2 GB, when the queries are unavailable.
         //
         // Both readings are taken ONCE per session. A live reading makes the
-        // resolved outer width -- and through it the scatter partition, the
-        // summation order, and the last bits of every reported number -- a
-        // function of what else the machine happened to be doing at the moment
-        // of the call, so the same model fitted twice in one session could
+        // resolved outer width -- and through it the warm-start route, the
+        // uncoupled arms' inner reduction width, and the last bits of every
+        // reported number -- a function of what else the machine happened to
+        // be doing at the moment of the call, so the same model fitted twice
+        // in one session could
         // disagree. The model-dependent term (`per_thread`) is still computed
         // per call, so a larger model is still clamped harder; only the
         // machine-state term is frozen.
@@ -2676,15 +2688,21 @@ Rcpp::List tulpa::run_multi_block_nested_laplace_joint_sparse_impl(
     // the copies bind to it.
     H_builders.resize(n_outer);
 
-    // Per-thread scatter index cache (validity keyed on the owning builder's H
-    // pointer). Built once against slot 0, then copied + re-pointed below.
-    std::vector<ScatterIndexCache> idx_caches(n_outer);
+    // Scatter index cache for the uncoupled arms and flat-offset plan for the
+    // coupled ones, resolved once against slot 0's pattern and read by every
+    // builder that shares it.
+    ScatterIndexCache  idx_cache;
+    CoupledScatterPlan coupled_plan;
     { TULPA_PROFILE_PHASE(PHASE_PATTERN_BUILD);
-      build_scatter_index_cache(parsed, arms, blocks, H_builders[0], idx_caches[0]);
+      build_scatter_index_cache(parsed, arms, blocks, H_builders[0], idx_cache,
+                                &arm_is_coupled);
+      if (any_coupling) {
+          build_coupled_scatter_plan(parsed, arms, blocks, coupled_arms,
+                                     cell_rows, n_cells, n_x, H_builders[0],
+                                     coupled_plan);
+      }
       for (int t = 1; t < n_outer; t++) {
           H_builders[t] = H_builders[0];     // shares the read-only pattern
-          idx_caches[t] = idx_caches[0];
-          idx_caches[t].cache_H_ptr = static_cast<const void*>(&H_builders[t]);
       } }
 
     const bool want_fixed_block = fixed_block && fixed_block->active();
@@ -2747,6 +2765,7 @@ Rcpp::List tulpa::run_multi_block_nested_laplace_joint_sparse_impl(
                                    bool use_cheap_scratch,
                                    int cheap_worker = 0) -> LaplaceResult
     {
+        const int n_inner = tulpa::nl_cell_solve_threads(n_threads, n_threads_inner_eff);
         // Pick this outer thread's resource slot. The cheap-screen sweep uses
         // the cheap_* pool indexed by its worker slot (serial -> 0, per-tile
         // parallel -> omp thread id); the full solve uses the per-thread pool
@@ -2762,42 +2781,6 @@ Rcpp::List tulpa::run_multi_block_nested_laplace_joint_sparse_impl(
         // omp thread id), each in [0, n_outer).
         const int slot = use_cheap_scratch ? cheap_worker : tid;
         JointArmSpecs& specs_use = specs_pool[slot];
-
-        // Inner-thread budget for the coupled-cell scatter, and with it the
-        // number of chunks that scatter partitions its cell loop into. Floor at
-        // the static grid budget (1 whenever the outer grid saturates the pool,
-        // so the bulk stays byte-identical); raise it in the grid's tail, where
-        // fewer cells remain than the outer pool is wide, so the freed threads
-        // steal this cell's scatter chunks.
-        //
-        // The tail width is read from the cell INDEX, not from a count of solves
-        // in flight. The chunk count sets the partition, the partition sets the
-        // summation order, and floating-point addition is not associative -- so
-        // deriving it from instantaneous concurrency made the returned numbers a
-        // function of what else the machine was doing, and two identical fits
-        // could disagree in their last bits. `n_grid - k_grid` bounds the peers
-        // this cell can have exactly as the in-flight count estimated it, while
-        // depending only on the grid geometry. `n_outer` stands in for the team
-        // width for the same reason: omp_get_num_threads() can be moved by an
-        // OMP dynamic team adjustment, and n_outer cannot.
-        //
-        // Parallelism is NOT lost by this: the chunks are dispatched as OpenMP
-        // tasks, so however many threads are actually idle drain them. Only the
-        // partition is pinned, never the number of workers that execute it.
-        int inner_budget = n_threads_inner_eff;
-        if (!use_cheap_scratch) {
-            // tulpa::kCouplingForceParallel (TULPA_COUPLING_FORCE_PARALLEL)
-            // hands every cell the full inner width rather than only the tail
-            // cells, so a small grid exercises the parallel reduce.
-            const int remaining = n_grid - k_grid;   // this cell included
-            const int peers = remaining < 1 ? 1
-                            : (remaining < n_outer ? remaining : n_outer);
-            const int tail = tulpa::kCouplingForceParallel
-                             ? n_outer : n_outer / peers;
-            if (tail > inner_budget) inner_budget = tail;
-            if (inner_budget > n_outer) inner_budget = n_outer;
-            if (inner_budget < 1) inner_budget = 1;
-        }
 
         // phi-grid axis: prep_at_grid rewrites the SHARED `arms` dispersion for
         // this cell, then sync copies it into THIS thread's specs. Both run
@@ -2875,18 +2858,17 @@ Rcpp::List tulpa::run_multi_block_nested_laplace_joint_sparse_impl(
         };
 
         SparseHessianBuilder& H_use = H_builders[slot];
-        const ScatterIndexCache* idx_cache_use = &idx_caches[slot];
+        const ScatterIndexCache* idx_cache_use = &idx_cache;
 
-        // `finalize` selects the curvature for the coupled-cell scatter: the
-        // inner Newton step uses `step_curvature` (Expected = Fisher scoring,
-        // PSD by construction, when control$hessian = "fisher"), while the
-        // final mode-pass always uses the observed Hessian so log_det_Q and the
-        // SEs are the true curvature at the mode.
+        // `cm` is the coupled-cell curvature the Newton loop asks for: the
+        // inner step's under `step_curvature` (joint_pd_step.h), the observed
+        // Hessian on the final mode-pass so log_det_Q and the SEs are the true
+        // curvature at the mode.
         auto scatter_joint_sparse = [&](const Rcpp::NumericVector& x,
                                          const std::vector<Rcpp::NumericVector>& etas,
                                          DenseVec& grad,
                                          SparseHessianBuilder& H,
-                                         bool finalize,
+                                         CurvatureMode cm,
                                          bool grad_only) {
             for (int k_arm = 0; k_arm < n_arms; k_arm++) {
                 if (arm_is_coupled[k_arm]) continue;
@@ -2896,19 +2878,20 @@ Rcpp::List tulpa::run_multi_block_nested_laplace_joint_sparse_impl(
                     blocks, k_grid, grad, H,
                     active_scratch, basis_scratch, multi_scratch,
                     active_db_scratch, db_buffers,
-                    idx_cache_use, n_threads_inner_eff
+                    idx_cache_use, n_inner
                 );
             }
             if (any_coupling) {
                 // A grad-only step reuses a cached factor, so the coupled-cell
                 // spec may skip its Hessian (digamma/trigamma) work; the
-                // curvature mode is irrelevant on such a step.
-                const CurvatureMode cm =
-                    finalize ? CurvatureMode::Observed : step_curvature;
+                // curvature mode is irrelevant on such a step. The chunks run
+                // as tasks inside the outer grid (idle grid threads take them)
+                // and on a team of n_inner outside it (the serial pilot and
+                // screen, which have the whole pool).
                 scatter_cell_coupling_sparse_branch(
                     *cell_coupling_spec, coupled_arms, cell_rows, n_cells,
-                    arms, parsed, etas, blocks, k_grid, grad, H, cm, grad_only,
-                    coupled_phi_ptr, inner_budget
+                    arms, parsed, etas, blocks, k_grid, grad, H, coupled_plan,
+                    cm, grad_only, coupled_phi_ptr, n_inner
                 );
             }
             for (const auto& b : blocks) {
@@ -2930,14 +2913,14 @@ Rcpp::List tulpa::run_multi_block_nested_laplace_joint_sparse_impl(
         };
 
         NewtonScratchJointSparse& sc = scratches[slot];
-        JointSpecLogLik joint_ll{&specs_use.views, n_threads_inner_eff};
+        JointSpecLogLik joint_ll{&specs_use.views, n_inner};
         if (any_coupling) {
             joint_ll.skip_arm = &arm_is_coupled;
             joint_ll.cell_coupling_log_lik_fn =
                 [&](const std::vector<Rcpp::NumericVector>& e) {
                     return eval_cell_coupling_log_lik(
                         *cell_coupling_spec, coupled_arms, cell_rows, n_cells,
-                        arms, e, coupled_phi_ptr
+                        arms, e, coupled_phi_ptr, n_inner
                     );
                 };
         }
@@ -2965,6 +2948,7 @@ Rcpp::List tulpa::run_multi_block_nested_laplace_joint_sparse_impl(
             compute_eta_joint, scatter_joint_sparse,
             center_joint, log_prior_joint,
             joint_ll, H_use, sc, prev_mode, shared_solver, store_Q, pd_mode,
+            effective_step_curvature(step_curvature, any_coupling),
             refresh_use,
             want_skew, skew_probe_idx,
             want_skew ? &skew_curvature3_fns_pool[slot] : nullptr,
@@ -3001,13 +2985,16 @@ Rcpp::List tulpa::run_multi_block_nested_laplace_joint_sparse_impl(
         /*n_outer=*/n_outer,
         tile_ids, tile_pilot_cells,
         cheap_eval, prune_tol, progress, checkpoint, x_init_per_cell,
-        screen_iters, tulpa::NoResumeRefill{}, screen_log_offset
+        screen_iters, tulpa::NoResumeRefill{}, screen_log_offset,
+        screen_only
     );
     pattern_guard.check("the sparse joint nested-Laplace outer grid");
     // Report the outer width the solve actually ran at. It is what the memory
-    // clamp above resolved to, not what the caller asked for, and it fixes the
-    // scatter partition -- so when two fits of one model report different
-    // widths, that is the explanation for a change in their last bits.
+    // clamp above resolved to, not what the caller asked for, and it sets the
+    // warm-start route (one chained pass, or a pilot fanned out) and the
+    // uncoupled arms' inner reduction width -- so when two fits of one model
+    // report different widths, that is the explanation for a change in their
+    // last bits. The coupled-cell partition does not depend on it.
     out["n_outer"] = n_outer;
     return out;
 }

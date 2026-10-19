@@ -24,6 +24,60 @@
 #' @keywords internal
 .CONTROL_ALIASES <- c(n_warmup = "warmup")
 
+# The one check on a sampler's run length, applied by every sampling fitter
+# once its `n_iter` / `warmup` defaults are resolved (gcol33/tulpa#872). Only
+# `mala()` and `imh_laplace()` used to refuse `warmup >= n_iter`; everywhere
+# else it reached the kernel, which returned a fit with no draws (coef() read
+# zeros under NA names, summary() failed on missing row names), NaN (the
+# Polya-Gamma Gibbs), or aborted on a negative vector size. The natural
+# `n_iter = 300, n_warmup = 300` hit it, because `n_iter` does not mean the
+# same thing everywhere:
+#
+#   * "total" -- `n_iter` counts every iteration, warmup included, so the run
+#     keeps `n_iter - warmup` draws: the NUTS / HMC, ESS, SGHMC, SGLD, Gibbs,
+#     MALA and IMH kernels. Needs `0 <= warmup < n_iter` and `n_iter >= 2`.
+#   * "post"  -- `n_iter` counts only the kept iterations and warmup runs on
+#     top: `tulpa_re_cov_gibbs()` and MCLMC. Any `warmup >= 0` is valid; the
+#     run needs `n_iter >= 1` (MCLMC's own kernel then asks for 2).
+#
+# The message states the convention so a caller who meant the other one sees
+# which it is.
+#' @keywords internal
+.check_run_length <- function(n_iter, warmup, where,
+                              counts = c("total", "post"),
+                              n_iter_name = "n_iter",
+                              warmup_name = "warmup") {
+  counts <- match.arg(counts)
+  is_count <- function(v) {
+    is.numeric(v) && length(v) == 1L && !is.na(v) && is.finite(v) &&
+      v == round(v)
+  }
+  if (!is_count(n_iter) || !is_count(warmup)) {
+    stop(sprintf("%s(): `%s` and `%s` must each be a single whole number.",
+                 where, n_iter_name, warmup_name), call. = FALSE)
+  }
+  if (identical(counts, "total")) {
+    if (n_iter < 2 || warmup < 0 || warmup >= n_iter) {
+      stop(sprintf(paste0(
+        "Need 0 <= %s < %s and %s >= 2 in %s(); got %s = %d, %s = %d. ",
+        "Here `%s` counts every iteration, warmup included, so the run keeps ",
+        "%s - %s draws: for 1000 kept draws after 1000 warmup, pass ",
+        "%s = 2000, %s = 1000."),
+        warmup_name, n_iter_name, n_iter_name, where,
+        n_iter_name, as.integer(n_iter), warmup_name, as.integer(warmup),
+        n_iter_name, n_iter_name, warmup_name, n_iter_name, warmup_name),
+        call. = FALSE)
+    }
+  } else if (n_iter < 1 || warmup < 0) {
+    stop(sprintf(paste0(
+      "Need %s >= 1 and %s >= 0 in %s(); got %s = %d, %s = %d. Here `%s` ",
+      "counts the kept iterations only, and warmup runs on top of them."),
+      n_iter_name, warmup_name, where, n_iter_name, as.integer(n_iter),
+      warmup_name, as.integer(warmup), n_iter_name), call. = FALSE)
+  }
+  invisible(NULL)
+}
+
 # Subset a validated front-door control list to the keys an inner fitter
 # accepts, so wholesale forwarding does not carry front-door-only knobs
 # (grid shape, backend selection) into the inner fitter's narrower check.
@@ -93,6 +147,14 @@ tulpa_check_control <- function(control, allowed, where) {
       where, paste(sQuote(unknown, q = FALSE), collapse = ", "),
       paste(sort(allowed), collapse = ", ")), call. = FALSE)
   }
+  # `control$key` reads the first of two same-named entries, so a repeated knob
+  # set a value the fit never saw (#896).
+  dup <- unique(nm[duplicated(nm)])
+  if (length(dup)) {
+    stop(sprintf(
+      "control knob(s) given more than once in %s(): %s. Set each once.",
+      where, paste(sQuote(dup, q = FALSE), collapse = ", ")), call. = FALSE)
+  }
   invisible(NULL)
 }
 
@@ -109,7 +171,9 @@ tulpa_check_control <- function(control, allowed, where) {
                        "auto_recenter", "subspace_debias", "cila",
                        "max_grid_cells", "within_cell",
                        "prune", "prune_tol", "prune_log_gap", "screen_iters",
-                       "fitted_var",
+                       "fitted_var", "var_of_means_consistency", "axis_refine",
+                       "adaptive_grid", "adaptive_grid_edge_thresh",
+                       "adaptive_grid_max_passes",
                        "checkpoint", progress),
     nested_laplace_joint = c(
       "max_iter", "tol", "n_threads", "n_threads_outer", "n_threads_scatter",
@@ -150,7 +214,7 @@ tulpa_check_control <- function(control, allowed, where) {
              "fitted_var", "subspace_debias", "cila"),
     re_cov_nested = c("integration", "n_per_axis", "span", "n_draws", "seed",
                       "max_iter", "tol", "n_threads", "diagnose_k",
-                      "k_samples", "k_tail_points", "checkpoint",
+                      "k_samples", "k_threads", "k_tail_points", "checkpoint",
                       "outer_maxit", "subspace_debias"),
     re_cov_gibbs = c("n_iter", "warmup", "thin", "seed", "max_iter", "tol",
                      "n_threads"),
@@ -163,7 +227,7 @@ tulpa_check_control <- function(control, allowed, where) {
     eb = c("max_iter", "tol", "n_threads", "outer_maxit", "outer_reltol",
            "sigma_init", "marginal", "marginal_step", "marginal_richardson"),
     ep = c("max_sweeps", "tol", "damping", "n_quad", "n_draws", "seed"),
-    gaussian = c("iter", "warmup", "step_size", "n_leapfrog", "seed"),
+    gaussian = c("iter", "warmup", "max_treedepth", "adapt_delta", "seed"),
     gibbs = c("n_iter", "warmup", "thin", "seed", "verbose", "n_threads"),
     nuts_beta = c("n_iter", "n_warmup", "max_treedepth", "adapt_delta",
                   "seed", "verbose"),
@@ -176,6 +240,8 @@ tulpa_check_control <- function(control, allowed, where) {
                     "mass_matrix",
                     "n_draws", "alpha", "batch_size", "ess_threshold",
                     "n_particles", "n_mcmc_steps", "mclmc_adjusted",
+                    # SMC: record the population at the WBIC temperature.
+                    "wbic",
                     "vi_variant", "vi_mc_samples", "vi_max_iter",
                     "vi_max_grad_norm",
                     # The VI stopping rule. `vi_max_iter` is a ceiling the run
@@ -202,7 +268,11 @@ tulpa_check_control <- function(control, allowed, where) {
     pathfinder  = c("n_draws", "max_iter", "tol", "seed", "verbose"),
     # agq_fit() is a marginal-likelihood maximizer: no sampler knobs
     # (n_iter / warmup / seed / n_chains / thin) do anything there.
-    agq = c("n_quad", "beta_init", "sigma_init", "max_iter", "tol", "verbose")
+    agq = c("n_quad", "beta_init", "sigma_init", "max_iter", "tol", "verbose"),
+    # tulpa_laplace() at a fixed hyperparameter: one inner Newton solve, whose
+    # numerical knobs are plain formals. No grid, no draws, no sampler, so
+    # nothing else a tulpa() union key names is read there (gcol33/tulpa#870).
+    laplace = c("max_iter", "tol", "n_threads")
   )
   # tulpa() dispatches across the nested / spde / re_cov / gibbs / agq /
   # sampler backends and forwards `control` wholesale on the nested and
@@ -227,7 +297,7 @@ tulpa_check_control <- function(control, allowed, where) {
     keys$nested_laplace, keys$nested_laplace_joint, keys$spde,
     keys$re_cov_nested, keys$re_cov_gibbs, keys$eb,
     keys$sample_glmm, keys$ep, keys$nuts_spde,
-    keys$mala, keys$imh_laplace, keys$pathfinder, keys$agq,
+    keys$mala, keys$imh_laplace, keys$pathfinder, keys$agq, keys$laplace,
     c("re_cov", "n_quad", "sigma_init", "beta_init",
       "scale", "method")
   ), .tulpa_hyperprior_keys)))
@@ -266,3 +336,38 @@ tulpa_check_control <- function(control, allowed, where) {
 # (gcol33/tulpa#667).
 .RE_PRIOR_KEYS <- c("prior_sigma", "eta", "prior_df", "prior_scale",
                     "prior_sigma_scale", "sigma_re_scale")
+
+# The `re_prior` keys one backend actually reads (`.tulpa_fitter_args()`). The
+# union above only says a key exists somewhere; checked alone it let a key the
+# resolved backend never reads pass as though it had been applied -- a
+# `sigma_re_scale` on `mode = "mala"`, which conditions on sigma_re
+# (gcol33/tulpa#893). The ModelData samplers share one spec builder, so they
+# are named by their registry input rather than listed.
+#' @keywords internal
+.re_prior_backend_keys <- function(backend) {
+  if (identical(BACKEND_REGISTRY[[backend]]$input, "modeldata")) {
+    return("sigma_re_scale")
+  }
+  switch(backend,
+         eb = , re_cov_nested = c("prior_sigma", "eta"),
+         re_cov_gibbs = c("prior_df", "prior_scale"),
+         gibbs = "prior_sigma_scale",
+         character(0))
+}
+
+# Refuse `re_prior` keys the resolved backend does not read, naming the
+# backends that do.
+#' @keywords internal
+.check_re_prior_backend <- function(re_prior, backend) {
+  unread <- setdiff(names(re_prior), .re_prior_backend_keys(backend))
+  if (!length(unread)) return(invisible(TRUE))
+  readers <- vapply(unread, function(k) {
+    b <- Filter(function(bk) k %in% .re_prior_backend_keys(bk), ALL_BACKENDS)
+    paste(b, collapse = ", ")
+  }, character(1))
+  stop(sprintf(paste0(
+    "re_prior key(s) not read by backend '%s', so they would have no effect: ",
+    "%s. Drop them, or use a mode whose backend reads them."),
+    backend, paste(sprintf("`%s` (read by %s)", unread, readers),
+                   collapse = "; ")), call. = FALSE)
+}

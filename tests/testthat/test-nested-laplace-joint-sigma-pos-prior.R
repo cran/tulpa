@@ -99,6 +99,8 @@
          truth = list(alpha = alpha_true, sigma = sigma_b))
 }
 
+# The medians and means read below are set before the outer Pareto-k
+# diagnostic runs, and it restores the RNG, so these fits leave it off.
 .fit_pp <- function(sim, adj, prior_alpha = NULL) {
     arm_occ <- list(
         y = as.numeric(sim$occur), n_trials = rep(1L, sim$N),
@@ -129,9 +131,32 @@
         ),
         prior     = prior,
         prior_alpha   = prior_alpha,
-        control = list(adaptive_grid = FALSE)
+        control = list(adaptive_grid = FALSE, diagnose_k = FALSE)
     )
 }
+
+skip_on_cran_budget()
+
+test_that("PC / half_normal log-density is finite at the 0 boundary", {
+    skip_on_cran_budget()
+    # Regression for the `ok <- s > 0` -> `ok <- s >= 0` fix. The PC
+    # prior density at 0 is the finite limit `lambda`, not zero;
+    # half-normal at 0 is `2 / (scale * sqrt(2 * pi))`. Earlier impl
+    # returned `-Inf` for s = 0, which zeroed the alpha = 0 grid cell
+    # entirely and biased the posterior when the truth sat on the
+    # boundary (e.g. INLAabun D3 alpha_true = 0.0).
+    f_pc <- tulpa:::.joint_parse_sigma_prior(list("pc.prec", c(1.0, 0.01)),
+                                              "prior_alpha")
+    expect_true(is.finite(f_pc(0)))
+    expect_equal(f_pc(0), log(-log(0.01) / 1.0))
+
+    f_hn <- tulpa:::.joint_parse_sigma_prior(list("half_normal", 0.5),
+                                              "prior_alpha")
+    expect_true(is.finite(f_hn(0)))
+    expect_equal(f_hn(0), log(2) - 0.5 * log(2 * pi) - log(0.5))
+})
+
+skip_on_cran()
 
 test_that("alpha hyperprior gently reduces small-n_pos bias without corrupting sigma (gcol33/tulpa#22)", {
     skip_on_cran()
@@ -206,24 +231,6 @@ test_that("alpha hyperprior gently reduces small-n_pos bias without corrupting s
     expect_lt(abs(mean(sig_flat) - 0.6), 0.10, label = info_str)
 })
 
-test_that("PC / half_normal log-density is finite at the 0 boundary", {
-    # Regression for the `ok <- s > 0` -> `ok <- s >= 0` fix. The PC
-    # prior density at 0 is the finite limit `lambda`, not zero;
-    # half-normal at 0 is `2 / (scale * sqrt(2 * pi))`. Earlier impl
-    # returned `-Inf` for s = 0, which zeroed the alpha = 0 grid cell
-    # entirely and biased the posterior when the truth sat on the
-    # boundary (e.g. INLAabun D3 alpha_true = 0.0).
-    f_pc <- tulpa:::.joint_parse_sigma_prior(list("pc.prec", c(1.0, 0.01)),
-                                              "prior_alpha")
-    expect_true(is.finite(f_pc(0)))
-    expect_equal(f_pc(0), log(-log(0.01) / 1.0))
-
-    f_hn <- tulpa:::.joint_parse_sigma_prior(list("half_normal", 0.5),
-                                              "prior_alpha")
-    expect_true(is.finite(f_hn(0)))
-    expect_equal(f_hn(0), log(2) - 0.5 * log(2 * pi) - log(0.5))
-})
-
 test_that("alpha = 0 grid cell is not zeroed by the prior", {
     # Integration-level check: with an alpha grid that includes 0 and
     # truth alpha = 0, the posterior should concentrate near 0. Pre-fix
@@ -262,7 +269,7 @@ test_that("alpha = 0 grid cell is not zeroed by the prior", {
         ),
         prior     = prior,
         prior_alpha     = list("pc.prec", c(1.0, 0.01)),
-        control = list(adaptive_grid = FALSE)
+        control = list(adaptive_grid = FALSE, diagnose_k = FALSE)
     )
     # With alpha_truth = 0, the alpha posterior median should be small
     # (well below 0.2). Pre-fix the median jumped to ~0.5 because the

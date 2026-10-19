@@ -165,14 +165,17 @@ sbc_loglik <- function(d, beta, sigma, phi = d$phi) {
 # `auto_recenter = FALSE` is required, not a speed knob. Section 7's uniformity
 # argument needs the fitted grid to equal the prior support; section 8's needs
 # the sigma support at the truth-draw stage to be the one the augmented fit
-# reports on. A recentred grid breaks both.
+# reports on. A recentred grid breaks both. `prune = FALSE` for the same
+# reason: the exact reference integrates every cell of that support, and the
+# screen would read the mixture over the cells it kept.
 sbc_fit_nested <- function(d, phi = d$phi,
                            family = if (is.null(d$family)) "gaussian" else d$family,
                            ntr = if (is.null(d$ntr)) 1L else d$ntr,
                            control = NULL) {
   ctl <- list(max_iter = 200L, tol = 1e-10, n_threads = 1L,
               keep_grid_hessians = TRUE, diagnose_k = FALSE,
-              diagnose_skew = FALSE, auto_recenter = FALSE)
+              diagnose_skew = FALSE, auto_recenter = FALSE, prune = FALSE,
+              axis_refine = "none")
   if (length(control)) ctl <- utils::modifyList(ctl, control)
   suppressWarnings(tulpa_nested_laplace(
     y = d$y, n_trials = rep(ntr, d$N), X = d$X,
@@ -218,10 +221,11 @@ sbc_loglik_rank <- function(d, mu, cov, w, phi = d$phi, n_ref = 200L,
 #   collapsed    the same two moments as one Gaussian (the pre-#336 read)
 #   wide         collapsed with its SD multiplied by `bad_factor`
 #   narrow       collapsed with its SD divided by `bad_factor`
-#   phi_crossed  a SECOND solve at sqrt(phi) where the door reads the residual
-#                VARIANCE -- the gcol33/tulpa#332 generator / inference
-#                convention crossing, restated on the door's own axis after
-#                657f179 moved it (gcol33/tulpa#661)
+#   phi_crossed  a SECOND solve whose residual SD is the true residual VARIANCE
+#                -- the gcol33/tulpa#332 generator / inference convention
+#                crossing, at the magnitude that issue measured (log SD error
+#                log(0.7) = -0.357 at these fixtures), handed to the door in
+#                whatever convention it currently reads
 # `wide`, `narrow` and `phi_crossed` are the known-bad controls: a calibration
 # harness that cannot fail is worthless, so a deliberately mis-scaled posterior
 # has to land outside the band.
@@ -252,9 +256,13 @@ sbc_arms_gaussian <- function(d, bad_factor = 1.25, n_ref = 200L,
     wide      = coll(bad_factor),
     narrow    = coll(1 / bad_factor))
   if (phi_crossed) {
-    # The broken control: hand the door the OTHER convention's number, which is
-    # the kernel's, which is what `.phi_to_kernel()` returns.
-    crossed <- .phi_to_kernel("gaussian", d$phi)
+    # The broken control: a fit whose residual SD is the residual variance.
+    # `.phi_to_registry()` turns that kernel SD into the door's own number, so
+    # the crossing keeps its size whichever convention the door reads. Handing
+    # the door the kernel's SD as its variance instead is the mirror crossing,
+    # and it carries half the log error (+0.179): at 300 seeds its sigma read
+    # is inside the band (gcol33/tulpa#923).
+    crossed <- .phi_to_registry("gaussian", sbc_resid_var(d$phi))
     arms$phi_crossed <- mk(sbc_engine_post(sbc_fit_nested(d, phi = crossed)),
                            phi = crossed)
   }

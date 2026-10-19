@@ -1,3 +1,14 @@
+
+test_that("the 20% cap warns once, from a shared helper", {
+  # .tulpa_psis_k_uncertainty() applies the cap silently by design so the
+  # bootstrap re-fits do not each warn; something has to say it once per fit,
+  # and only the joint driver did.
+  expect_warning(tulpa:::.k_tail_cap_warn(300L, 500L), "20% PSIS tail cap")
+  expect_silent(tulpa:::.k_tail_cap_warn(80L, 500L))
+  expect_silent(tulpa:::.k_tail_cap_warn(NULL, 500L))
+})
+
+skip_on_cran_budget()
 # The GPD tail size is resolved ONCE per fit, and every backend records it.
 #
 # gcol33/tulpa#631 made the outer k-hat's estimand independent of its own draw
@@ -16,6 +27,7 @@
 # raised no cap warning, so a raised or capped tail was invisible there.
 
 test_that("the budget-stable resolution is idempotent and floors at the rule", {
+  skip_on_cran_budget()
   ref <- tulpa:::.nl_diag("k_samples")
 
   # At the reference budget the helper returns NULL, so a default fit is fitted
@@ -36,14 +48,7 @@ test_that("the budget-stable resolution is idempotent and floors at the rule", {
   expect_null(tulpa:::.k_outer_tail_points(ref %/% 4L, NULL))
 })
 
-test_that("the 20% cap warns once, from a shared helper", {
-  # .tulpa_psis_k_uncertainty() applies the cap silently by design so the
-  # bootstrap re-fits do not each warn; something has to say it once per fit,
-  # and only the joint driver did.
-  expect_warning(tulpa:::.k_tail_cap_warn(300L, 500L), "20% PSIS tail cap")
-  expect_silent(tulpa:::.k_tail_cap_warn(80L, 500L))
-  expect_silent(tulpa:::.k_tail_cap_warn(NULL, 500L))
-})
+skip_on_cran()
 
 test_that("every outer-k backend reports the tail it fitted on", {
   skip_on_cran()

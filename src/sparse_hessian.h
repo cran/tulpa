@@ -28,13 +28,21 @@
 
 namespace tulpa {
 
+// Process-wide source of SparseHessianBuilder pattern generations. Unique across
+// builders, so a generation also names a pattern to a SparseCholeskySolver
+// shared between Hessians (SparseCholeskySolver::ensure_analyzed).
+inline unsigned long long next_hessian_pattern_generation() {
+    static std::atomic<unsigned long long> counter{0};
+    return ++counter;
+}
+
 class SparseHessianBuilder {
 public:
-    int n;                          // dimension
+    int n = 0;                      // dimension
     std::vector<int> col_ptr;       // CSC column pointers
     std::vector<int> row_idx;       // CSC row indices
     std::vector<double> values;     // CSC values (zeroed each iteration)
-    int nnz;
+    int nnz = 0;
 
     // Map from (row, col) to flat index in values array, for lower triangle
     // only (symmetric, stype=-1).
@@ -62,9 +70,9 @@ public:
     // (the fit's GraphPartition). The absolute index of member i is node(i).
     // The sparse Newton solvers fold them into the Newton step
     // (Sherman-Morrison / Woodbury) from the factor of the stored Hessian, and
-    // into the Laplace log-det by factoring the well-conditioned
-    // `H + sum_k coef_k 1_k 1_k'` directly (s2z_log_det_direct), so the result
-    // matches the dense full-11' path without storing 11'. Cleared each zero();
+    // into the Laplace log-det through the block-Schur factor of
+    // `H + sum_k coef_k 1_k 1_k'` (s2z_block_schur), so the result matches the
+    // dense full-11' path without storing 11'. Cleared each zero();
     // typically length 1 (one spatial field).
     struct S2ZRank1 {
         int start; int n; const int* idx; double coef;
@@ -90,7 +98,8 @@ public:
     std::vector<double> s2z_coupling;
     void set_s2z_coupling(std::vector<double> D) { s2z_coupling = std::move(D); }
 
-    // Bumped by every init(). The flat-write-index caches (scatter_dense_basis.h,
+    // Renewed by every init(), from a process-wide counter, so no two patterns
+    // share a generation. The flat-write-index caches (scatter_dense_basis.h,
     // scatter_indexed_cache.h) hold offsets into `values` resolved by
     // lookup(row, col), and keyed on this builder's identity plus its shape.
     // Two different patterns installed into the same builder object with equal
@@ -104,7 +113,7 @@ public:
     // Only lower triangle entries needed (row >= col).
     void init(int dim, const std::vector<std::pair<int,int>>& pattern) {
         n = dim;
-        ++pattern_generation;
+        pattern_generation = next_hessian_pattern_generation();
 
         // Deduplicate and sort by (col, row). A pair outside [0, dim) is not
         // registered: col_ptr is sized dim + 1 and the CSC build below walks
@@ -167,6 +176,63 @@ public:
             cur_col++;
         }
         entry_map = std::move(local_map);
+    }
+
+    // Install a pattern already in lower-triangle CSC form: column j holds rows
+    // >= j in strictly ascending order, its diagonal first. Same result as
+    // init() over the equivalent pair list, without the set-based dedupe. A
+    // malformed CSC is refused rather than installed, since every slot read off
+    // it would be wrong.
+    void init_csc(int dim, std::vector<int> csc_p, std::vector<int> csc_i) {
+        if (dim < 0 || static_cast<int>(csc_p.size()) != dim + 1 ||
+            csc_p[0] != 0 || csc_p[dim] != static_cast<int>(csc_i.size())) {
+            throw std::invalid_argument(
+                "SparseHessianBuilder::init_csc: inconsistent column pointers.");
+        }
+        for (int j = 0; j < dim; j++) {
+            const int b = csc_p[j], e = csc_p[j + 1];
+            if (e <= b || csc_i[b] != j) {
+                throw std::invalid_argument(
+                    "SparseHessianBuilder::init_csc: a column lacks its diagonal.");
+            }
+            for (int k = b + 1; k < e; k++) {
+                if (csc_i[k] <= csc_i[k - 1] || csc_i[k] >= dim) {
+                    throw std::invalid_argument(
+                        "SparseHessianBuilder::init_csc: rows must ascend "
+                        "strictly within [0, dim).");
+                }
+            }
+        }
+        n = dim;
+        pattern_generation = next_hessian_pattern_generation();
+        nnz = static_cast<int>(csc_i.size());
+        col_ptr = std::move(csc_p);
+        row_idx = std::move(csc_i);
+        values.assign(nnz, 0.0);
+        auto local_map = std::make_shared<EntryMap>();
+        for (int j = 0; j < n; j++) {
+            for (int k = col_ptr[j]; k < col_ptr[j + 1]; k++) {
+                local_map->emplace(std::make_pair(row_idx[k], j), k);
+            }
+        }
+        entry_map = std::move(local_map);
+        s2z_rank1.clear();
+        s2z_coupling.clear();
+    }
+
+    // Flat index of the lower-triangle entry (row, col), row >= col, or -1 off
+    // the pattern. Constant time when column `col` stores every row from col to
+    // `row` contiguously -- a dense panel, or a dense diagonal block -- and a
+    // binary search over the column otherwise; no map lookup either way.
+    int csc_slot(int row, int col) const {
+        const int b = col_ptr[col], e = col_ptr[col + 1];
+        const int k = b + (row - col);
+        if (k < e && row_idx[k] == row) return k;
+        const int* first = row_idx.data() + b;
+        const int* last  = row_idx.data() + e;
+        const int* it = std::lower_bound(first, last, row);
+        return (it != last && *it == row)
+                   ? static_cast<int>(it - row_idx.data()) : -1;
     }
 
     // Zero all values (call at start of each Newton iteration)
@@ -265,8 +331,7 @@ public:
 // direction (A pins it only through LAPLACE_UNIFORM_RIDGE, so 1'A^{-1}1 ~ 1/ridge
 // and log|A| ~ log(ridge)). The step is unaffected (it is the Woodbury solution,
 // not a determinant), so it stays exact; the determinant is obtained separately
-// from a direct factorization of the well-conditioned A + UDU' (see
-// s2z_log_det_direct).
+// from the block-Schur factor of A + UDU' (see s2z_block_schur).
 // D^{-1} (dense K x K, row-major) and log|D| for the registered pins. An empty
 // coupling is the diagonal D = diag(coef_k) every path used before Kronecker-
 // coupled fields needed a dense D, so the two agree entry for entry there.
@@ -402,24 +467,6 @@ inline bool apply_s2z_rank1_correction(
     return true;
 }
 
-// Pattern-invariant cache for s2z_log_det_direct, reused across outer-grid cells
-// and (in the batched driver) across species sharing one design. Within a fit
-// the matrix B = A + sum_k coef_k 1_k 1_k' has a fixed sparsity pattern: A's
-// structural pattern (the same for every grid cell and every species) plus each
-// s2z block's full lower triangle. Only the numeric values change per call. The
-// cache holds the parts that depend on the pattern alone:
-//   * `B_builder` — B's CSC pattern + entry_map, built once;
-//   * `a_slots` — for each A nonzero p, the flat values[] slot in B_builder, so
-//     A's values scatter via `B.values[slot] += val` instead of a map lookup;
-//   * `block_slots` — for each dense lower-triangle entry of every coef_k 1_k
-//     1_k' block, the flat values[] slot, in block-then-(i,j) order;
-//   * `B_solver` — a persistent CHOLMOD solver whose analyze() runs once and
-//     whose factorize() re-runs per call (symbolic reuse via the analyzed()
-//     guard, mirroring the Newton solver).
-// Validity is keyed on n_x, A's nnz, and the s2z block node lists per k,
-// NOT on the builder identity, so a per-species builder with the same pattern
-// reuses one cache. A different problem (changed n_x / nnz / block layout)
-// triggers a rebuild.
 // Absolute node indices of a rank-1 block (contiguous [start, start+n) or the
 // component's arbitrary node set). Caches key on these so a changed partition
 // (or a different fit reusing the scratch) rebuilds rather than scatters into
@@ -445,151 +492,6 @@ inline bool s2z_layout_matches(
     return true;
 }
 
-struct S2ZLogDetCache {
-    bool built = false;
-    int  n_x   = -1;
-    int  a_nnz = -1;
-    std::vector<std::vector<int>> block_layout;   // absolute nodes per rank-1 k
-
-    SparseHessianBuilder B_builder;     // pattern + entry_map (once)
-    std::vector<int>     a_slots;       // flat slot per A nonzero
-    std::vector<int>     block_slots;   // flat slot per dense block LT entry
-    std::vector<int>     cross_slots;   // flat slot per (a>b) cross-block entry
-    SparseCholeskySolver B_solver;      // symbolic once, numeric per call
-
-    // A dense coupling adds the cross-block rectangles to B's pattern, so a
-    // cache built for one and reused for the other would scatter into the wrong
-    // slots. Keyed on presence, not on D's values, which are numeric per call.
-    bool coupled = false;
-
-    bool matches(const SparseHessianBuilder& A_builder,
-                 const std::vector<SparseHessianBuilder::S2ZRank1>& r1,
-                 bool want_coupled) const {
-        if (!built || n_x != A_builder.n || a_nnz != A_builder.nnz) return false;
-        if (coupled != want_coupled) return false;
-        if (!s2z_layout_matches(block_layout, r1)) return false;
-        return true;
-    }
-};
-
-// Cross-block fill is quadratic in the total pinned length, so a dense coupling
-// on a large field is refused here rather than allocated. s2z_block_schur folds
-// the same D with no fill and is the path that carries those fits; this one is
-// the small-n reference and the non-PD fallback.
-constexpr long long S2Z_COUPLED_DIRECT_MAX_ENTRIES = 4000000LL;
-
-// (Re)build the pattern-invariant cache for B = A + sum_k coef_k 1_k 1_k': B's
-// CSC pattern + entry_map, the flat values[] slots for A's nonzeros and for each
-// dense block lower-triangle entry, and the persistent solver's symbolic factor.
-inline void build_s2z_log_det_cache(
-    const SparseHessianBuilder& A_builder,
-    const std::vector<SparseHessianBuilder::S2ZRank1>& r1,
-    bool coupled,
-    S2ZLogDetCache& cache
-) {
-    const int n_x = A_builder.n;
-    const int K   = static_cast<int>(r1.size());
-
-    // B's pattern = A's nonzeros plus each block's full lower triangle (the only
-    // entries the dense 1_k 1_k' touches), so the factor sees the same matrix the
-    // dense densify path stores.
-    std::vector<std::pair<int,int>> pattern;
-    pattern.reserve(A_builder.nnz);
-    for (int j = 0; j < n_x; ++j)
-        for (int p = A_builder.col_ptr[j]; p < A_builder.col_ptr[j + 1]; ++p)
-            pattern.emplace_back(A_builder.row_idx[p], j);
-    for (int k = 0; k < K; ++k) {
-        const int nk = r1[k].n;
-        for (int i = 0; i < nk; ++i)
-            for (int j = 0; j <= i; ++j)
-                pattern.emplace_back(r1[k].node(i), r1[k].node(j));
-    }
-    // D[a,b] fills the whole (a,b) rectangle: (U D U')_{pq} = D[a,b] for p in
-    // block a, q in block b. init() folds each pair into the lower triangle.
-    if (coupled)
-        for (int a = 0; a < K; ++a)
-            for (int b = 0; b < a; ++b)
-                for (int i = 0; i < r1[a].n; ++i)
-                    for (int j = 0; j < r1[b].n; ++j)
-                        pattern.emplace_back(r1[a].node(i), r1[b].node(j));
-
-    cache.B_builder.init(n_x, pattern);
-
-    // Resolve the flat values[] slot for every entry the per-call scatter writes,
-    // in the SAME traversal order, so each call writes B.values[slot] += val.
-    cache.a_slots.clear();
-    cache.a_slots.reserve(A_builder.nnz);
-    for (int j = 0; j < n_x; ++j)
-        for (int p = A_builder.col_ptr[j]; p < A_builder.col_ptr[j + 1]; ++p)
-            cache.a_slots.push_back(cache.B_builder.lookup(A_builder.row_idx[p], j));
-
-    cache.block_slots.clear();
-    for (int k = 0; k < K; ++k) {
-        const int nk = r1[k].n;
-        for (int i = 0; i < nk; ++i)
-            for (int j = 0; j <= i; ++j)
-                cache.block_slots.push_back(
-                    cache.B_builder.lookup(r1[k].node(i), r1[k].node(j)));
-    }
-    cache.cross_slots.clear();
-    if (coupled)
-        for (int a = 0; a < K; ++a)
-            for (int b = 0; b < a; ++b)
-                for (int i = 0; i < r1[a].n; ++i)
-                    for (int j = 0; j < r1[b].n; ++j)
-                        cache.cross_slots.push_back(
-                            cache.B_builder.lookup(r1[a].node(i), r1[b].node(j)));
-
-    // Symbolic factor once; the numeric factorize re-runs per call against the
-    // same B pattern. The cholmod_sparse view aliases B_builder's arrays, so it
-    // stays valid as long as the cache (hence B_builder) lives.
-    cache.B_solver.reset();
-    cholmod_sparse B_view = cache.B_builder.as_cholmod(&cache.B_solver.common());
-    cache.B_solver.analyze(&B_view);
-
-    cache.n_x   = n_x;
-    cache.a_nnz = A_builder.nnz;
-    cache.block_layout.clear();
-    cache.block_layout.reserve(K);
-    for (int k = 0; k < K; ++k)
-        cache.block_layout.emplace_back(s2z_block_nodes(r1[k]));
-    cache.coupled = coupled;
-    cache.built = true;
-}
-
-// Cancellation-free log-determinant for the sum-to-zero rank-1 penalties.
-//
-// Target: log|B|, B = A + sum_k coef_k 1_k 1_k', where A is the stored sparse
-// Hessian (lower-triangle CSC in `A_builder`, already carrying
-// LAPLACE_UNIFORM_RIDGE on its diagonal) and 1_k is the indicator of field block
-// k over its node set (contiguous [start_k, start_k + n_k), or the component's
-// arbitrary nodes for a disconnected map).
-//
-// Identity: log|B| is read directly from a Cholesky factor of B itself, the same
-// well-conditioned matrix the dense densify path factors. This is exact and
-// cancellation-free because the constant direction the penalty pins is held in B
-// by coef_k 1_k 1_k' (an O(1) eigenvalue), not by the 1e-10 ridge that holds it
-// in A. The matrix-determinant-lemma form log|A| + log|D^{-1} + U'A^{-1}U| is
-// algebraically equal but numerically a (-large)+(+large) cancellation, because
-// each pinned direction sits at the ridge in A (1'A^{-1}1 ~ 1/ridge,
-// log|A| ~ log(ridge)). Factoring B directly never forms A^{-1} along 1, so no
-// catastrophic subtraction occurs.
-//
-// B's pattern = A's pattern with each block k densified to its full lower
-// triangle (where coef_k 1_k 1_k' has support). The pattern is invariant across
-// grid cells and species within a fit; with a `cache` the CSC pattern, the flat
-// scatter slots, and the symbolic factor are built once and reused, leaving each
-// call to zero the values, scatter through the flat slots, numerically refactor,
-// and read log|B|. Without a cache the same work is done statelessly. Returns
-// log|B| on success and `fallback` on any failure (allocation, non-PD), so
-// `fallback` has to be a value the caller can TEST for -- both drivers pass a
-// quiet NaN and keep their own PD-enforced log-determinant when it comes back.
-// The bare log|A| is NOT a usable fallback: along each pinned direction A carries
-// LAPLACE_UNIFORM_RIDGE where B carries coef_k n_k, so the two differ by about
-// sum_k log(coef_k n_k / 1e-10), tens of nats per pinned block, and -0.5 log|B|
-// is what weights the hyperparameter grid, so the shift does not cancel between
-// cells. K == 0 is the one return that is not a failure: with no penalty to fold
-// in, log|B| = log|A| exactly.
 // Small dense SPD Cholesky (row-major), for the K x K capacitance and the
 // n_s x n_s Schur complement in the block-Schur log-determinant / solve.
 struct SmallChol {
@@ -631,9 +533,96 @@ struct SmallChol {
     }
 };
 
+// Small dense symmetric eigendecomposition (cyclic Jacobi, row-major), for the
+// K x K capacitance when the field block is indefinite and the capacitance may
+// be too: its inertia decides whether the pinned field block is PD, and the
+// solve stands in for SmallChol's. M = V diag(w) V'.
+struct SmallSymEig {
+    int m = 0;
+    std::vector<double> V, w;
+    bool ok = false;
+    void factor(const std::vector<double>& M, int m_) {
+        m = m_; ok = false;
+        std::vector<double> a = M;
+        V.assign((std::size_t) m * m, 0.0);
+        for (int i = 0; i < m; ++i) V[(std::size_t) i*m+i] = 1.0;
+        double scale = 0.0;
+        for (double v : a) scale = std::max(scale, std::fabs(v));
+        if (!(scale > 0.0) || !std::isfinite(scale)) return;
+        for (int sweep = 0; sweep < 100; ++sweep) {
+            double off = 0.0;
+            for (int p = 0; p < m; ++p)
+                for (int q = p + 1; q < m; ++q) off = std::max(off, std::fabs(a[(std::size_t) p*m+q]));
+            if (off <= 1e-15 * scale) {
+                w.assign(m, 0.0);
+                for (int i = 0; i < m; ++i) {
+                    w[i] = a[(std::size_t) i*m+i];
+                    if (w[i] == 0.0 || !std::isfinite(w[i])) return;
+                }
+                ok = true;
+                return;
+            }
+            for (int p = 0; p < m; ++p)
+                for (int q = p + 1; q < m; ++q) {
+                    const double apq = a[(std::size_t) p*m+q];
+                    if (apq == 0.0) continue;
+                    const double theta = (a[(std::size_t) q*m+q] - a[(std::size_t) p*m+p]) / (2.0 * apq);
+                    const double t = (theta >= 0.0 ? 1.0 : -1.0) /
+                                     (std::fabs(theta) + std::sqrt(theta * theta + 1.0));
+                    const double c = 1.0 / std::sqrt(t * t + 1.0), sn = t * c;
+                    for (int k = 0; k < m; ++k) {           // A <- A J (columns p, q)
+                        const double akp = a[(std::size_t) k*m+p], akq = a[(std::size_t) k*m+q];
+                        a[(std::size_t) k*m+p] = c * akp - sn * akq;
+                        a[(std::size_t) k*m+q] = sn * akp + c * akq;
+                    }
+                    for (int k = 0; k < m; ++k) {           // A <- J' A (rows p, q)
+                        const double apk = a[(std::size_t) p*m+k], aqk = a[(std::size_t) q*m+k];
+                        a[(std::size_t) p*m+k] = c * apk - sn * aqk;
+                        a[(std::size_t) q*m+k] = sn * apk + c * aqk;
+                    }
+                    for (int k = 0; k < m; ++k) {           // V <- V J
+                        const double vkp = V[(std::size_t) k*m+p], vkq = V[(std::size_t) k*m+q];
+                        V[(std::size_t) k*m+p] = c * vkp - sn * vkq;
+                        V[(std::size_t) k*m+q] = sn * vkp + c * vkq;
+                    }
+                }
+        }
+    }
+    int n_neg() const {
+        int c = 0;
+        for (double v : w) if (v < 0.0) ++c;
+        return c;
+    }
+    double logabsdet() const {
+        double d = 0.0;
+        for (double v : w) d += std::log(std::fabs(v));
+        return d;
+    }
+    void solve(const double* b, double* x) const {     // V diag(w)^-1 V' x = b
+        std::vector<double> y(m, 0.0);
+        for (int j = 0; j < m; ++j) {
+            double s = 0.0;
+            for (int i = 0; i < m; ++i) s += V[(std::size_t) i*m+j] * b[i];
+            y[j] = s / w[j];
+        }
+        for (int i = 0; i < m; ++i) {
+            double s = 0.0;
+            for (int j = 0; j < m; ++j) s += V[(std::size_t) i*m+j] * y[j];
+            x[i] = s;
+        }
+    }
+};
+
+// Largest relative backward error accepted from the LDL' factor of an
+// indefinite field block, measured on the K solves A_FF W = U. CHOLMOD's LDL'
+// does not pivot for stability, so a small pivot met early in the elimination
+// can grow the factor's entries; a backward-stable factor leaves residuals near
+// n * eps, and this bound refuses one whose growth reaches the solves.
+constexpr double S2Z_LDL_BACKWARD_TOL = 1e-8;
+
 // Pattern-invariant cache for s2z_block_schur, reused across outer-grid cells and
-// (in the batched driver) across species sharing one design + s2z layout. Mirrors
-// S2ZLogDetCache: the field/scalar partition, the A_FF sparsity pattern and its
+// (in the batched driver) across species sharing one design + s2z layout. It
+// holds no densified block, so it stays sparse: the field/scalar partition, the A_FF sparsity pattern and its
 // symbolic CHOLMOD factor, and the per-A-nonzero scatter destinations are fixed
 // across a fit; only values change, so each call re-scatters + numerically
 // re-factorizes. Validity keyed on n_x, A's nnz, and the s2z block layout.
@@ -646,6 +635,7 @@ struct S2ZBlockSchurCache {
     std::vector<int> dest_a, dest_b;   // primary dest index; symmetric A_ss index (kind 1 off-diag) else -1
     SparseHessianBuilder aff;          // A_FF pattern + values (zeroed/scattered per call)
     SparseCholeskySolver aff_solver;   // symbolic factor once, numeric per call
+    SparseCholeskySolver aff_ldl;      // simplicial LDL' of A_FF, analyzed on first need
 
     bool matches(const SparseHessianBuilder& A,
                  const std::vector<SparseHessianBuilder::S2ZRank1>& r1) const {
@@ -698,6 +688,8 @@ inline void build_s2z_block_schur_cache(
                 cache.dest_a[t] = cache.aff.lookup(cache.floc[A.row_idx[p]], cache.floc[c]);
 
     cache.aff_solver.reset();
+    cache.aff_ldl.reset();
+    cache.aff_ldl.use_simplicial_ldl();
     cholmod_sparse view = cache.aff.as_cholmod(&cache.aff_solver.common());
     cache.aff_solver.analyze(&view);
 
@@ -710,28 +702,45 @@ inline void build_s2z_block_schur_cache(
 // Block-Schur log-determinant for B = A + sum_k coef_k 1_k 1_k'. Partitions the
 // latent into the field indices F (the union of the s2z block ranges) and the
 // scalar complement S (intercepts, betas, REs). Factors the sparse field
-// sub-block A_FF (PD -- pinned off the constant by per-cell data curvature at low
-// tau and by the ICAR at high tau, verified across the grid), folds the K rank-1
-// pins via the matrix-determinant lemma, and closes the field<->scalar coupling
-// with a small dense Schur complement:
+// sub-block A_FF (PD at a converged mode -- pinned off the constant by per-cell
+// data curvature at low tau and by the ICAR at high tau, verified across the
+// grid), folds the K rank-1 pins via the matrix-determinant lemma, and closes
+// the field<->scalar coupling with a small dense Schur complement:
 //   log|B| = log|A_FF| + log|C| + log|C^-1 + U' A_FF^-1 U|      (= log|B_FF|)
 //          + log|A_ss - A_sf B_FF^-1 A_fs|.                     (Schur, n_s x n_s)
 // U = [1_k] in local field coords, C = diag(coef_k). All sparse + O(K^3) +
 // O(n_s^3); no dense field block, no uniform ridge. Exact and well-conditioned:
 // A_FF is PD, so U'A_FF^-1 U is bounded -- the catastrophic cancellation would
-// need the UNPINNED full A, which this never factors. Returns false on any
-// non-PD / allocation failure, and on K == 0, where there is no penalty to fold
-// in and log|B| = log|A|; the determinant-only wrapper turns both into the
-// caller's `fallback`, so a caller that can reach K == 0 has to separate the two
-// itself. Both drivers gate the call on a non-empty penalty list instead.
+// need the UNPINNED full A, which this never factors.
+//
+// `field_inertia` extends this to an A_FF that is not PD, which happens away
+// from the mode (a screen's two-step solve, an iteration cap). B_FF = A_FF +
+// U C U' can still be PD when A_FF's negative directions lie in the span of the
+// pins. A_FF is then factored as LDL', and with M = [[A_FF, U], [U', -C^-1]]
+// Haynsworth's inertia additivity on its two Schur complements gives
+//   neg(B_FF) = neg(A_FF) - neg(cap),   cap = C^-1 + U' A_FF^-1 U,
+// so B_FF is PD exactly when the two counts agree, and the determinant identity
+// above holds with absolute values (the signs of |A_FF| and |cap| cancel). The
+// LDL' factor is accepted only within S2Z_LDL_BACKWARD_TOL on the W solves.
+// `field_indefinite`, when given, reports whether A_FF failed its Cholesky
+// factorization, whether or not the inertia route then carried the call.
+//
+// Returns false on any non-PD / allocation failure, and on K == 0, where there
+// is no penalty to fold in and log|B| = log|A|; the determinant-only wrapper
+// turns both into the caller's `fallback`, so a caller that can reach K == 0
+// has to separate the two itself. Both drivers gate the call on a non-empty
+// penalty list instead.
 inline bool s2z_block_schur(
     const SparseHessianBuilder& A,
     const std::vector<SparseHessianBuilder::S2ZRank1>& r1,
     const double* grad,        // n_x gradient, or nullptr for determinant only
     double* delta,             // n_x Newton step B^-1 grad output, or nullptr
     double* logdet_out,        // log|B| output, or nullptr
-    S2ZBlockSchurCache* cache = nullptr
+    S2ZBlockSchurCache* cache = nullptr,
+    bool field_inertia = false,
+    bool* field_indefinite = nullptr
 ) {
+    if (field_indefinite) *field_indefinite = false;
     const int K = static_cast<int>(r1.size());
     if (K == 0) return false;
     const int n_x = A.n;
@@ -765,9 +774,24 @@ inline bool s2z_block_schur(
 
     cholmod_sparse vff = cc.aff.as_cholmod(&cc.aff_solver.common());
     if (!cc.aff_solver.analyzed()) cc.aff_solver.analyze(&vff);
-    if (!cc.aff_solver.factorize(&vff)) return false;   // A_FF indefinite -> caller falls back to LM
-    const double logAFF = cc.aff_solver.log_determinant();
-    SparseCholeskySolver& sf = cc.aff_solver;
+    double logAFF = 0.0;
+    int neg_aff = 0;
+    SparseCholeskySolver* sfp = &cc.aff_solver;
+    if (cc.aff_solver.factorize(&vff)) {
+        logAFF = cc.aff_solver.log_determinant();
+    } else {
+        if (field_indefinite) *field_indefinite = true;
+        if (!field_inertia) return false;
+        if (!cc.aff_ldl.analyzed()) cc.aff_ldl.analyze(&vff);
+        if (!cc.aff_ldl.factorize(&vff)) return false;
+        if (!cc.aff_ldl.ldl_inertia(neg_aff, logAFF)) return false;
+        // U C U' is PSD of rank K, so B_FF keeps at least neg(A_FF) - K
+        // negative eigenvalues.
+        if (neg_aff > K) return false;
+        sfp = &cc.aff_ldl;
+    }
+    const bool indefinite = (sfp == &cc.aff_ldl);
+    SparseCholeskySolver& sf = *sfp;
 
     // W = A_FF^-1 U (U = [1_k] local). cap = C^-1 + U'A_FF^-1 U (K x K, SPD).
     std::vector<std::vector<double>> W(K, std::vector<double>(nf, 0.0));
@@ -777,6 +801,36 @@ inline bool s2z_block_schur(
             std::fill(uk.begin(), uk.end(), 0.0);
             for (int i = 0; i < r1[k].n; ++i) uk[floc[r1[k].node(i)]] = 1.0;
             sf.solve(uk.data(), W[k].data(), nf);
+        }
+    }
+    if (indefinite) {
+        // Relative backward error of A_FF W_k = 1_k, componentwise against
+        // |A_FF| |W_k| + |1_k|, over the stored lower triangle.
+        const std::vector<int>& cp = cc.aff.col_ptr;
+        const std::vector<int>& ri = cc.aff.row_idx;
+        const std::vector<double>& av = cc.aff.values;
+        std::vector<double> r(nf), mag(nf);
+        for (int k = 0; k < K; ++k) {
+            const std::vector<double>& wk = W[k];
+            std::fill(r.begin(), r.end(), 0.0);
+            std::fill(mag.begin(), mag.end(), 0.0);
+            for (int i = 0; i < r1[k].n; ++i) {
+                const int f = floc[r1[k].node(i)];
+                r[f] = -1.0; mag[f] = 1.0;
+            }
+            for (int c = 0; c < nf; ++c)
+                for (int p = cp[c]; p < cp[c + 1]; ++p) {
+                    const int rr = ri[p];
+                    const double v = av[p];
+                    r[rr] += v * wk[c];  mag[rr] += std::fabs(v * wk[c]);
+                    if (rr != c) { r[c] += v * wk[rr]; mag[c] += std::fabs(v * wk[rr]); }
+                }
+            double num = 0.0, den = 0.0;
+            for (int i = 0; i < nf; ++i) {
+                num = std::max(num, std::fabs(r[i]));
+                den = std::max(den, mag[i]);
+            }
+            if (!(num <= S2Z_LDL_BACKWARD_TOL * den)) return false;
         }
     }
     // D enters only as D^{-1} in the cap and log|D| in the determinant, so a
@@ -791,9 +845,24 @@ inline bool s2z_block_schur(
             for (int i = 0; i < r1[a].n; ++i) m += W[b][floc[r1[a].node(i)]];
             cap[(std::size_t) a*K + b] = m + Dinv[(std::size_t) a * K + b];
         }
-    SmallChol capL; capL.factor(cap, K);
-    if (!capL.ok) return false;
-    const double logBFF = logAFF + logC + capL.logdet();
+    // A PD field block gives an SPD cap; an indefinite one a cap whose negative
+    // count has to match A_FF's for B_FF to be PD.
+    SmallChol capL;
+    SmallSymEig capE;
+    double logcap = 0.0;
+    if (!indefinite) {
+        capL.factor(cap, K);
+        if (!capL.ok) return false;
+        logcap = capL.logdet();
+    } else {
+        capE.factor(cap, K);
+        if (!capE.ok || capE.n_neg() != neg_aff) return false;
+        logcap = capE.logabsdet();
+    }
+    auto cap_solve = [&](const double* b, double* x) {
+        if (indefinite) capE.solve(b, x); else capL.solve(b, x);
+    };
+    const double logBFF = logAFF + logC + logcap;
 
     // Schur S = A_ss - A_sf B_FF^-1 A_fs, with B_FF^-1 y = A_FF^-1 y - W cap^-1 (W'y).
     // Z[j] = B_FF^-1 A_fs[:,j] is reused for the step's field back-substitution.
@@ -809,7 +878,7 @@ inline bool s2z_block_schur(
                 for (int i = 0; i < nf; ++i) s += W[k][i] * col[i];
                 wty[k] = s;
             }
-            capL.solve(wty.data(), capy.data());
+            cap_solve(wty.data(), capy.data());
             for (int i = 0; i < nf; ++i) {
                 double corr = 0.0;
                 for (int k = 0; k < K; ++k) corr += W[k][i] * capy[k];
@@ -851,7 +920,7 @@ inline bool s2z_block_schur(
             for (int i = 0; i < nf; ++i) s += W[k][i] * gf[i];
             wty[k] = s;
         }
-        capL.solve(wty.data(), capy.data());
+        cap_solve(wty.data(), capy.data());
         for (int i = 0; i < nf; ++i) {
             double corr = 0.0;
             for (int k = 0; k < K; ++k) corr += W[k][i] * capy[k];
@@ -893,79 +962,6 @@ inline double s2z_log_det_block_schur(
     return s2z_block_schur(A, r1, nullptr, nullptr, &ld, cache) ? ld : fallback;
 }
 
-inline double s2z_log_det_direct(
-    const SparseHessianBuilder& A_builder,
-    const std::vector<SparseHessianBuilder::S2ZRank1>& r1,
-    double fallback,
-    S2ZLogDetCache* cache = nullptr
-) {
-    const int K = static_cast<int>(r1.size());
-    if (K == 0) return fallback;
-    const int n_x = A_builder.n;
-
-    const std::vector<double>& coupling = A_builder.s2z_coupling;
-    const bool coupled = !coupling.empty();
-    if (coupled) {
-        if ((int) coupling.size() != K * K) return fallback;
-        long long entries = 0;
-        for (int a = 0; a < K; ++a)
-            for (int b = 0; b < a; ++b)
-                entries += (long long) r1[a].n * r1[b].n;
-        if (entries > S2Z_COUPLED_DIRECT_MAX_ENTRIES) return fallback;
-    }
-
-    S2ZLogDetCache local_cache;
-    S2ZLogDetCache& cc = cache ? *cache : local_cache;
-    if (!cc.matches(A_builder, r1, coupled))
-        build_s2z_log_det_cache(A_builder, r1, coupled, cc);
-
-    SparseHessianBuilder& B_builder = cc.B_builder;
-
-    // Zero, then scatter A's stored values and the dense rank-1 blocks through
-    // the cached flat slots (same traversal order the cache resolved). zero()
-    // also clears any s2z rank-1 registered on B_builder, which this path never
-    // sets, so B carries A + sum_k coef_k 1_k 1_k' exactly.
-    B_builder.zero();
-    double* __restrict__ Bv = B_builder.values.data();
-    {
-        int t = 0;
-        for (int j = 0; j < n_x; ++j)
-            for (int p = A_builder.col_ptr[j]; p < A_builder.col_ptr[j + 1]; ++p) {
-                const int slot = cc.a_slots[t++];
-                scatter_slot(Bv, slot, A_builder.values[p]);
-            }
-    }
-    {
-        int t = 0;
-        for (int k = 0; k < K; ++k) {
-            const double c = coupled ? coupling[(std::size_t) k * K + k] : r1[k].coef;
-            const int nk = r1[k].n;
-            for (int i = 0; i < nk; ++i)
-                for (int j = 0; j <= i; ++j) {
-                    const int slot = cc.block_slots[t++];
-                    scatter_slot(Bv, slot, c);
-                }
-        }
-    }
-    if (coupled) {
-        int t = 0;
-        for (int a = 0; a < K; ++a)
-            for (int b = 0; b < a; ++b) {
-                const double d = coupling[(std::size_t) a * K + b];
-                for (int i = 0; i < r1[a].n; ++i)
-                    for (int j = 0; j < r1[b].n; ++j) {
-                        const int slot = cc.cross_slots[t++];
-                        scatter_slot(Bv, slot, d);
-                    }
-            }
-    }
-
-    cholmod_sparse B_cholmod = B_builder.as_cholmod(&cc.B_solver.common());
-    if (!cc.B_solver.analyzed()) cc.B_solver.analyze(&B_cholmod);
-    if (!cc.B_solver.factorize(&B_cholmod)) return fallback;
-    const double ld = cc.B_solver.log_determinant();
-    return std::isfinite(ld) ? ld : fallback;
-}
 
 } // namespace tulpa
 

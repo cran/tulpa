@@ -5,6 +5,8 @@
 # Test: Hot-start reduces Newton iterations
 # =====================================================================
 
+skip_on_cran()
+
 test_that("hot-start reduces Newton iterations vs cold start", {
   skip_on_cran()
   adj <- make_grid_adjacency(5, 5)  # 25 sites (dense path)
@@ -104,13 +106,14 @@ test_that("nested_laplace dispatches ICAR with explicit grid", {
 
   result <- tulpa_nested_laplace(
     y = dat$y, n_trials = dat$n_trials, X = dat$X,
-    prior = prior, family = "binomial"
+    prior = prior, family = "binomial",
+    control = list(axis_refine = "none")
   )
 
   expect_s3_class(result, "tulpa_nested_laplace")
   expect_equal(length(result$theta_grid), 5L)
   expect_equal(length(result$log_marginal), 5L)
-  expect_true(all(is.finite(result$log_marginal)))
+  expect_cells_solved(result)
   expect_true(result$theta_mean > 0)
   expect_true(result$theta_sd > 0)
   expect_equal(sum(result$weights), 1.0, tolerance = 1e-6)
@@ -135,7 +138,7 @@ test_that("nested_laplace ICAR uses default grid when none supplied", {
   )
 
   expect_true(result$theta_mean > 0)
-  expect_true(all(is.finite(result$log_marginal)))
+  expect_cells_solved(result)
   expect_true(length(result$theta_grid) >= 5L)
 })
 

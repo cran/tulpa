@@ -1,3 +1,29 @@
+
+test_that("the cheap-screen depth is one value across the R and C++ defaults", {
+    # The screening depth exists at three points -- the registry the front door
+    # reads, the literal the cpp entry declares (an Rcpp attribute default has
+    # to be a literal, so it cannot read the engine constant), and the engine
+    # constant the grid driver falls back to. A fit's cost and its cheap ranking
+    # both move with it, so two live values would mean the same grid screened at
+    # two depths depending on which layer supplied the number.
+    ref <- as.integer(tulpa:::.nl_screen("iters"))
+
+    # The cpp entry's own default, as the generated R wrapper carries it.
+    entry <- formals(tulpa:::cpp_nested_laplace_joint_multi)$screen_iters
+    expect_false(is.null(entry))
+    expect_identical(as.integer(eval(entry)), ref)
+
+    # And the engine constant behind it.
+    src <- test_path("..", "..", "src", "nested_laplace_grid.h")
+    skip_if_not(file.exists(src), "package sources not available")
+    line <- grep("static const int CHEAP_SCREEN_ITERS",
+                 readLines(src, warn = FALSE), value = TRUE)
+    expect_length(line, 1L)
+    expect_identical(
+        as.integer(sub(".*=\\s*([0-9]+).*", "\\1", line)), ref)
+})
+
+skip_on_cran()
 # Engine settings (R/settings.R): the single source of truth for every default
 # the nested-Laplace machinery lays down on its own.
 #
@@ -16,6 +42,7 @@
 # Runs at every tier: no fit, pure table and source inspection.
 
 test_that("every grid axis materialises to a usable vector", {
+    skip_on_cran()
     for (key in names(tulpa:::.NL_GRID)) {
         spec <- tulpa:::.NL_GRID[[key]]
         if (isTRUE(spec$data_dependent)) {
@@ -61,6 +88,7 @@ test_that("every family binding resolves to a declared axis", {
 })
 
 test_that("the default axes are exactly these values", {
+    skip_on_cran()
     # Pinned deliberately: these numbers ARE the engine's behaviour on every
     # fit that does not name its own grid.
     expect_equal(tulpa:::.nl_grid_axis("field_sd"),
@@ -122,13 +150,10 @@ test_that("the default axes are exactly these values", {
     # (gcol33/tulpa#376) and the correction itself is ON (gcol33/tulpa#364).
     expect_identical(tulpa:::.nl_diag("centre_unreliable"), Inf)
     expect_true(tulpa:::.nl_diag("skew_correct"))
-    # The within-cell default, decided on fixed-truth coverage at the placement
-    # the engine ships (gcol33/tulpa#357), and the three places that name it
-    # agreeing -- the setting, the `match.arg` vocabulary and the kind that
-    # admits it.
-    expect_identical(tulpa:::.nl_diag("within_cell"), "box_uniform")
-    expect_identical(tulpa:::.NL_WITHIN_CELL[1L], "box_uniform")
-    expect_true("box_uniform" %in% tulpa:::.NL_SUPPORT[["density"]]$within)
+    # The within-cell default, decided against dense references at the
+    # placement the engine ships (gcol33/tulpa#932), and the kind that admits it.
+    expect_identical(tulpa:::.nl_diag("within_cell"), "log_quadratic")
+    expect_true("log_quadratic" %in% tulpa:::.NL_SUPPORT[["density"]]$within)
     expect_equal(tulpa:::.nl_diag("grid_resolved"), 1)
     expect_identical(tulpa:::.nl_recenter("n_pts"), 5L)
     expect_equal(tulpa:::.nl_recenter("span"), 2.5)
@@ -155,6 +180,7 @@ test_that("the default axes are exactly these values", {
 })
 
 test_that("registry defaults() fill exactly the bound fields, crossed", {
+    skip_on_cran()
     fill <- function(type, p = list()) {
         tulpa:::.NL_REGISTRY[[type]]$defaults(p, list())
     }
@@ -184,6 +210,23 @@ test_that("registry defaults() fill exactly the bound fields, crossed", {
     pinned <- fill("bym2", list(sigma_grid = c(1, 2), rho_grid = c(0.5, 0.5)))
     expect_equal(pinned$sigma_grid, c(1, 2))
     expect_equal(pinned$rho_grid, c(0.5, 0.5))
+    expect_error(fill("bym2", list(sigma_grid = c(1, 2, 3), rho_grid = c(0.5, 0.7))),
+                 "PAIRED outer-grid cells.*got 3 / 2")
+    # A length-1 field is a value held fixed and is broadcast across the cells.
+    held <- fill("bym2", list(sigma_grid = c(1, 2, 3), rho_grid = 0.5))
+    expect_equal(held$rho_grid, rep(0.5, 3))
+
+    # ONE supplied axis is kept as an axis and crossed with the default of the
+    # other; replacing it by the default too discarded it (gcol33/tulpa#884).
+    half <- fill("bym2", list(sigma_grid = c(0.4, 0.2, 0.2)))
+    gr <- expand.grid(sigma = c(0.2, 0.4),
+                      rho   = tulpa:::.nl_grid_axis("bym2_rho"))
+    expect_equal(half$sigma_grid, gr$sigma)
+    expect_equal(half$rho_grid, gr$rho)
+    a1 <- fill("ar1", list(tau_grid = c(1, 2, 4, 8)))
+    expect_equal(sort(unique(a1$tau_grid)), c(1, 2, 4, 8))
+    expect_equal(sort(unique(a1$rho_grid)), tulpa:::.nl_grid_axis("ar1_rho"))
+    expect_identical(length(a1$tau_grid), 4L * length(tulpa:::.nl_grid_axis("ar1_rho")))
 
     # nngp / hsgp share the GP axes, so they default identically.
     expect_equal(fill("nngp")$sigma2_grid, fill("hsgp")$sigma2_grid)
@@ -195,6 +238,7 @@ test_that("registry defaults() fill exactly the bound fields, crossed", {
 })
 
 test_that("provenance narrows to the family that laid the axis", {
+    skip_on_cran()
     pinned <- tulpa:::.nl_axis_is_pinned
 
     # Each family's OWN default is recognised on its own field.
@@ -250,6 +294,7 @@ test_that("provenance narrows to the family that laid the axis", {
 })
 
 test_that("default grid axes are not written inline outside the settings file", {
+    skip_on_cran()
     # The regression this file exists to prevent. A geometric axis over LITERAL
     # bounds is a default written where it is consumed; parameterised bounds
     # (`log(lo)`, `log(mode * span)`) are a caller building a data-dependent
@@ -399,6 +444,7 @@ test_that("no user-facing text tells the caller to set a knob that hard-errors",
 })
 
 test_that("every outer-k entry point defaults to the registry's draw budget", {
+    skip_on_cran()
     # The source lint above catches a budget written as a literal. It cannot
     # catch a SECOND registry-shaped default that reads a different key, and it
     # says nothing about what the defaults evaluate to -- which is the half that
@@ -432,28 +478,4 @@ test_that("every outer-k entry point defaults to the registry's draw budget", {
     # band LOWER the budget that has to resolve it.
     expect_gt(tulpa:::.nl_diag("k_samples_ok"),   ref)
     expect_gt(tulpa:::.nl_diag("k_samples_good"), tulpa:::.nl_diag("k_samples_ok"))
-})
-
-test_that("the cheap-screen depth is one value across the R and C++ defaults", {
-    # The screening depth exists at three points -- the registry the front door
-    # reads, the literal the cpp entry declares (an Rcpp attribute default has
-    # to be a literal, so it cannot read the engine constant), and the engine
-    # constant the grid driver falls back to. A fit's cost and its cheap ranking
-    # both move with it, so two live values would mean the same grid screened at
-    # two depths depending on which layer supplied the number.
-    ref <- as.integer(tulpa:::.nl_screen("iters"))
-
-    # The cpp entry's own default, as the generated R wrapper carries it.
-    entry <- formals(tulpa:::cpp_nested_laplace_joint_multi)$screen_iters
-    expect_false(is.null(entry))
-    expect_identical(as.integer(eval(entry)), ref)
-
-    # And the engine constant behind it.
-    src <- test_path("..", "..", "src", "nested_laplace_grid.h")
-    skip_if_not(file.exists(src), "package sources not available")
-    line <- grep("static const int CHEAP_SCREEN_ITERS",
-                 readLines(src, warn = FALSE), value = TRUE)
-    expect_length(line, 1L)
-    expect_identical(
-        as.integer(sub(".*=\\s*([0-9]+).*", "\\1", line)), ref)
 })

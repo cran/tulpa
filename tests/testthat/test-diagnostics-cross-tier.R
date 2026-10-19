@@ -19,7 +19,7 @@ nested_areal_fit <- function(type) {
   nr <- nc <- 5L; S <- nr * nc; reps <- 4L; W <- rook_ct(nr, nc)
   unit <- rep(seq_len(S), each = reps); N <- length(unit)
   x <- rnorm(N); y <- rbinom(N, 3, plogis(-0.3 + 0.6 * x))
-  idx <- tulpa:::.resolve_unit_index(factor(unit), "region", S)
+  idx <- tulpa:::.resolve_spatial_idx(factor(unit), S, W, "region")
   csr <- tulpa:::adjacency_to_csr_tulpa(W)
   prior <- list(type = type, spatial_idx = idx, n_spatial_units = S,
                 adj_row_ptr = csr$row_ptr, adj_col_idx = csr$col_idx,
@@ -29,6 +29,37 @@ nested_areal_fit <- function(type) {
   fit$prior <- prior
   fit
 }
+
+skip_on_cran_budget()
+
+test_that("the nested transform maps mirror the sampler's interpretable formulas (#199)", {
+  skip_on_cran_budget()
+  sm <- tulpa:::.SPATIAL_HYPER_TRANSFORM
+  expect_equal(sm$tau$fn(4), 0.5)         # 1/sqrt(4)  -> sigma
+  expect_equal(sm$sigma2$fn(9), 3)        # sqrt(9)    -> sigma
+  expect_equal(sm$phi_gp$fn(2), 6)        # 3 * 2      -> range
+  expect_equal(sm$lengthscale$fn(2), 6)   # 3 * 2      -> range
+  expect_identical(sm$tau$name, "sigma")
+  expect_identical(sm$phi_gp$name, "range")
+
+  tmn <- tulpa:::.TEMPORAL_HYPER_TRANSFORM
+  expect_identical(tmn$tau$name, "precision")   # temporal reports tau as precision
+})
+
+test_that("nested temporal_corr maps its grid axes to the sampler labels (#199)", {
+  skip_on_cran_budget()
+  ft <- structure(
+    list(theta_grid = matrix(c(0.5, 1, 2), ncol = 1,
+                             dimnames = list(NULL, "tau")),
+         weights = c(0.2, 0.5, 0.3), theta_names = "tau",
+         prior = list(type = "rw1")),
+    class = c("tulpa_nested_laplace", "tulpa_fit"))
+  tc <- temporal_corr(ft)
+  expect_identical(rownames(tc), "precision")
+  expect_equal(tc["precision", "mean"], sum(c(0.2, 0.5, 0.3) * c(0.5, 1, 2)))
+})
+
+skip_on_cran()
 
 test_that("nested spatial_range reports interpretable sigma / rho, marginalized (#199)", {
   skip_on_cran()
@@ -46,31 +77,6 @@ test_that("nested spatial_range reports interpretable sigma / rho, marginalized 
   w2 <- f2$weights / sum(f2$weights)
   expect_equal(s2["sigma", "mean"], sum(w2 * (1 / sqrt(f2$theta_grid[, 1]))))
   expect_equal(s2["rho", "mean"],   sum(w2 * f2$theta_grid[, 2]))
-})
-
-test_that("the nested transform maps mirror the sampler's interpretable formulas (#199)", {
-  sm <- tulpa:::.SPATIAL_HYPER_TRANSFORM
-  expect_equal(sm$tau$fn(4), 0.5)         # 1/sqrt(4)  -> sigma
-  expect_equal(sm$sigma2$fn(9), 3)        # sqrt(9)    -> sigma
-  expect_equal(sm$phi_gp$fn(2), 6)        # 3 * 2      -> range
-  expect_equal(sm$lengthscale$fn(2), 6)   # 3 * 2      -> range
-  expect_identical(sm$tau$name, "sigma")
-  expect_identical(sm$phi_gp$name, "range")
-
-  tmn <- tulpa:::.TEMPORAL_HYPER_TRANSFORM
-  expect_identical(tmn$tau$name, "precision")   # temporal reports tau as precision
-})
-
-test_that("nested temporal_corr maps its grid axes to the sampler labels (#199)", {
-  ft <- structure(
-    list(theta_grid = matrix(c(0.5, 1, 2), ncol = 1,
-                             dimnames = list(NULL, "tau")),
-         weights = c(0.2, 0.5, 0.3), theta_names = "tau",
-         prior = list(type = "rw1")),
-    class = c("tulpa_nested_laplace", "tulpa_fit"))
-  tc <- temporal_corr(ft)
-  expect_identical(rownames(tc), "precision")
-  expect_equal(tc["precision", "mean"], sum(c(0.2, 0.5, 0.3) * c(0.5, 1, 2)))
 })
 
 # gcol33/tulpa#800: spatial_range() / temporal_corr() matched only a fixed

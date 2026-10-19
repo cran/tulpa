@@ -104,7 +104,8 @@ spatial <- function(graph, formula, proper = FALSE, shared = NULL,
     stop("`graph` must be an adjacency matrix (the spatial graph).",
          call. = FALSE)
   }
-  graph <- .validate_adjacency_arg(graph, "graph")
+  graph <- .validate_adjacency_arg(
+    graph, "graph", field = if (isTRUE(proper)) "car_proper" else "icar")
   if (isFALSE(shared)) .warn_nonshared("spatial effects")
 
   if (missing(formula) || !inherits(formula, "formula")) {
@@ -423,7 +424,12 @@ tulpa_bar_field_replicate <- function(adjacency, node, by) {
 .spatial_field_blocks <- function(spec, data) {
   base_adj <- as.matrix(spec$adjacency)
   n_units <- nrow(base_adj)
-  idx <- .resolve_unit_index(data[[spec$group_var]], spec$group_var, n_units)
+  if (is.null(data[[spec$group_var]])) {
+    stop("spatial() node column '", spec$group_var,
+         "' was not found in the data.", call. = FALSE)
+  }
+  idx <- .resolve_spatial_idx(data[[spec$group_var]], n_units, base_adj,
+                              spec$group_var)
   proper <- isTRUE(spec$proper)
   # rho_car bounds come from the base graph's eigenvalue interval of D^-1 W;
   # block-diagonal replication leaves the spectrum unchanged (L identical
@@ -693,12 +699,16 @@ tulpa_bar_field_replicate <- function(adjacency, node, by) {
     has_col <- function(nm) !is.null(tg) && nm %in% colnames(tg)
     tau_nm <- paste0(prefix, "tau")
     rho_nm <- paste0(prefix, "rho")
+    rid <- function(nm) .nl_axis_row_id(tg, match(nm, colnames(tg)))
+    lmd <- if (length(jfit$log_marginal) == nrow(tg)) jfit$log_marginal
     sigma <- if (has_col(tau_nm))
       .nl_summary_quantile(1 / sqrt(tg[, tau_nm]), w, probs,
-                           "positive", support, within) else NULL
+                           "positive", support, within,
+                           row_id = rid(tau_nm), log_density = lmd) else NULL
     rho <- if (has_col(rho_nm))
       .nl_summary_quantile(tg[, rho_nm], w, probs,
-                           dom_of(rho_nm), support, within) else NULL
+                           dom_of(rho_nm), support, within,
+                           row_id = rid(rho_nm), log_density = lmd) else NULL
     list(name = block_names[b], structure = blocks[[b]]$type,
          sigma = sigma, rho = rho)
   })
@@ -716,6 +726,22 @@ tulpa_bar_field_replicate <- function(adjacency, node, by) {
 }
 
 
+# The modes an inline spatial() / temporal() varying-coefficient field accepts.
+# Both route to the one-arm joint nested-Laplace fit, so the list and the
+# message naming it are shared; the message lists every accepted spelling
+# (gcol33/tulpa#912), where it used to leave out `nested_laplace`.
+.BAR_FIELD_MODES <- c("auto", "laplace", "nested_laplace")
+
+.bar_field_check_mode <- function(mode, what) {
+  if (!tolower(mode %||% "auto") %in% .BAR_FIELD_MODES) {
+    stop("Inline ", what, "() varying-coefficient fields are fit by nested ",
+         "Laplace; `mode` must be one of ",
+         paste0("'", .BAR_FIELD_MODES, "'", collapse = ", "),
+         " (got '", mode, "').", call. = FALSE)
+  }
+  invisible(TRUE)
+}
+
 # Front-door fit for inline spatial() varying-coefficient fields. The bar
 # expands to a list of independent CAR blocks (one per design column, the
 # slope columns carrying a per-row svc_weight); a single response is fit as a
@@ -724,12 +750,7 @@ tulpa_bar_field_replicate <- function(adjacency, node, by) {
 .tulpa_fit_spatial_field <- function(parsed, bundle, data, family, mode, phi,
                                      sigma_re, n_trials, control, formula,
                                      call = NULL) {
-  mode_lc <- tolower(mode %||% "auto")
-  if (!mode_lc %in% c("auto", "laplace", "nested_laplace")) {
-    stop("Inline spatial() varying-coefficient fields are fit by nested ",
-         "Laplace; `mode` must be 'auto' or 'laplace' (got '", mode, "').",
-         call. = FALSE)
-  }
+  .bar_field_check_mode(mode, "spatial")
   if (!is.null(parsed$spatial_var)) {
     stop("Cannot combine an inline spatial(graph = , formula = ) field with a ",
          "spatial(col) term. Use one or the other.", call. = FALSE)
@@ -817,6 +838,7 @@ tulpa_bar_field_replicate <- function(adjacency, node, by) {
 }
 
 
+#' @rdname spatial
 #' @export
 print.tulpa_spatial_field_fit <- function(x, ...) {
   cat("tulpa fit: inline spatial() varying-coefficient field(s)\n")
@@ -853,6 +875,10 @@ print.tulpa_spatial_field_fit <- function(x, ...) {
 }
 
 
+#' @rdname spatial
+#' @param x A `spatial()` field specification, or the fit `tulpa()` returns for
+#'   one.
+#' @param ... Ignored.
 #' @export
 print.tulpa_spatial_field <- function(x, ...) {
   cat("tulpa areal varying-coefficient field\n")

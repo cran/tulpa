@@ -52,6 +52,22 @@ public:
     // A must be symmetric (stype != 0) or will be treated as A+A'.
     void analyze(cholmod_sparse* A);
 
+    // Analyze A and record `pattern_tag` as the pattern the symbolic factor
+    // belongs to. Untagged analyses (above) record 0.
+    void analyze(cholmod_sparse* A, unsigned long long pattern_tag);
+
+    // Analyze A unless the live symbolic factor was built for `pattern_tag`.
+    // One solver can serve Hessians assembled on different patterns -- the
+    // pattern refill_from_dense discovers (kOwnedPatternTag) and a
+    // SparseHessianBuilder's (its pattern_generation) -- and analyzed() alone
+    // cannot tell which one the factor belongs to; factorizing a matrix against
+    // another pattern's symbolic factor is undefined. Returns analyzed().
+    bool ensure_analyzed(cholmod_sparse* A, unsigned long long pattern_tag);
+
+    // Tag of the pattern refill_from_dense owns. Builder generations count up
+    // from 1, so they never reach it.
+    static constexpr unsigned long long kOwnedPatternTag = ~0ULL;
+
     // Phase 2: Numeric factorization. Computes L such that PAP' = LL'.
     // Returns true on success, false if matrix is not positive definite.
     // A must have the same sparsity pattern as in analyze().
@@ -63,6 +79,20 @@ public:
     // so this method only needs the plain supernodal path — no
     // simplicial fallback, no dbound, no per-call ridge retry.
     bool factorize(cholmod_sparse* A);
+
+    // Switch the solver to a simplicial LDL' factorization, for a symmetric
+    // matrix that may be indefinite. Call before analyze(). CHOLMOD's LDL' does
+    // not pivot for stability and stops only on an exactly zero pivot, so
+    // factorize() succeeds on an indefinite matrix whose leading pivots under
+    // the fill-reducing ordering are nonzero; a caller relying on it has to
+    // bound the backward error itself.
+    void use_simplicial_ldl();
+
+    // Inertia and log|det| of a successful LDL' factorization: the number of
+    // negative pivots of D (Sylvester: the number of negative eigenvalues of A)
+    // and sum_j log|D_jj|. False when there is no factored LDL' factor or a
+    // pivot is zero or not finite.
+    bool ldl_inertia(int& n_neg, double& log_abs_det) const;
 
     // Solve Ax = b using the current factorization.
     // b and x are dense vectors of length n.
@@ -234,6 +264,9 @@ private:
     cholmod_sparse* A_owned_;
     bool analyzed_;
     bool factored_;
+    unsigned long long pattern_tag_ = 0;
+    // One read cursor per CSC column for refill_from_dense's row-order walk.
+    std::vector<int> refill_cursor_;
 };
 
 // =====================================================================
@@ -253,16 +286,16 @@ private:
 // (one pass over Lp / Li, cheap against the recursion itself) because these
 // are offered to callers holding a factor tulpa did not produce:
 //   - L[j,j] occupies the first slot of column j, i.e. Li[Lp[j]] == j;
-//   - row indices ascend strictly within a column, which the entry lookup
-//     relies on to stop early;
-//   - no duplicate row indices in a column.
+//   - row indices ascend strictly within a column;
+//   - no duplicate row indices in a column, which the scatter into row sums
+//     would count twice.
 // A factor violating any of them produces silently wrong output otherwise, so
 // the recursion refuses it instead: false is returned and the output is left
 // zeroed. A Matrix::Cholesky simplicial factor (dCHMsimpl) satisfies all three.
 //
-// Cost is sum_j |col_j| * (|col_j| + average scan length within the searched
-// column), not O(nnz(L)): the inner entry lookup is a linear scan over another
-// column.
+// Cost is sum_j sum_{k in struct(j)} |col_k|, not O(nnz(L)): column j reads
+// Z on struct(j) x struct(j) by walking each column k of struct(j) once. On a
+// dense factor that is n^3 / 6, the order of the factorization itself.
 // =====================================================================
 
 // Fill Zx_out (size = Lp[n]) with the Takahashi partial inverse on pattern(L).
@@ -311,6 +344,11 @@ cholmod_sparse* dense_to_cholmod_sparse_drop(
     double drop_tol,
     cholmod_common* common
 );
+
+// Calls every M_cholmod_* stub tulpa uses once, so each resolves its target
+// on the calling thread. Run on the R main thread at DLL load
+// (cholmod_stub_resolve.cpp).
+void cholmod_resolve_stubs();
 
 } // namespace tulpa
 

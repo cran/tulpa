@@ -252,12 +252,23 @@ tgmrf <- function(Q, prior, init,
 #' @param block A `tgmrf` (or, in the future, `tgeneric`) object.
 #' @return Returns `block` invisibly. Outside a formula context the call is
 #'   a no-op pass-through.
+#' @examples
+#' n <- 8
+#' blk <- tgmrf(
+#'   Q = function(theta) Matrix::Diagonal(n, exp(-2 * theta[1])),
+#'   prior = function(theta) stats::dnorm(theta[1], 0, 1, log = TRUE),
+#'   init = c(log_sigma = 0))
+#' parsed <- tulpa_parse_formula(y ~ x + latent(blk))
+#' parsed$n_latent_blocks
 #' @export
 latent <- function(block) {
   invisible(block)
 }
 
 
+#' @rdname tgmrf
+#' @param x A `tgmrf` block.
+#' @param ... Passed from `summary()` to `print()`.
 #' @export
 print.tgmrf <- function(x, ...) {
   label <- x$name %||% "tgmrf"
@@ -284,6 +295,10 @@ print.tgmrf <- function(x, ...) {
 }
 
 
+#' @rdname tgmrf
+#' @param object A `tgmrf` block.
+#' @return `summary()` prints the block, its log prior at `init` and its bounds,
+#'   and returns `object` invisibly.
 #' @export
 summary.tgmrf <- function(object, ...) {
   print(object, ...)

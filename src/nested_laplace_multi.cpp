@@ -25,12 +25,18 @@
 //   rw2        : 1 axis  = (tau,)
 //   ar1        : 2 axes  = (tau, rho)
 //   iid        : 1 axis  = (sigma,)
+//   nngp       : 2 axes  = (sigma2, phi_gp)
+//   hsgp       : 2 axes  = (sigma2, lengthscale)
 //
 // One block-spec maps to ONE input-list element but may push 1 or 2
 // LatentBlocks into the vector (BYM2 is the only 2-block expansion).
 
 #include "areal_input_check.h"     // check_latent_obs_index
+#include "block_projector.h"       // projected areal fields (RSR)
+#include "car_proper_block.h"      // set_car_proper_block_priors
 #include "bym2_mixing.h"           // BYM2_RHO_EPS + the mixing amplitudes
+#include "field_block_priors.h"    // set_icar / set_temporal_block_priors
+#include "hsgp_block_factory.h"
 #include "laplace_re_priors.h"
 #include "laplace_spatial_priors.h"
 #include "laplace_spec_fit.h"       // unwrap_skew_idx
@@ -38,6 +44,7 @@
 #include "latent_block.h"
 #include "nl_cell_cache.h"
 #include "nested_laplace_multi.h"
+#include "nngp_block_factory.h"
 #include "spde_block_factory.h"
 #include "tgmrf_block_factory.h"
 #include "unit_precision_block.h"
@@ -55,6 +62,54 @@
 
 namespace {
 
+// The projector of an areal block spec, or null when it gathers its units
+// through `spatial_idx`. A projector replaces the gather, so a spec carrying
+// both is refused.
+std::shared_ptr<std::vector<tulpa::ARows>> read_single_arm_projector(
+    const Rcpp::List& bs, int n_obs, int size, int block_index,
+    const std::string& type
+) {
+    auto rows = tulpa::read_block_projector(
+        bs, Rcpp::IntegerVector::create(n_obs), size, block_index, type);
+    if (rows && bs.containsElementNamed("spatial_idx") &&
+        !Rf_isNull(bs["spatial_idx"])) {
+        Rcpp::stop("Block %d (type '%s'): pass either `projector` or "
+                   "`spatial_idx`, not both; a projector already maps the "
+                   "observations to the units.", block_index + 1, type.c_str());
+    }
+    return rows;
+}
+
+// Identification of a projected intrinsic field, placed where
+// tulpa::projected_level() reads its level: removed with no fold when the
+// projector annihilates the constant, folded into the intercept when the
+// constant reaches the predictor as the intercept column, otherwise left to
+// the precision augmentation. Either centring carries the level as the hard
+// constraint the gathered field's does.
+void centre_projected_intrinsic_level(tulpa::LatentBlock& blk,
+                                      const std::vector<tulpa::ARows>& rows,
+                                      const Rcpp::NumericMatrix& X) {
+    const tulpa::ProjectedLevel level = tulpa::projected_level(
+        rows, [&X](int /*k*/, int i, double& x0) {
+            if (X.ncol() == 0 || i >= X.nrow()) return false;
+            x0 = X(i, 0);
+            return true;
+        });
+    if (level == tulpa::ProjectedLevel::INTERCEPT) {
+        tulpa::centre_intrinsic_level(blk);
+    } else if (level == tulpa::ProjectedLevel::ABSENT) {
+        const int start = blk.start;
+        const int size  = blk.size;
+        blk.center = [start, size](Rcpp::NumericVector& x) {
+            std::vector<tulpa::CenterFold> folds =
+                tulpa::center_intercept(x, start, size);
+            for (auto& f : folds) f.beta_offset = -1;
+            return folds;
+        };
+        blk.intrinsic_level = true;
+    }
+}
+
 // Push the LatentBlock(s) for one block-spec entry. Returns the new
 // latent_offset after appending this block's sub-vector(s) to the joint
 // latent vector layout. Wrapped by build_blocks_from_spec below, which
@@ -67,6 +122,8 @@ int build_blocks_of_type(
     int axis_count,           // number of axes used by this block
     int latent_offset,
     int n_obs,                // rows every block.idx below is read for
+    const Rcpp::NumericMatrix& X,
+    int block_index,
     std::vector<tulpa::LatentBlock>& blocks
 ) {
     std::string type = Rcpp::as<std::string>(bs["type"]);
@@ -91,8 +148,13 @@ int build_blocks_of_type(
     if (type == "icar") {
         require_axes(1);
         int size = Rcpp::as<int>(bs["n_spatial_units"]);
-        Rcpp::IntegerVector spatial_idx = bs["spatial_idx"];
-        check_idx(spatial_idx, size, "blocks_spec$spatial_idx");
+        const auto projector = read_single_arm_projector(bs, n_obs, size,
+                                                         block_index, type);
+        Rcpp::IntegerVector spatial_idx;
+        if (!projector) {
+            spatial_idx = bs["spatial_idx"];
+            check_idx(spatial_idx, size, "blocks_spec$spatial_idx");
+        }
         Rcpp::IntegerVector adj_rp      = bs["adj_row_ptr"];
         Rcpp::IntegerVector adj_ci      = bs["adj_col_idx"];
         Rcpp::IntegerVector n_nbr       = bs["n_neighbors"];
@@ -108,22 +170,16 @@ int build_blocks_of_type(
         block.size  = size;
         block.idx   = [spatial_idx](int i, int /*k_arm*/) { return spatial_idx[i]; };
         block.d_fac = [](int) { return 1.0; };
-        block.add_prior = [start, size, axis0, theta_grid, adj_rp, adj_ci, n_nbr, sp_part](
-            tulpa::DenseVec& grad, tulpa::DenseMat& H,
-            const Rcpp::NumericVector& x, int k) {
-            double tau = theta_grid(k, axis0);
-            tulpa::add_icar_prior(grad, H, x, start, size, tau,
-                                   adj_rp, adj_ci, n_nbr, sp_part);
-        };
-        block.log_prior = [start, size, axis0, theta_grid, adj_rp, adj_ci, n_nbr, sp_part](
-            const Rcpp::NumericVector& x, int k) {
-            double tau = theta_grid(k, axis0);
-            return tulpa::log_prior_icar(x, start, size, tau,
-                                          adj_rp, adj_ci, n_nbr, sp_part);
-        };
-        block.center = [start, size](Rcpp::NumericVector& x) {
-            return tulpa::center_intercept(x, start, size);
-        };
+        tulpa::set_icar_block_priors(
+            block, start, size,
+            [theta_grid, axis0](int k) { return theta_grid(k, axis0); },
+            adj_rp, adj_ci, n_nbr, sp_part);
+        if (projector) {
+            tulpa::apply_block_projector(block, projector);
+            centre_projected_intrinsic_level(block, *projector, X);
+        } else {
+            tulpa::centre_intrinsic_level(block);
+        }
         blocks.push_back(block);
         return start + size;
     }
@@ -131,8 +187,13 @@ int build_blocks_of_type(
     if (type == "bym2") {
         require_axes(2);
         int size = Rcpp::as<int>(bs["n_spatial_units"]);
-        Rcpp::IntegerVector spatial_idx = bs["spatial_idx"];
-        check_idx(spatial_idx, size, "blocks_spec$spatial_idx");
+        const auto projector = read_single_arm_projector(bs, n_obs, size,
+                                                         block_index, type);
+        Rcpp::IntegerVector spatial_idx;
+        if (!projector) {
+            spatial_idx = bs["spatial_idx"];
+            check_idx(spatial_idx, size, "blocks_spec$spatial_idx");
+        }
         Rcpp::IntegerVector adj_rp      = bs["adj_row_ptr"];
         Rcpp::IntegerVector adj_ci      = bs["adj_col_idx"];
         Rcpp::IntegerVector n_nbr       = bs["n_neighbors"];
@@ -149,6 +210,11 @@ int build_blocks_of_type(
         int theta_start = phi_start + size;
         const tulpa::GraphPartition sp_part = tulpa::graph_partition(
             size, adj_rp.begin(), adj_ci.begin());
+        // Per-component BYM2 scaling beyond the reference scale_factor (#902).
+        const std::vector<double> node_prec = tulpa::read_node_prec(
+            bs.containsElementNamed("node_prec") ? SEXP(bs["node_prec"])
+                                                 : R_NilValue,
+            size, "blocks_spec (bym2)");
 
         tulpa::LatentBlock phi_block;
         phi_block.start = phi_start;
@@ -159,23 +225,15 @@ int build_blocks_of_type(
             double rho_k   = theta_grid(k, axis0 + 1);
             return sigma_k * tulpa::bym2_sd_structured(rho_k) * scale_factor;
         };
-        phi_block.add_prior = [phi_start, size, adj_rp, adj_ci, n_nbr, sp_part](
-            tulpa::DenseVec& grad, tulpa::DenseMat& H,
-            const Rcpp::NumericVector& x, int) {
-            tulpa::add_icar_prior(grad, H, x, phi_start, size, 1.0,
-                                   adj_rp, adj_ci, n_nbr, sp_part);
-        };
-        phi_block.log_prior = [phi_start, size, adj_rp, adj_ci, n_nbr, sp_part](
-            const Rcpp::NumericVector& x, int) {
-            // Structured ICAR component (tau = 1); shares the quadratic form and
-            // the sum-to-zero penalty with add_icar_prior so the objective stays
-            // consistent with the gradient, instead of re-deriving them inline.
-            return tulpa::log_prior_icar_structured(x, phi_start, size, /*tau=*/1.0,
-                                                    adj_rp, adj_ci, n_nbr, sp_part);
-        };
-        phi_block.center = [phi_start, size](Rcpp::NumericVector& x) {
-            return tulpa::center_intercept(x, phi_start, size);
-        };
+        tulpa::set_icar_block_priors(
+            phi_block, phi_start, size, [](int) { return 1.0; },
+            adj_rp, adj_ci, n_nbr, sp_part, node_prec, /*structured=*/true);
+        if (projector) {
+            tulpa::apply_block_projector(phi_block, projector);
+            centre_projected_intrinsic_level(phi_block, *projector, X);
+        } else {
+            tulpa::centre_intrinsic_level(phi_block);
+        }
         blocks.push_back(phi_block);
 
         tulpa::LatentBlock theta_block;
@@ -188,6 +246,7 @@ int build_blocks_of_type(
             return sigma_k * tulpa::bym2_sd_unstructured(rho_k);
         };
         tulpa::set_unit_precision_block_priors(theta_block, theta_start, size);
+        if (projector) tulpa::apply_block_projector(theta_block, projector);
         blocks.push_back(theta_block);
         return theta_start + size;
     }
@@ -195,57 +254,86 @@ int build_blocks_of_type(
     if (type == "car_proper") {
         require_axes(2);
         int size = Rcpp::as<int>(bs["n_spatial_units"]);
-        Rcpp::IntegerVector spatial_idx = bs["spatial_idx"];
-        check_idx(spatial_idx, size, "blocks_spec$spatial_idx");
+        const auto projector = read_single_arm_projector(bs, n_obs, size,
+                                                         block_index, type);
+        Rcpp::IntegerVector spatial_idx;
+        if (!projector) {
+            spatial_idx = bs["spatial_idx"];
+            check_idx(spatial_idx, size, "blocks_spec$spatial_idx");
+        }
         Rcpp::IntegerVector adj_rp      = bs["adj_row_ptr"];
         Rcpp::IntegerVector adj_ci      = bs["adj_col_idx"];
         Rcpp::IntegerVector n_nbr       = bs["n_neighbors"];
         int start = latent_offset;
-
-        // Cache CSR for the dense log-det helper. The rho-dependent log|Q| is
-        // cell-keyed (NlCellCache) so a parallel outer grid can never read one
-        // cell's prep() value into another cell's log_prior() -- matching the
-        // single-block CAR_proper path; cell-keyed state costs nothing.
-        auto adj_rp_v = std::make_shared<std::vector<int>>(adj_rp.begin(), adj_rp.end());
-        auto adj_ci_v = std::make_shared<std::vector<int>>(adj_ci.begin(), adj_ci.end());
-        auto n_nbr_v  = std::make_shared<std::vector<int>>(n_nbr.begin(),  n_nbr.end());
-        auto log_det_Q_rho = std::make_shared<tulpa::NlCellCache<double>>();
 
         tulpa::LatentBlock block;
         block.start = start;
         block.size  = size;
         block.idx   = [spatial_idx](int i, int /*k_arm*/) { return spatial_idx[i]; };
         block.d_fac = [](int) { return 1.0; };
-        block.prep  = [size, axis0, theta_grid, adj_rp_v, adj_ci_v, n_nbr_v,
-                       log_det_Q_rho](int k) -> bool {
-            double rho_k = theta_grid(k, axis0 + 1);
-            std::vector<double> Qmat = tulpa_car_proper::compute_car_precision(
-                size, *adj_rp_v, *adj_ci_v, *n_nbr_v, rho_k);
-            double ld_val = tulpa_car_proper::car_log_det(size, Qmat);
-            log_det_Q_rho->claim() = ld_val;
-            log_det_Q_rho->publish(k);
-            return std::isfinite(ld_val);
-        };
-        block.add_prior = [start, size, axis0, theta_grid, adj_rp, adj_ci, n_nbr](
-            tulpa::DenseVec& grad, tulpa::DenseMat& H,
-            const Rcpp::NumericVector& x, int k) {
-            double tau = theta_grid(k, axis0);
-            double rho = theta_grid(k, axis0 + 1);
-            tulpa::add_car_proper_prior(grad, H, x, start, size, tau, rho,
-                                         adj_rp, adj_ci, n_nbr);
-        };
-        block.log_prior = [start, size, axis0, theta_grid, adj_rp, adj_ci, n_nbr,
-                           log_det_Q_rho](const Rcpp::NumericVector& x, int k) {
-            double tau = theta_grid(k, axis0);
-            double rho = theta_grid(k, axis0 + 1);
-            return tulpa::log_prior_car_proper(x, start, size, tau, rho,
-                                                 log_det_Q_rho->find(k),
-                                                 adj_rp, adj_ci, n_nbr);
-        };
+        tulpa::set_car_proper_block_priors(
+            block, start, size,
+            [theta_grid, axis0](int k) { return theta_grid(k, axis0); },
+            [theta_grid, axis0](int k) { return theta_grid(k, axis0 + 1); },
+            adj_rp, adj_ci, n_nbr);
         // Full-rank prior: no null direction to identify, so the field is
         // reported at its own mode. See make_car_proper_latent_blocks.
+        if (projector) tulpa::apply_block_projector(block, projector);
         blocks.push_back(block);
         return start + size;
+    }
+
+    if (type == "nngp") {
+        require_axes(2);  // (sigma2, phi_gp)
+        const int n_spatial = Rcpp::as<int>(bs["n_spatial"]);
+        const int nn        = Rcpp::as<int>(bs["nn"]);
+        const int cov_type  = Rcpp::as<int>(bs["cov_type"]);
+        tulpa::nl_grid_axis_positive("nngp sigma2 axis", theta_grid, axis0);
+        tulpa::nl_grid_axis_positive("nngp phi_gp axis", theta_grid, axis0 + 1);
+        const auto projector = read_single_arm_projector(bs, n_obs, n_spatial,
+                                                         block_index, type);
+        // A projected field reaches no unit through the gather: every row
+        // reads 0 ("no field on this row") until the projector replaces it.
+        Rcpp::IntegerVector spatial_idx(n_obs, 0);
+        if (!projector) {
+            spatial_idx = bs["spatial_idx"];
+            check_idx(spatial_idx, n_spatial, "blocks_spec$spatial_idx");
+        }
+        tulpa::LatentBlock block = tulpa::make_nngp_block(
+            /*start=*/latent_offset, n_spatial,
+            Rcpp::List::create(spatial_idx),
+            Rcpp::IntegerVector::create(n_obs),
+            /*n_arms=*/1, block_index, nn, cov_type,
+            Rcpp::as<Rcpp::NumericMatrix>(bs["coords"]),
+            Rcpp::as<Rcpp::IntegerMatrix>(bs["nn_idx"]),
+            Rcpp::as<Rcpp::NumericMatrix>(bs["nn_dist"]),
+            Rcpp::as<Rcpp::IntegerVector>(bs["nn_order"]),
+            /*axis_sigma2=*/axis0, /*axis_phi_gp=*/axis0 + 1, theta_grid);
+        // The NNGP prior is proper, so its level carries a prior of its own and
+        // nothing is centred, projected or not: a projector annihilating the
+        // constant leaves that direction to the prior alone.
+        if (projector) tulpa::apply_block_projector(block, projector);
+        blocks.push_back(block);
+        return latent_offset + n_spatial;
+    }
+
+    if (type == "hsgp") {
+        require_axes(2);  // (sigma2, lengthscale)
+        tulpa::nl_grid_axis_positive("hsgp sigma2 axis", theta_grid, axis0);
+        tulpa::nl_grid_axis_positive("hsgp lengthscale axis", theta_grid,
+                                     axis0 + 1);
+        Rcpp::NumericMatrix phi_basis = bs["phi_basis"];
+        Rcpp::NumericVector lambda_eig = bs["lambda_eig"];
+        const int m_total = phi_basis.ncol();
+        // The same DENSE_BASIS block the single-block HSGP kernel and the
+        // joint driver build; the factory checks the basis against n_obs and
+        // the eigenvalues against its width.
+        blocks.push_back(tulpa::make_hsgp_block(
+            latent_offset, m_total, Rcpp::List::create(phi_basis),
+            Rcpp::IntegerVector::create(n_obs), /*n_arms=*/1, block_index,
+            lambda_eig, /*axis_sigma2=*/axis0, /*axis_ell=*/axis0 + 1,
+            theta_grid));
+        return latent_offset + m_total;
     }
 
     if (type == "spde") {
@@ -312,34 +400,11 @@ int build_blocks_of_type(
         block.d_fac = [](int) { return 1.0; };
         // One walk (n_groups = 1); the field entry points carry the sum-to-zero
         // pin that identifies the level against the intercept.
-        if (type == "rw1") {
-            block.add_prior = [start, size, axis0, theta_grid, cyclic](
-                tulpa::DenseVec& grad, tulpa::DenseMat& H,
-                const Rcpp::NumericVector& x, int k) {
-                double tau = theta_grid(k, axis0);
-                tulpa::add_rw1_field(grad, H, x, start, 1, size, tau, cyclic);
-            };
-            block.log_prior = [start, size, axis0, theta_grid, cyclic](
-                const Rcpp::NumericVector& x, int k) {
-                double tau = theta_grid(k, axis0);
-                return tulpa::log_prior_rw1_field(x, start, 1, size, tau, cyclic);
-            };
-        } else {
-            block.add_prior = [start, size, axis0, theta_grid, cyclic](
-                tulpa::DenseVec& grad, tulpa::DenseMat& H,
-                const Rcpp::NumericVector& x, int k) {
-                double tau = theta_grid(k, axis0);
-                tulpa::add_rw2_field(grad, H, x, start, 1, size, tau, cyclic);
-            };
-            block.log_prior = [start, size, axis0, theta_grid, cyclic](
-                const Rcpp::NumericVector& x, int k) {
-                double tau = theta_grid(k, axis0);
-                return tulpa::log_prior_rw2_field(x, start, 1, size, tau, cyclic);
-            };
-        }
-        block.center = [start, size](Rcpp::NumericVector& x) {
-            return tulpa::center_intercept(x, start, size);
-        };
+        tulpa::set_temporal_block_priors(
+            block, type, start, /*n_groups=*/1, size,
+            [theta_grid, axis0](int k) { return theta_grid(k, axis0); },
+            [](int) { return 0.0; }, cyclic);
+        tulpa::centre_intrinsic_level(block);
         blocks.push_back(block);
         return start + size;
     }
@@ -356,19 +421,11 @@ int build_blocks_of_type(
         block.size  = size;
         block.idx   = [temporal_idx](int i, int /*k_arm*/) { return temporal_idx[i]; };
         block.d_fac = [](int) { return 1.0; };
-        block.add_prior = [start, size, axis0, theta_grid](
-            tulpa::DenseVec& grad, tulpa::DenseMat& H,
-            const Rcpp::NumericVector& x, int k) {
-            double tau = theta_grid(k, axis0);
-            double rho = theta_grid(k, axis0 + 1);
-            tulpa::add_ar1_precision(grad, H, x, start, size, tau, rho);
-        };
-        block.log_prior = [start, size, axis0, theta_grid](
-            const Rcpp::NumericVector& x, int k) {
-            double tau = theta_grid(k, axis0);
-            double rho = theta_grid(k, axis0 + 1);
-            return tulpa::log_prior_ar1(x, start, size, tau, rho);
-        };
+        tulpa::set_temporal_block_priors(
+            block, type, start, /*n_groups=*/1, size,
+            [theta_grid, axis0](int k) { return theta_grid(k, axis0); },
+            [theta_grid, axis0](int k) { return theta_grid(k, axis0 + 1); },
+            /*cyclic=*/false);
         // AR1 is proper at |rho| < 1: full rank, so no centering. Same rule as
         // proper CAR above and as the joint multi-arm driver.
         blocks.push_back(block);
@@ -379,9 +436,8 @@ int build_blocks_of_type(
         // User-defined GMRF block. The R side has precomputed Q(theta_k) at
         // every outer-grid row plus log|Q_k| and log p(theta_k); the shared
         // factory (also used by the joint multi-arm driver) reads them and
-        // assembles the callbacks. The single-block dense driver consumes only
-        // block.idx / add_prior / log_prior, so the factory's sparse / pattern
-        // / contrib-kind fields are inert here.
+        // assembles the callbacks, dense and sparse, for whichever Newton path
+        // the driver takes.
         int size = Rcpp::as<int>(bs["n_latent"]);
         Rcpp::IntegerVector obs_idx = bs["obs_idx"];
         int start = latent_offset;
@@ -444,12 +500,14 @@ int build_blocks_from_spec(
     int axis_count,
     int latent_offset,
     int N,
+    const Rcpp::NumericMatrix& X,
+    int block_index,
     std::vector<tulpa::LatentBlock>& blocks
 ) {
     const std::size_t first = blocks.size();
     const int next_offset = build_blocks_of_type(bs, theta_grid, axis0,
                                                  axis_count, latent_offset,
-                                                 N, blocks);
+                                                 N, X, block_index, blocks);
     if (!bs.containsElementNamed("svc_weight") ||
         Rf_isNull(bs["svc_weight"])) {
         return next_offset;
@@ -513,16 +571,24 @@ Rcpp::List cpp_nested_laplace_multi(
     int n_grid = theta_grid.nrow();
     int latent_offset = p + n_re_groups;
 
+    // Where each spec block's coefficients start in the latent vector (0-based,
+    // B + 1 entries, the last one n_x). The builders are what decide a block's
+    // width -- bym2 lays out two sub-fields, a tgmrf its own n_latent -- so the
+    // layout is reported from here rather than re-derived in R, which is how an
+    // accessor finds one field among several in `modes` (gcol33/tulpa#903).
+    Rcpp::IntegerVector block_latent_offsets(B + 1);
     std::vector<tulpa::LatentBlock> blocks;
     blocks.reserve(B + 2);
     for (int b = 0; b < B; b++) {
         Rcpp::List bs = blocks_spec[b];
         int axis0 = axis_offsets[b];
         int axis_count = axis_offsets[b + 1] - axis0;
+        block_latent_offsets[b] = latent_offset;
         latent_offset = build_blocks_from_spec(
-            bs, theta_grid, axis0, axis_count, latent_offset, N, blocks
+            bs, theta_grid, axis0, axis_count, latent_offset, N, X, b, blocks
         );
     }
+    block_latent_offsets[B] = latent_offset;
 
     Rcpp::NumericVector x_init;
     if (x_init_nullable.isNotNull()) {
@@ -611,11 +677,11 @@ Rcpp::List cpp_nested_laplace_multi(
         tulpa::CilaRequest(cila).ptr,
         tulpa::CHEAP_SCREEN_ITERS, /*compute_fitted_var=*/true,
         tulpa::as_offset_vec(offset_nullable, N),
-        screen_log_offset.isNull() ? std::vector<double>()
-            : Rcpp::as<std::vector<double>>(screen_log_offset)
+        tulpa::read_screen_offset(screen_log_offset)
     );
     out["theta_grid"]     = theta_grid;
     out["axis_offsets"]   = axis_offsets;
     out["block_centered"] = tulpa::block_center_flags(blocks);
+    out["block_latent_offsets"] = block_latent_offsets;
     return out;
 }

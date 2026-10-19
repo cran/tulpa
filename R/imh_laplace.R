@@ -102,19 +102,16 @@ imh_laplace <- function(log_posterior,
     stop(sprintf("`hessian` must be a %d x %d matrix.", d, d),
          call. = FALSE)
   }
-  if (n_iter < 2L || warmup < 0L || warmup >= n_iter) {
-    stop("Need 0 <= warmup < n_iter and n_iter >= 2.", call. = FALSE)
-  }
+  .check_run_length(n_iter, warmup, "imh_laplace")
   if (scale <= 0) stop("`scale` must be positive.", call. = FALSE)
 
   # Proposal: theta ~ N(mode, scale^2 * H^{-1}).
-  prop_cov <- tryCatch(scale^2 * solve(hessian),
+  prop_cov <- tryCatch(scale^2 * .spd_inverse(hessian),
                        error = function(e) {
-                         stop("Hessian is singular; cannot invert. ",
-                              "Pass a positive-definite H_beta or ",
-                              "regularise.", call. = FALSE)
+                         stop("Hessian is singular or not positive-definite; ",
+                              "cannot invert. Pass a positive-definite ",
+                              "H_beta or regularise.", call. = FALSE)
                        })
-  prop_cov <- 0.5 * (prop_cov + t(prop_cov))   # symmetrise
   R <- tryCatch(chol(prop_cov),
                 error = function(e) {
                   stop("Proposal covariance not positive-definite. ",
@@ -194,5 +191,5 @@ imh_laplace <- function(log_posterior,
     backend = "imh_laplace",
     proposal = list(mode = mode, cov = prop_cov, scale = scale)
   )
-  .finalize_fit(fit, param_names = names(mode), extra_class = "tulpa_imh_fit")
+  .finalize_fit(fit, param_names = names(mode))
 }

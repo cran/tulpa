@@ -2,7 +2,7 @@
 % Please edit documentation in R/family_loglik.R
 \name{family_names}
 \alias{family_names}
-\title{Supported R-level family names.}
+\title{Supported R-level family names}
 \usage{
 family_names()
 }
@@ -12,5 +12,8 @@ A character vector of family names.
 \description{
 The response families \verb{family = } accepts on the engine's front doors, in
 their canonical (default-link) spelling. A family's \verb{*_<link>} variants
-(e.g. \code{"gamma_inverse"}) are listed separately by \code{\link[=linked_family_names]{linked_family_names()}}.
+(e.g. \code{"gamma_inverse"}) are accepted as well and not listed here.
+}
+\examples{
+family_names()
 }

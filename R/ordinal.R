@@ -49,7 +49,9 @@
 #' There is no separate intercept -- the cutpoints carry the baseline levels.
 #'
 #' @param formula Model formula; the response must be an ordered (or coercible)
-#'   factor with >= 3 levels. An intercept in `formula` is dropped.
+#'   factor with >= 3 levels, each observed at least once. An intercept in
+#'   `formula` is dropped; `y ~ 1` fits the cutpoints alone. Incomplete rows
+#'   are refused, not dropped.
 #' @param data A data frame.
 #' @param link Cumulative link: `"logit"` (proportional odds, default) or
 #'   `"probit"`.
@@ -64,7 +66,7 @@
 #' @return A `tulpa_fit` (subclass `tulpa_ordinal`) with `coefficients`
 #'   (covariate effects) and `cutpoints` at the posterior mode, `draws` (the
 #'   Laplace Gaussian mapped to ordered cutpoints), `log_marginal`, `levels`.
-#'   The draws are the posterior [coef()], [vcov()], [summary()] and
+#'   The draws are the posterior [coef()], [vcov()], [summary.tulpa_fit()] and
 #'   [confint()] report; [coef()] omits the cutpoints, as `MASS::polr` does.
 #'
 #' @seealso [tulpa_multinomial()] for the nominal (unordered) case.
@@ -91,9 +93,8 @@ tulpa_ordinal <- function(formula, data, link = c("logit", "probit"),
   max_iter <- as.integer(control$max_iter %||% 200L)
   n_draws  <- as.integer(control$n_draws %||% 2000L)
 
-  mf <- stats::model.frame(formula, data)
-  y  <- stats::model.response(mf)
-  if (!is.factor(y)) y <- factor(y, ordered = TRUE)
+  cm <- .categorical_model_frame(formula, data, "tulpa_ordinal", ordered = TRUE)
+  y  <- cm$y
   K  <- nlevels(y)
   if (K < 3L) {
     stop("tulpa_ordinal() needs a response with >= 3 ordered levels; for 2 use ",
@@ -101,10 +102,11 @@ tulpa_ordinal <- function(formula, data, link = c("logit", "probit"),
   }
   K1  <- K - 1L
   cls <- as.integer(y)
-  X   <- stats::model.matrix(stats::terms(mf), mf)
+  X   <- cm$X
   X   <- X[, setdiff(colnames(X), "(Intercept)"), drop = FALSE]   # cutpoints carry it
+  # `y ~ 1` leaves no covariate: the cutpoints alone are the model (the
+  # marginal class frequencies), which MASS::polr fits too (gcol33/tulpa#886).
   p   <- ncol(X)
-  if (p < 1L) stop("tulpa_ordinal() needs at least one predictor.", call. = FALSE)
 
   tau_b <- 1 / beta_prior_sd^2
   tau_c <- 1 / cut_prior_sd^2
@@ -164,6 +166,11 @@ tulpa_ordinal <- function(formula, data, link = c("logit", "probit"),
 
 # The covariate effects of the fixed-effect table, cutpoints omitted as
 # MASS::polr's coef() omits its zeta; vcov() and summary() keep the cutpoints.
+#' @rdname tulpa_ordinal
+#' @param object A `tulpa_ordinal` fit.
+#' @param ... Ignored.
+#' @return `coef()` returns the covariate effects without the cutpoints, as
+#'   `MASS::polr()` omits its `zeta`; `vcov()` and `summary()` keep them.
 #' @export
 coef.tulpa_ordinal <- function(object, ...) {
   .ordinal_table_split(object)$coefficients
@@ -179,6 +186,8 @@ coef.tulpa_ordinal <- function(object, ...) {
   list(coefficients = est[setdiff(names(est), cut)], cutpoints = est[cut])
 }
 
+#' @rdname tulpa_ordinal
+#' @param x A `tulpa_ordinal` fit.
 #' @export
 print.tulpa_ordinal <- function(x, ...) {
   cat(sprintf("Ordinal cumulative %s (%d ordered levels), Laplace fit\n",

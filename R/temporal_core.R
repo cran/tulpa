@@ -1,4 +1,4 @@
-#' RW1 temporal structure (First-order Random Walk)
+#' RW1 temporal structure (first-order random walk)
 #'
 #' @description
 #' Specify a first-order random walk temporal random effect. RW1 penalizes
@@ -62,7 +62,7 @@ temporal_rw1 <- function(time_var, group_var = NULL, cyclic = FALSE,
 }
 
 
-#' RW2 temporal structure (Second-order Random Walk)
+#' RW2 temporal structure (second-order random walk)
 #'
 #' @description
 #' Specify a second-order random walk temporal random effect.
@@ -134,7 +134,7 @@ temporal_rw2 <- function(time_var, group_var = NULL, cyclic = FALSE,
 }
 
 
-#' AR1 temporal structure (First-order Autoregressive)
+#' AR1 temporal structure (first-order autoregressive)
 #'
 #' @description
 #' Specify a first-order autoregressive temporal random effect.
@@ -236,6 +236,7 @@ temporal_ar1 <- function(time_var, group_var = NULL, shared = NULL,
 #' @return The input `x`, returned invisibly. Called for the side effect of
 #'   printing the temporal specification to the console.
 #'
+#' @noRd
 #' @export
 print.tulpa_temporal <- function(x, ...) {
  cat("tulpa temporal specification\n")
@@ -272,13 +273,47 @@ print.tulpa_temporal <- function(x, ...) {
 }
 
 
+# The time column of a temporal field as a factor whose level order IS the
+# chain order, so `as.integer()` of it is each observation's node. The one
+# resolver behind every temporal door (validate_temporal(),
+# validate_temporal_multiscale(), validate_tvc(), the inline temporal() field):
+#   * factor            -> its level order, which the caller stated;
+#   * numeric / Date    -> sorted by value;
+#   * character labels that all parse as numbers
+#                       -> sorted by the number they spell, so "10" follows
+#                          "9" rather than "1";
+#   * other character   -> refused: a character vector states no order, and
+#                          the sort order of its labels is not a time order
+#                          ("Apr" < "Feb" < "Jan"). It built the walk out of
+#                          order silently (gcol33/tulpa#900).
+.resolve_time_index <- function(time_vals, time_var = "time") {
+  if (anyNA(time_vals)) {
+    stop("Temporal variable '", time_var, "' has missing values.",
+         call. = FALSE)
+  }
+  if (is.factor(time_vals)) return(time_vals)
+  if (is.character(time_vals)) {
+    num <- suppressWarnings(as.numeric(time_vals))
+    if (anyNA(num)) {
+      stop("Temporal variable '", time_var, "' holds character labels that ",
+           "are not numbers, so they carry no time order (their sort order ",
+           "is alphabetical). Pass a numeric or Date column, or a factor ",
+           "whose levels are in time order.", call. = FALSE)
+    }
+    lev <- unique(time_vals[order(num)])
+    return(factor(time_vals, levels = lev))
+  }
+  factor(time_vals, levels = sort(unique(time_vals)))
+}
+
+
 #' Validate temporal specification against data
 #'
 #' @param temporal tulpa_temporal object
 #' @param data Data frame
 #'
 #' @return Updated tulpa_temporal object with indices computed
-#' @keywords internal
+#' @noRd
 validate_temporal <- function(temporal, data) {
  if (is.null(temporal)) return(NULL)
 
@@ -296,17 +331,9 @@ validate_temporal <- function(temporal, data) {
    }
  }
 
- # Get time values and create indices
- time_vals <- data[[temporal$time_var]]
-
- # Convert to factor to get consistent indexing
- if (is.factor(time_vals)) {
-   time_factor <- time_vals
- } else {
-   # Sort unique values to ensure temporal ordering
-   unique_times <- sort(unique(time_vals))
-   time_factor <- factor(time_vals, levels = unique_times)
- }
+ .check_time_complete(data[[temporal$time_var]], temporal$time_var)
+ time_factor <- .resolve_time_index(data[[temporal$time_var]],
+                                    temporal$time_var)
 
  temporal$n_times <- nlevels(time_factor)
  temporal$time_index <- as.integer(time_factor)
@@ -315,6 +342,14 @@ validate_temporal <- function(temporal, data) {
  # Check minimum time points for RW2
  if (temporal$type == "rw2" && temporal$n_times < 3) {
    stop("RW2 requires at least 3 time points", call. = FALSE)
+ }
+ # A chain over a single time point has no increment to penalise (RW1) and no
+ # lag to correlate (AR1); it used to surface as an internal "unvalidated
+ # spec" error from the nested kernel (gcol33/tulpa#909).
+ if (temporal$type %in% c("rw1", "ar1") && temporal$n_times < 2) {
+   stop(sprintf(paste0("%s requires at least 2 distinct time points; '%s' has ",
+                       "%d."), toupper(temporal$type), temporal$time_var,
+                temporal$n_times), call. = FALSE)
  }
 
  # Handle grouping
@@ -334,4 +369,18 @@ validate_temporal <- function(temporal, data) {
  }
 
  temporal
+}
+
+# Every observation of a temporal field needs a time: a missing one has no
+# position on the chain, and it used to reach a kernel as an NA index (an RW
+# field) or as "TVC `time_index[3]` is -2147483648" (a TVC; gcol33/tulpa#909).
+# Shared by validate_temporal() and validate_tvc().
+.check_time_complete <- function(time_vals, time_var) {
+  if (anyNA(time_vals)) {
+    stop(sprintf(paste0("Time variable '%s' has %d missing value(s) (first at ",
+                        "row %d); every observation needs a time."),
+                 time_var, sum(is.na(time_vals)),
+                 which(is.na(time_vals))[1L]), call. = FALSE)
+  }
+  invisible(TRUE)
 }

@@ -10,9 +10,9 @@
 # flattened into one column:
 #
 #   estimated    the backend maximized or integrated over Sigma and this is the
-#                result (empirical Bayes, the RE-covariance integrators).
+#                result (empirical Bayes, the nested RE-covariance integrator).
 #   sampled      Sigma was a sampled parameter; the summary is a posterior mean
-#                over draws.
+#                over draws (the samplers, and re_cov_gibbs).
 #   conditioned  Sigma was fixed by the caller and the fit conditions on it, so
 #                this is an input echoed back, not an estimate.
 #
@@ -39,7 +39,10 @@
 #'
 #' @return A data frame with one row per random-effect coefficient: `term`,
 #'   `coef`, `sd`, and `source` (one of `"estimated"`, `"sampled"`,
-#'   `"conditioned"`). Correlated terms additionally carry the covariance
+#'   `"conditioned"`). A gaussian fit adds a final `term = "Residual"` row
+#'   (`coef` `NA`) with the residual SD `sqrt(phi)`, labelled `"estimated"`
+#'   under `estimate_phi = TRUE` and `"conditioned"` otherwise; it has no entry
+#'   in `"cov"`. Correlated terms additionally carry the covariance
 #'   matrices in the `"cov"` attribute, one per term, each with a `"correlation"`
 #'   attribute. Returns an empty data frame when the fit has no random effects.
 #'
@@ -115,10 +118,7 @@ VarCorr <- function(x, sigma = 1, ...) UseMethod("VarCorr")
 # The point-estimated RE SD a marginal-likelihood fit carries. A backend that
 # maximizes the marginal likelihood (agq_fit) holds sigma_re as an estimate and
 # no draws of it at all, so every draws-based source above returns NULL and the
-# 0-row matrix they were handed produced NaN, then diag(NaN, 1), then an error
-# out of `all(sd_m > 0)` that .print_re_section's tryCatch swallowed -- printing
-# the fit with no Random-effects section while the estimate sat on it
-# (gcol33/tulpa#710). Scalar terms only: a point estimate of a single SD is the
+# estimate is read here instead (gcol33/tulpa#710). Scalar terms only: a point estimate of a single SD is the
 # whole covariance of a `(1 | g)` term, and there is nothing to say about a
 # slope block's correlations from one number.
 #' @keywords internal
@@ -136,6 +136,14 @@ VarCorr <- function(x, sigma = 1, ...) UseMethod("VarCorr")
 # the log SDs; averaging exp() of the draws is the posterior mean SD, which is
 # not exp(mean(log sigma)) -- the difference is the whole reason to average on
 # the SD scale rather than the log one.
+#
+# A correlated term also carries its sampled correlation Cholesky factor as the
+# raw `L_re[tM.k]` block. Its correlation is the posterior mean of the per-draw
+# `R = L L'` -- an average of correlation matrices, so itself one -- and the
+# covariance is `diag(s) R diag(s)` at the posterior-mean SDs `s`, which keeps
+# the reported `sd` the posterior mean SD. Returning `diag(s^2)` there reported
+# an exact zero correlation for a term whose correlation was sampled
+# (gcol33/tulpa#867).
 #' @keywords internal
 .varcorr_from_draws <- function(object, layout) {
   dm <- tryCatch(.re_draws_mat(object), error = function(e) NULL)
@@ -150,35 +158,65 @@ VarCorr <- function(x, sigma = 1, ...) UseMethod("VarCorr")
   pos <- 0L
   out <- vector("list", length(layout))
   for (m in seq_along(layout)) {
-    s <- sds[pos + seq_len(nc_all[m])]
-    pos <- pos + nc_all[m]
-    out[[m]] <- diag(s^2, nrow = length(s))
+    q <- nc_all[m]
+    s <- sds[pos + seq_len(q)]
+    pos <- pos + q
+    R <- diag(q)
+    L_cols <- grep(sprintf("^L_re\\[t%d\\.", m), colnames(dm))
+    if (q > 1L && length(L_cols)) {
+      if (length(L_cols) != q * (q - 1L) / 2L) return(NULL)
+      L <- .re_chol_from_raw(dm[, L_cols, drop = FALSE], q)
+      for (i in seq_len(q)) for (j in seq_len(q)) {
+        if (i != j) {
+          k <- seq_len(min(i, j))
+          R[i, j] <- mean(rowSums(L[, i, k, drop = FALSE] *
+                                  L[, j, k, drop = FALSE]))
+        }
+      }
+    }
+    out[[m]] <- diag(s, nrow = q) %*% R %*% diag(s, nrow = q)
   }
   out
 }
 
 
-# The SDs a conditioning fit was given. Recovered from the call rather than
-# guessed: a fit that conditioned on the default reports that default, which is
-# the case most worth labelling.
+# The SDs a conditioning fit was given, read off the fit: the front door stores
+# the resolved value (`$sigma_re_conditioned`), default included, which is the
+# case most worth labelling. It is never recovered by re-evaluating the call:
+# that ran in this function's frame rather than the caller's, so a `sigma_re`
+# passed through a variable fell back to 1 or picked up an unrelated global of
+# the same name (gcol33/tulpa#868). A fit built outside the front door that
+# carries neither field reports nothing rather than a guess.
 #' @keywords internal
 .varcorr_from_conditioned <- function(object, layout) {
-  s <- object$sigma_re
-  if (is.null(s)) {
-    cl <- object$call
-    if (!is.null(cl) && !is.null(cl$sigma_re)) {
-      s <- tryCatch(eval(cl$sigma_re, parent.frame()), error = function(e) NULL)
-    }
-  }
+  s <- object$sigma_re_conditioned %||% object$sigma_re
+  if (is.null(s)) return(NULL)
   nc_all <- vapply(layout, function(rt) as.integer(rt$n_coefs %||% 1L),
                    integer(1))
-  if (is.null(s)) s <- 1
   s <- as.numeric(s)
   # One value per TERM is the front door's contract; recycle it across a term's
   # coefficients.
   if (length(s) == 1L) s <- rep(s, length(layout))
   if (length(s) != length(layout)) return(NULL)
   lapply(seq_along(layout), function(m) diag(s[m]^2, nrow = nc_all[m]))
+}
+
+
+# The residual row of a gaussian fit, `phi = sigma_eps^2`, as lme4 reports it
+# beside the random-effect SDs (gcol33/tulpa#899). It carries the same
+# estimated / conditioned label as the rows above it: `phi_estimated` marks
+# `estimate_phi = TRUE`; anything else is the `phi` the fit was handed.
+#' @keywords internal
+.varcorr_residual <- function(object) {
+  if (!identical(object$family, "gaussian")) return(NULL)
+  phi <- object$phi
+  if (!is.numeric(phi) || length(phi) != 1L || !is.finite(phi) || phi < 0) {
+    return(NULL)
+  }
+  data.frame(term = "Residual", coef = NA_character_, sd = sqrt(phi),
+             source = if (isTRUE(object$phi_estimated)) "estimated" else
+               "conditioned",
+             row.names = NULL, stringsAsFactors = FALSE)
 }
 
 
@@ -195,8 +233,12 @@ VarCorr.tulpa_fit <- function(x, sigma = 1, ...) {
   # Order matters: a fit that estimated Sigma also has a conditioning fallback
   # available, and reporting the fallback would understate what it did.
   cov_list <- .varcorr_from_sigma(x)
-  src <- "estimated"
+  # re_cov_gibbs draws Sigma from its conjugate full conditional, so its
+  # `Sigma_mean` is a posterior mean over sampled covariances -- "sampled", the
+  # label the documentation gives exactly that case (gcol33/tulpa#881).
+  src <- if (!is.null(x[["Sigma_draws"]])) "sampled" else "estimated"
   if (is.null(cov_list)) {
+    src <- "estimated"
     # Also "estimated": the nested grid integrated the SD rather than maximizing
     # it, which is the stronger of the two claims that share this label.
     cov_list <- .varcorr_from_nested_re_blocks(x, layout)
@@ -243,23 +285,7 @@ VarCorr.tulpa_fit <- function(x, sigma = 1, ...) {
   names(covs) <- vapply(seq_along(layout), function(m)
     layout[[m]]$group_var %||% paste0("term", m), character(1))
 
-  out <- do.call(rbind, rows)
+  out <- do.call(rbind, c(rows, list(.varcorr_residual(x))))
   attr(out, "cov") <- covs
   out
-}
-
-
-# The random-effect half of a fit's display, with VarCorr's own estimated /
-# sampled / conditioned label carried through: a conditioned `sigma_re` is an
-# input echoed back, not a result, and the display must not present it as one.
-# Silent on a fit with no random-effect terms, so `print.tulpa_fit()` can call it
-# unconditionally and any fit carrying a covariance reports it.
-#' @keywords internal
-.print_re_section <- function(x) {
-  vc <- tryCatch(VarCorr(x), error = function(e) NULL)
-  if (is.null(vc) || !nrow(vc)) return(invisible(NULL))
-  cat("\nRandom effects:\n")
-  print(data.frame(term = vc$term, coef = vc$coef, sd = round(vc$sd, 4),
-                   source = vc$source, row.names = NULL))
-  invisible(NULL)
 }

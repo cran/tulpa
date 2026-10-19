@@ -17,6 +17,19 @@ knitr::opts_chunk$set(eval = EVAL_FITS)
 # the chunk runs, so a flag a chunk option reads has to exist either way.
 has_ggplot <- requireNamespace("ggplot2", quietly = TRUE)
 
+## ----eval = FALSE-------------------------------------------------------------
+# # Current release, built for Windows and macOS
+# install.packages("tulpa",
+#                  repos = c("https://gcol33.r-universe.dev",
+#                            "https://cloud.r-project.org"))
+# 
+# # Development version from GitHub
+# install.packages("pak")
+# pak::pak("gcol33/tulpa")
+# 
+# # Pin a release
+# pak::pak("gcol33/tulpa@v0.6.0")
+
 ## ----load, message = FALSE----------------------------------------------------
 # library(tulpa)
 
@@ -103,7 +116,7 @@ has_ggplot <- requireNamespace("ggplot2", quietly = TRUE)
 # )
 
 ## ----tier-fields--------------------------------------------------------------
-# c(backend = fit_mala$backend, tier = fit_mala$inference_tier)
+# unlist(summary(fit_mala)$inference[c("backend", "inference_tier")])
 
 ## ----trace-plot, fig.width = 6, fig.height = 4, fig.alt = "Trace of the MALA chain for the fixed effects"----
 # plot(fit_mala, type = "trace")
@@ -125,8 +138,8 @@ has_ggplot <- requireNamespace("ggplot2", quietly = TRUE)
 
 ## ----spatial-plot, eval = has_ggplot && EVAL_FITS, fig.alt = "Estimated spatial field effect per region around the ring"----
 # library(ggplot2)
-# fe <- tail(fit_sp$mode, K)
-# ggplot(data.frame(region = seq_len(K), effect = fe), aes(region, effect)) +
+# fe <- field_effects(fit_sp)
+# ggplot(data.frame(region = fe$unit, effect = fe$estimate), aes(region, effect)) +
 #   geom_line(linewidth = 1, colour = "steelblue") +
 #   geom_point() +
 #   labs(x = "region", y = "field effect") +
@@ -146,10 +159,8 @@ has_ggplot <- requireNamespace("ggplot2", quietly = TRUE)
 # coef(fit_t)
 
 ## ----temporal-plot, fig.alt = "Estimated temporal random-walk trend against the simulated truth"----
-# w  <- fit_t$weights / sum(fit_t$weights)
-# nf <- fit_t$n_fixed
-# te <- vapply(seq_len(Tt),
-#              function(u) sum(w * fit_t$modes[, nf + u]), numeric(1))
+# g  <- tulpa_outer_grid(fit_t)
+# te <- colSums(g$weights * g$modes)[g$n_fixed + seq_len(Tt)]
 # ggplot(data.frame(time = seq_len(Tt),
 #                   est = te - mean(te),
 #                   truth = trend - mean(trend)),

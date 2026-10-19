@@ -364,7 +364,7 @@
         pd_eigen_clamp = paste("this fit runs the PSD inner step, which",
                                "eigen-solves a densified Hessian and leaves no",
                                "sparse factor for the probe to solve against;",
-                               "control$hessian = \"lm\" restores it"),
+                               "the default control$hessian = \"auto\" restores it"),
         s2z_rank1_factor = paste("the field carries sum-to-zero rank-1 pins that",
                                  "the stored Hessian does not hold, so the live",
                                  "factor is of a different matrix than the solve",
@@ -1006,7 +1006,28 @@
        pareto_k_scope = jf$pareto_k_scope %||% NA_character_,
        pareto_k_proposal_source = jf$pareto_k_proposal_source %||% NA_character_,
        pareto_k_first_pass = jf$pareto_k_first_pass %||% NA_real_,
-       pareto_k_declined = declined)
+       pareto_k_declined = declined,
+       extra = .tulpa_fit_fields(jf, .PSIS_EXTRA_FIELDS))
+}
+
+# Outer k-hat fields a fit records only when it ran the matching pass: the
+# bootstrap interval and its band verdict (`diagnose_k`), and the outcome of a
+# `control$k_quality` request. Carried onto the diagnostics table as they are.
+.PSIS_EXTRA_FIELDS <- c(
+  "pareto_k_ci_low", "pareto_k_ci_high", "pareto_k_se_boot",
+  "pareto_k_band_confident", "diagnose_draws",
+  "k_quality_requested", "k_quality_reached", "k_quality_best",
+  "k_quality_reason", "k_quality_rounds")
+
+# Per-index inner-Laplace skewness, as the fit stores it.
+.INNER_SKEW_FIELDS <- c("inner_skew", "inner_skew_idx")
+
+# The named fields of `x` that are present, read with `[[` so that no name is
+# partially matched against a longer one.
+.tulpa_fit_fields <- function(x, names) {
+  out <- lapply(names, function(nm) x[[nm]])
+  names(out) <- names
+  Filter(Negate(is.null), out)
 }
 
 # Outer-integration REGIME of a nested-Laplace fit, read
@@ -1309,12 +1330,15 @@
   out <- c(out, paste0(
     "hyperparameter intervals read with the '", req, "' within-cell ",
     "construction rather than the default '", dflt, "': ",
-    if (identical(req, "chord"))
-      paste0("each cell's mass placed at its own coordinate rather than spread ",
-             "over its box, which is the wider read of the two")
-    else
+    switch(req,
+      chord = paste0("each cell's mass placed at its own coordinate rather ",
+                     "than spread over its box, which is the wider read of ",
+                     "the two"),
+      log_quadratic = paste0("each row's node log densities joined by ",
+                             "quadratics and continued past the outer node, ",
+                             "on the rows that resolve their own conditional"),
       paste0("the same cell masses spread over the cells' own boxes, so an ",
-             "endpoint is resolved to within one box"),
+             "endpoint is resolved to within one box")),
     " -- see `outer_grid_h_over_sd` for how wide a box is on each axis"))
   if (length(fell)) {
     nm <- if (length(ax) >= max(fell)) ax[fell] else as.character(fell)
@@ -1493,20 +1517,68 @@
 # .nl_inner_skew_at_theta() attaches at fit time (see nested_laplace.R). NULL
 # when the fit never ran the diagnostic (control$diagnose_skew = FALSE, or a
 # backend that does not yet populate it).
-# How many outer-grid cells reported the reported log-determinant from the
+# How many outer-grid cells carry a per-cell sum-to-zero log-determinant flag.
+# `flag = "s2z_log_det_fallback"`: the reported log-determinant came from the
 # PD-enforced factor instead of the pinned sum-to-zero matrix. On that path the
 # escalated matrix is H + lambda I rather than B = H + sum_k coef_k 1_k 1_k', so
 # a cell that fell back is weighted against its neighbours on a different
-# quantity. NULL where the fit carries no such vector -- every tier that does
-# not take the sum-to-zero route, and every fit produced before the flag
-# existed.
-.tulpa_s2z_fallback_cells <- function(fit) {
+# quantity. `flag = "s2z_field_indefinite"`: the field block of B was not PD,
+# so the block-Schur factor read B through the inertia of an LDL' factor of
+# that block; the value is exact wherever B itself is PD. NULL where
+# the fit carries no such vector -- every tier that does not take the
+# sum-to-zero route, and every fit produced before the flag existed.
+.tulpa_s2z_flag_cells <- function(fit, flag) {
   jf <- if (!is.null(fit$joint_fit)) fit$joint_fit else fit
-  v <- jf$s2z_log_det_fallback
+  v <- jf[[flag]]
   if (is.null(v) || !length(v)) return(NULL)
   n <- sum(as.logical(v), na.rm = TRUE)
   if (n == 0L) return(NULL)
   list(n = as.integer(n), n_grid = length(v))
+}
+
+# Outer-grid cells whose inner Newton stopped at the iteration cap without
+# reaching a mode: the cells (`nonconverged_cells`, or the per-cell flag on a
+# fit that records only that), the share of the posterior they carry at the
+# values they stopped at (`nonconverged_mass`), and how many of the cells that
+# first stalled a re-solve from a neighbour recovered. NULL when every solved
+# cell converged, or when the fit carries no flag at all.
+.tulpa_unconverged_cells <- function(fit) {
+  jf <- if (!is.null(fit$joint_fit)) fit$joint_fit else fit
+  lm <- jf$log_marginal
+  if (is.null(lm) || is.null(jf$converged)) return(NULL)
+  n <- length(lm)
+  cells <- jf$nonconverged_cells
+  if (is.null(cells)) {
+    pruned <- as.logical(jf$prune_mask %||% rep(FALSE, n))
+    pruned[is.na(pruned)] <- FALSE
+    cells <- which(is.finite(lm) & !pruned & !.nested_converged_cells(jf, n))
+  }
+  if (!length(cells)) return(NULL)
+  w <- jf$weights
+  mass <- jf$nonconverged_mass
+  if (is.null(mass) && length(w) == n) mass <- sum(w[cells], na.rm = TRUE)
+  rs <- jf$nonconverged_resolve
+  list(n = length(cells), n_grid = n, cells = as.integer(cells),
+       mass = as.numeric(mass %||% NA_real_),
+       n_stalled = as.integer(rs$n_stalled %||% NA_integer_),
+       n_resolved = as.integer(rs$n_resolved %||% NA_integer_))
+}
+
+# One-line reading of that record.
+.tulpa_unconverged_cells_note <- function(uc) {
+  if (is.null(uc)) return(NULL)
+  resolved <- if (is.finite(uc$n_resolved) && uc$n_resolved > 0L) {
+    sprintf(" (%d of the %d that first stalled converged when re-solved from a neighbour)",
+            uc$n_resolved, uc$n_stalled)
+  } else ""
+  share <- if (is.finite(uc$mass)) {
+    sprintf(" and carry %s of the posterior mass", format(signif(uc$mass, 3)))
+  } else ""
+  paste0(uc$n, " of ", uc$n_grid, " outer-grid cells stopped at control$max_iter ",
+         "without reaching a mode", resolved, share,
+         "; they are integrated at the values they stopped at, which are not ",
+         "Laplace approximations at a mode -- raise control$max_iter or loosen ",
+         "control$tol")
 }
 
 .tulpa_inner_skew_reliability <- function(fit) {
@@ -1540,18 +1612,34 @@
 # `mcse_mean` is the quantity the vacuous columns were standing in for: on
 # independent draws the Monte-Carlo error of the reported mean is sd/sqrt(n),
 # which says directly whether a summary is draw-limited.
+#
+# Where the draws were sampled i.i.d. from a mixture the fit carries exactly
+# (`.tulpa_exact_moments()`), `mean` / `sd` are that mixture's moments and
+# `mcse_mean` is 0: the reported number carries no Monte-Carlo error, and it is
+# the same on every run of the same fit (gcol33/tulpa#949). `moment_source`
+# names the read per row, `"mixture_moments"` or `"draws"`.
 .tulpa_iid_param_table <- function(draws, pars = NULL, fit = NULL) {
+  nm <- .tulpa_draw_names(colnames(draws), fit, NCOL(draws))
+  exact <- .tulpa_exact_moments(draws, nm, fit)
   draws <- as.matrix(draws)
-  nm <- .tulpa_draw_names(colnames(draws), fit, ncol(draws))
   keep <- if (is.null(pars)) seq_along(nm) else which(nm %in% pars)
   if (length(keep) == 0L) return(NULL)
   n <- nrow(draws)
   out <- data.frame(parameter = nm[keep],
                     mean = NA_real_, sd = NA_real_,
                     n_draws = n, mcse_mean = NA_real_,
+                    moment_source = "draws",
                     stringsAsFactors = FALSE, row.names = NULL)
   for (i in seq_along(keep)) {
-    x <- draws[, keep[i]]
+    j <- keep[i]
+    if (!is.null(exact) && is.finite(exact$mean[j])) {
+      out$mean[i] <- exact$mean[j]
+      out$sd[i]   <- exact$sd[j]
+      out$mcse_mean[i] <- 0
+      out$moment_source[i] <- "mixture_moments"
+      next
+    }
+    x <- draws[, j]
     out$mean[i] <- mean(x)
     out$sd[i]   <- stats::sd(x)
     if (n >= 2L && is.finite(out$sd[i])) {
@@ -1753,6 +1841,9 @@
   # table, so a rescued fit read as unconditionally clean (gcol33/tulpa#715).
   attr(tab, "pareto_k_proposal_source") <- psis$pareto_k_proposal_source
   attr(tab, "pareto_k_first_pass")      <- psis$pareto_k_first_pass
+  jf <- if (!is.null(fit$joint_fit)) fit$joint_fit else fit
+  extra <- c(psis$extra, .tulpa_fit_fields(jf, .INNER_SKEW_FIELDS))
+  for (nm in names(extra)) attr(tab, nm) <- extra[[nm]]
   if (!is.na(psis$pareto_k_declined)) {
     attr(tab, "pareto_k_declined")      <- psis$pareto_k_declined
     attr(tab, "pareto_k_declined_note") <- .k_decline_note(psis$pareto_k_declined)
@@ -1818,6 +1909,12 @@
     attr(tab, "grid_coarsest_axis")  <- resolution$coarsest
     attr(tab, "grid_resolved")       <- resolution$resolved
     attr(tab, "grid_resolution_note") <- .tulpa_grid_resolution_note(resolution)
+  }
+  uc <- .tulpa_unconverged_cells(fit)
+  if (!is.null(uc)) {
+    attr(tab, "unconverged_cells")      <- uc$cells
+    attr(tab, "unconverged_mass")       <- uc$mass
+    attr(tab, "unconverged_cells_note") <- .tulpa_unconverged_cells_note(uc)
   }
   if (!is.null(inner_k)) {
     attr(tab, "inner_pareto_k")        <- inner_k$max_pareto_k
@@ -1890,6 +1987,8 @@
   tab
 }
 
+#' @rdname diagnostics
+#' @param x A `laplace_diagnostics` table returned by `diagnostics()`.
 #' @export
 print.laplace_diagnostics <- function(x, ...) {
   s <- attr(x, "summary")
@@ -1976,6 +2075,7 @@ print.laplace_diagnostics <- function(x, ...) {
   if (!is.null(pnote)) cat("  note: ", pnote, "\n", sep = "")
   for (rnote in c(attr(x, "interval_read_note"),
                   attr(x, "grid_resolution_note"),
+                  attr(x, "unconverged_cells_note"),
                   attr(x, "inner_debias_note"))) {
     cat("  note: ", rnote, "\n", sep = "")
   }
@@ -2033,7 +2133,12 @@ print.laplace_diagnostics <- function(x, ...) {
   cat(sprintf("  %d parameters, %d draws; mcse_mean below is the i.i.d.\n",
               nrow(x), if (is.null(s)) NA_integer_ else s$n_draws))
   cat("  Monte-Carlo error of each reported mean (not chain mixing:\n")
-  cat("  Rhat and ESS are not defined for these draws).\n\n")
+  cat("  Rhat and ESS are not defined for these draws).\n")
+  if (any(x$moment_source == "mixture_moments")) {
+    cat("  Rows with moment_source \"mixture_moments\" report the exact moments\n")
+    cat("  of the outer-grid mixture the draws were sampled from (mcse_mean 0).\n")
+  }
+  cat("\n")
   print(as.data.frame(x), ...)
   invisible(x)
 }

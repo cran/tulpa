@@ -29,9 +29,13 @@ tulpa(
 }
 \arguments{
 \item{formula}{A model formula. Fixed effects, \code{(1 | g)} / \code{(1 + x | g)}
-random effects, and \code{offset(...)} terms are recognised.}
+random effects, and \code{offset(...)} terms are recognised. As in \code{\link[stats:lm]{stats::lm()}} and
+lme4, aliased fixed-effect columns of a rank-deficient design are dropped
+with a warning, and unused levels of a grouping factor are dropped. A
+binomial response may be logical (\code{TRUE} a success).}
 
-\item{data}{A data frame.}
+\item{data}{A data frame. Incomplete rows (an \code{NA} in the response, a
+predictor or a grouping variable) are refused, not dropped.}
 
 \item{family}{Character family name: one of \code{\link[=family_names]{family_names()}}
 (\code{"binomial"}, \code{"poisson"}, \code{"neg_binomial_2"}, \code{"gaussian"}, \code{"beta"},
@@ -46,7 +50,10 @@ reliable Tier 1/Tier 2 method expected to finish; a tier (\code{"exact"},
 \code{"eb"} estimates the random-effect covariance(s) by empirical Bayes instead
 of conditioning on \code{sigma_re} (see \code{\link[=tulpa_eb]{tulpa_eb()}}); it is opt-in by name,
 because its intervals are conditional on that estimate rather than marginal
-over it.}
+over it. The maximized likelihood integrates the fixed effects out rather
+than profiling them, so with \code{hyperprior = "flat"} the estimate is
+restricted (REML-type) -- it matches \code{glmmTMB(..., REML = TRUE)}, not the
+ML fit of \code{lme4::glmer()}.}
 
 \item{sigma_re}{Random-effect SDs to condition on: length 1 (recycled) or one
 per RE term. Defaults to 1 per term with a warning. Ignored by every
@@ -61,9 +68,11 @@ over it (\code{eb}, \code{agq}) -- and supplying it there warns.}
 length \code{nrow(data)}): each observation's log-likelihood contribution is
 scaled by its weight (prior / frequency weights, e.g. survey weights or
 aggregated-data counts -- a weight of 2 is equivalent to duplicating the
-row). Supported on the non-spatial Laplace path (\code{mode = "laplace"}) and
-the log-posterior samplers (\code{mala}, \code{imh_laplace}, \code{pathfinder}); other
-backends reject weights loudly.}
+row). Supported on the non-spatial Laplace path (\code{mode = "laplace"}), the
+nested-Laplace random-effect covariance integrator (\code{re_cov_nested}, which
+\code{mode = "auto"} / \code{"structured"} pick for a weighted random-effect model,
+so its scale is still integrated) and the log-posterior samplers (\code{mala},
+\code{imh_laplace}, \code{pathfinder}); other backends reject weights loudly.}
 
 \item{phi}{Dispersion passed to the family, held fixed. One convention at
 every door: for \code{gaussian} / \code{lognormal} this is the residual VARIANCE
@@ -82,7 +91,9 @@ conditioning on \code{phi}, which then supplies the starting value. \code{log(ph
 joins the empirical-Bayes maximization as one further coordinate carrying
 the exact derivative of the Laplace log-marginal, so the estimate is
 ML-II: the hyperprior covers the random-effect covariances only and the
-dispersion enters unpenalized. \code{fit$phi} is the estimate and
+dispersion enters unpenalized. That marginal integrates the fixed effects
+out, so the estimate is the restricted (REML-type) one -- for a gaussian
+response, the REML residual variance. \code{fit$phi} is the estimate and
 \code{fit$phi_estimated} distinguishes it from a conditioned value.
 
 Available under \code{mode = "eb"}, and for the families whose dispersion
@@ -116,7 +127,8 @@ correlated RE covariance, same condition), \code{prior_df} / \code{prior_scale}
 (inverse-Wishart on the RE covariance, \code{control$re_cov = "gibbs"}),
 \code{prior_sigma_scale} (half-Cauchy scale on the RE SD for \code{mode = "gibbs"}),
 and \code{sigma_re_scale} (half-Cauchy scale on the RE / BYM2 SD for the
-ModelData samplers).}
+ModelData samplers). An entry the resolved backend does not read is an
+error naming the backends that do.}
 
 \item{hyperprior}{The outer hyperparameter prior, \code{"proper"} (default) or
 \code{"flat"}, forwarded to every route that integrates or maximizes over
@@ -214,6 +226,22 @@ accepts its own set, checked at the door: \code{n_iter} / \code{warmup} / \code{
 \code{diagnose_k}, \code{within_cell}, \code{checkpoint}, the \verb{progress*} family, ...),
 and \code{re_cov} (\code{"nested"} / \code{"gibbs"} / \code{"aghq"}), which selects the
 RE-covariance integrator on any random-effect model.
+
+\code{n_iter} does not count the same thing on every sampler, and \code{warmup}
+(alias \code{n_warmup}) is validated against it before any sampler runs:
+\itemize{
+\item On \code{hmc}, \code{ess}, \code{sghmc}, \code{sgld}, \code{gibbs}, \code{mala} and \code{imh_laplace},
+\code{n_iter} is the TOTAL number of iterations, warmup included, so the fit
+keeps \code{n_iter - warmup} draws per chain and \code{warmup < n_iter} is
+required (\verb{n_iter = 2000, warmup = 1000} keeps 1000).
+\item On \code{re_cov_gibbs} (\code{control$re_cov = "gibbs"}) and \code{mclmc}, \code{n_iter} is
+the number of KEPT iterations and warmup runs on top of it, so any
+\code{warmup >= 0} is valid (\verb{n_iter = 1000, warmup = 1000} keeps 1000).
+\item \code{smc} and \code{vi} read neither (\code{n_particles}, \code{vi_max_iter} instead).
+}
+
+The default \code{warmup} is \code{n_iter \%/\% 2} on the ModelData samplers and 1000
+on \code{gibbs} / \code{re_cov_gibbs}.
 
 One statistical knob lives here rather than in the signature: \code{marginal}
 (\code{mode = "eb"} only) turns on the marginal-Laplace covariance correction,

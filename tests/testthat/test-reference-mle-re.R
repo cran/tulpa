@@ -12,6 +12,8 @@
 # mismatch into the random-effect scales, and the variance components are no
 # longer comparable to lme4's.
 
+skip_on_cran()
+
 lme4_sd <- function(ref, grp) {
   vc <- as.data.frame(lme4::VarCorr(ref))
   vc$sdcor[vc$grp == grp & is.na(vc$var2)]
@@ -72,8 +74,9 @@ test_that("gaussian nested (1 | g1/g2) reproduces lme4::lmer", {
           estimate_phi = TRUE))
 
   # (1 | g1/g2) expands to (1 | g1) + (1 | g1:g2); lme4 labels the inner term
-  # the other way round, as g2:g1.
-  expect_identical(VarCorr(fit)$term, c("g1", "g1:g2"))
+  # the other way round, as g2:g1. The gaussian residual row closes the table,
+  # as lme4's does.
+  expect_identical(VarCorr(fit)$term, c("g1", "g1:g2", "Residual"))
   expect_agrees_with_mle(coef(fit), ref_b, ref_se, tol = 0.05,
                          label = "lmer (1|g1/g2)")
   expect_lt(abs(sqrt(fit$phi) - stats::sigma(ref)) / stats::sigma(ref), 0.02)

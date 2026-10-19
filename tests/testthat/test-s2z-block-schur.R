@@ -44,21 +44,62 @@
 
 .rel <- function(a, b) abs(a - b) / max(1, abs(b))
 
-test_that("block-Schur log|B| matches the direct and dense references (single pin)", {
-  for (seed in 1:5) {
-    r <- .s2z_run(n = 90L, nf = 60L, pins = list(list(start = 0L, n = 60L, coef = 1.0)),
-                  seed = seed)
-    expect_true(r$ok)
-    expect_true(is.finite(r$ld_block_schur))
-    expect_lt(.rel(r$ld_block_schur, r$ld_dense),  1e-8)
-    expect_lt(.rel(r$ld_direct,      r$ld_dense),  1e-8)
-    expect_lt(.rel(r$ld_block_schur, r$ld_direct), 1e-9)
-    expect_lt(.rel(r$ld_block_schur_step, r$ld_dense), 1e-8)
-    expect_lt(r$max_dstep, 1e-8)
+# --- Dense coupling D: the fold is the rank-K `U D U'` -----------------------
+# A Kronecker-structured field (multivariate CAR, precision Sigma^-1 (x) Q) has
+# the sum-to-zero augmentation Sigma^-1 (x) 11'/J, which couples FIELDS:
+# D[(a,c),(b,c)] = Sinv[a,b]/J_c. K independent rank-1 pins cannot express that
+# off-diagonal, so the pins carry an optional dense D.
+
+.s2z_two_field_pins <- list(list(start = 0L,  n = 40L, coef = 1.0),
+                            list(start = 40L, n = 40L, coef = 1.0))
+
+# --- An indefinite field block: the inertia route ----------------------------
+# Away from the mode the field block A_FF need not be PD while the pinned
+# matrix B still is: a negative curvature along a block's constant direction is
+# exactly what the pin covers. The final pass then reads B through an LDL'
+# factor of A_FF and the inertia count neg(B_FF) = neg(A_FF) - neg(cap). Each
+# field block here is a scaled chain Laplacian (null vector 1) shifted down by
+# `eps`, below its second eigenvalue, so A_FF carries one negative eigenvalue
+# per block, along that block's constant.
+
+.s2z_make_A_indef <- function(n, blocks, eps, seed, scale = 50, density = 0.15) {
+  set.seed(seed)
+  A <- matrix(0, n, n)
+  nf <- 0L
+  for (nb in blocks) {
+    idx <- nf + seq_len(nb)
+    for (i in idx[-nb]) {
+      A[i, i + 1L] <- A[i + 1L, i] <- -scale
+      A[i, i] <- A[i, i] + scale; A[i + 1L, i + 1L] <- A[i + 1L, i + 1L] + scale
+    }
+    nf <- nf + nb
   }
-})
+  diag(A)[seq_len(nf)] <- diag(A)[seq_len(nf)] - eps
+  sc <- (nf + 1L):n
+  for (i in sc) for (j in sc) if (j >= i) {
+    v <- stats::rnorm(1) * 0.3; A[i, j] <- A[j, i] <- v
+  }
+  for (i in seq_len(nf)) for (j in sc) if (stats::runif(1) < density) {
+    v <- stats::rnorm(1) * 0.05; A[i, j] <- A[j, i] <- v
+  }
+  diag(A)[sc] <- rowSums(abs(A[sc, , drop = FALSE])) + stats::runif(length(sc), 1, 2)
+  A
+}
+
+.s2z_run_indef <- function(A, pins, coupling = NULL) {
+  tulpa:::cpp_test_s2z_block_schur(
+    A            = A,
+    pin_start    = as.integer(vapply(pins, `[[`, integer(1), "start")),
+    pin_n        = as.integer(vapply(pins, `[[`, integer(1), "n")),
+    pin_coef     = as.numeric(vapply(pins, `[[`, numeric(1), "coef")),
+    grad         = stats::rnorm(nrow(A), sd = 0.7),
+    pin_coupling = coupling)
+}
+
+skip_on_cran_budget()
 
 test_that("block-Schur is exact for two pins (two intrinsic fields)", {
+  skip_on_cran_budget()
   for (seed in 11:14) {
     r <- .s2z_run(n = 130L, nf = 80L,
                   pins = list(list(start = 0L,  n = 40L, coef = 0.5),
@@ -71,16 +112,8 @@ test_that("block-Schur is exact for two pins (two intrinsic fields)", {
   }
 })
 
-# --- Dense coupling D: the fold is the rank-K `U D U'` -----------------------
-# A Kronecker-structured field (multivariate CAR, precision Sigma^-1 (x) Q) has
-# the sum-to-zero augmentation Sigma^-1 (x) 11'/J, which couples FIELDS:
-# D[(a,c),(b,c)] = Sinv[a,b]/J_c. K independent rank-1 pins cannot express that
-# off-diagonal, so the pins carry an optional dense D.
-
-.s2z_two_field_pins <- list(list(start = 0L,  n = 40L, coef = 1.0),
-                            list(start = 40L, n = 40L, coef = 1.0))
-
 test_that("an explicit diagonal coupling reproduces the diag(coef) path", {
+  skip_on_cran_budget()
   # D = diag(coef) is the pre-existing behaviour, so supplying it explicitly has
   # to land on the same numbers -- the generalization is a strict superset.
   pins <- list(list(start = 0L,  n = 40L, coef = 1.3),
@@ -94,23 +127,8 @@ test_that("an explicit diagonal coupling reproduces the diag(coef) path", {
   expect_equal(cpl$max_dstep,      base$max_dstep,      tolerance = 1e-12)
 })
 
-test_that("a cross-block coupling matches the dense U D U' reference", {
-  Sinv <- matrix(c(2.0, 0.8, 0.8, 1.5), 2L, 2L)   # SPD, genuine off-diagonal
-  D    <- Sinv / 40                                # J_c = 40
-  for (seed in 31:34) {
-    r <- .s2z_run(n = 130L, nf = 80L, pins = .s2z_two_field_pins, seed = seed,
-                  coupling = D)
-    expect_true(r$ok)
-    expect_true(is.finite(r$ld_block_schur))
-    expect_lt(.rel(r$ld_block_schur, r$ld_dense),  1e-8)
-    expect_lt(.rel(r$ld_direct,      r$ld_dense),  1e-8)
-    expect_lt(.rel(r$ld_block_schur, r$ld_direct), 1e-9)
-    expect_lt(.rel(r$ld_block_schur_step, r$ld_dense), 1e-8)
-    expect_lt(r$max_dstep, 1e-8)
-  }
-})
-
 test_that("the off-diagonal of D actually moves the answer", {
+  skip_on_cran_budget()
   # Guards the two tests above against passing vacuously: if the cross-block
   # term were dropped anywhere, a full D and its diagonal would agree.
   Sinv <- matrix(c(2.0, 0.8, 0.8, 1.5), 2L, 2L)
@@ -123,21 +141,6 @@ test_that("the off-diagonal of D actually moves the answer", {
   expect_gt(abs(full$ld_block_schur - diagonly$ld_block_schur), 1e-6)
 })
 
-test_that("block-Schur is exact at the large-field / large-coef sum-to-zero regime", {
-  # n_x past the densify boundary, with the strong sum-to-zero pin the intrinsic
-  # field actually registers -- the regime where the older matrix-determinant
-  # Woodbury log-det cancelled.
-  for (coef in c(1.0, 1e3, 1e5)) {
-    r <- .s2z_run(n = 320L, nf = 280L,
-                  pins = list(list(start = 0L, n = 280L, coef = coef)),
-                  seed = 7L)
-    expect_true(r$ok)
-    expect_lt(.rel(r$ld_block_schur, r$ld_dense),  1e-7)
-    expect_lt(.rel(r$ld_block_schur, r$ld_direct), 1e-8)
-    expect_lt(r$max_dstep, 1e-7)
-  }
-})
-
 # --- Non-contiguous pins: a disconnected map's component node sets -----------
 # A genuine disconnected map's connected components need not be contiguous in
 # the node ordering (islands sorted among the mainland). The rank-1 fold then
@@ -146,6 +149,7 @@ test_that("block-Schur is exact at the large-field / large-coef sum-to-zero regi
 # Eigen reference over the same node sets.
 
 test_that("block-Schur is exact for non-contiguous (interleaved) pins", {
+  skip_on_cran_budget()
   for (seed in 41:44) {
     n <- 130L; nf <- 80L
     A <- .s2z_make_A(n, nf, seed)
@@ -167,6 +171,7 @@ test_that("block-Schur is exact for non-contiguous (interleaved) pins", {
 })
 
 test_that("a non-contiguous pin is not the contiguous pin of the same count", {
+  skip_on_cran_budget()
   # Guards the test above against the idx path silently collapsing to a
   # contiguous [0, n) fold: the same coef and count over interleaved vs
   # contiguous nodes must give a different B (hence a different log|B|).
@@ -185,8 +190,37 @@ test_that("a non-contiguous pin is not the contiguous pin of the same count", {
   expect_gt(abs(nc$ld_block_schur - cg$ld_block_schur), 1e-6)
 })
 
+test_that("the inertia route refuses B when B is indefinite", {
+  skip_on_cran_budget()
+  # A pin too weak to lift the negative constant direction: c n < eps.
+  A <- .s2z_make_A_indef(n = 70L, blocks = 40L, eps = 0.1, seed = 71L)
+  r <- .s2z_run_indef(A, list(list(start = 0L, n = 40L, coef = 1e-3)))
+  expect_true(r$field_indefinite)
+  expect_false(r$ok)
+  expect_true(is.na(r$ld_dense))
+  # Unguarded, the Newton step declines it too, which hands the auto curvature
+  # rule to the expected information.
+  expect_false(r$newton_ok)
+  # A second negative direction off the constant, which one pin cannot cover.
+  A2 <- .s2z_make_A_indef(n = 70L, blocks = 40L, eps = 1.0, seed = 72L)
+  expect_gte(sum(eigen(A2[1:40, 1:40], symmetric = TRUE)$values < 0), 2L)
+  r2 <- .s2z_run_indef(A2, list(list(start = 0L, n = 40L, coef = 1.0)))
+  expect_true(r2$field_indefinite)
+  expect_false(r2$ok)
+  expect_true(is.na(r2$ld_dense))
+  expect_false(r2$newton_ok)
+})
+
+test_that("a PD field block never reports the inertia route", {
+  skip_on_cran_budget()
+  r <- .s2z_run(n = 90L, nf = 60L, pins = list(list(start = 0L, n = 60L, coef = 1.0)),
+                seed = 1L)
+  expect_false(r$field_indefinite)
+  expect_equal(r$ld_block_schur_step, r$ld_block_schur, tolerance = 0)
+})
 
 test_that("an unparseable densify cutoff leaves the default in place", {
+  skip_on_cran_budget()
   # TULPA_S2Z_DENSIFY_MAX picks the storage, not the answer, so nothing else in
   # the suite can see which one a setting selected. 0 is a MEANINGFUL setting
   # here (always fold to the rank-1 path), which is what makes an atoi()-style
@@ -207,5 +241,96 @@ test_that("an unparseable densify cutoff leaves the default in place", {
   for (bad in c("ture", "256a", "1e3", " ", "-1", "99999999999999999999")) {
     Sys.setenv(TULPA_S2Z_DENSIFY_MAX = bad)
     expect_identical(tulpa:::cpp_s2z_densify_max(), default, info = bad)
+  }
+})
+
+skip_on_cran()
+
+test_that("block-Schur log|B| matches the direct and dense references (single pin)", {
+  skip_on_cran()
+  for (seed in 1:5) {
+    r <- .s2z_run(n = 90L, nf = 60L, pins = list(list(start = 0L, n = 60L, coef = 1.0)),
+                  seed = seed)
+    expect_true(r$ok)
+    expect_true(is.finite(r$ld_block_schur))
+    expect_lt(.rel(r$ld_block_schur, r$ld_dense),  1e-8)
+    expect_lt(.rel(r$ld_direct,      r$ld_dense),  1e-8)
+    expect_lt(.rel(r$ld_block_schur, r$ld_direct), 1e-9)
+    expect_lt(.rel(r$ld_block_schur_step, r$ld_dense), 1e-8)
+    expect_lt(r$max_dstep, 1e-8)
+  }
+})
+
+test_that("a cross-block coupling matches the dense U D U' reference", {
+  skip_on_cran()
+  Sinv <- matrix(c(2.0, 0.8, 0.8, 1.5), 2L, 2L)   # SPD, genuine off-diagonal
+  D    <- Sinv / 40                                # J_c = 40
+  for (seed in 31:34) {
+    r <- .s2z_run(n = 130L, nf = 80L, pins = .s2z_two_field_pins, seed = seed,
+                  coupling = D)
+    expect_true(r$ok)
+    expect_true(is.finite(r$ld_block_schur))
+    expect_lt(.rel(r$ld_block_schur, r$ld_dense),  1e-8)
+    expect_lt(.rel(r$ld_direct,      r$ld_dense),  1e-8)
+    expect_lt(.rel(r$ld_block_schur, r$ld_direct), 1e-9)
+    expect_lt(.rel(r$ld_block_schur_step, r$ld_dense), 1e-8)
+    expect_lt(r$max_dstep, 1e-8)
+  }
+})
+
+test_that("block-Schur is exact at the large-field / large-coef sum-to-zero regime", {
+  skip_on_cran()
+  # n_x past the densify boundary, with the strong sum-to-zero pin the intrinsic
+  # field actually registers -- the regime where the older matrix-determinant
+  # Woodbury log-det cancelled.
+  for (coef in c(1.0, 1e3, 1e5)) {
+    r <- .s2z_run(n = 320L, nf = 280L,
+                  pins = list(list(start = 0L, n = 280L, coef = coef)),
+                  seed = 7L)
+    expect_true(r$ok)
+    expect_lt(.rel(r$ld_block_schur, r$ld_dense),  1e-7)
+    expect_lt(.rel(r$ld_block_schur, r$ld_direct), 1e-8)
+    expect_lt(r$max_dstep, 1e-7)
+  }
+})
+
+test_that("the inertia route reads a PD B over an indefinite field block (one pin)", {
+  skip_on_cran()
+  for (seed in 51:54) {
+    A <- .s2z_make_A_indef(n = 70L, blocks = 40L, eps = 0.1, seed = seed)
+    expect_lt(min(eigen(A[1:40, 1:40], symmetric = TRUE)$values), 0)
+    r <- .s2z_run_indef(A, list(list(start = 0L, n = 40L, coef = 1.0)))
+    expect_true(r$field_indefinite)
+    expect_true(r$ok)
+    expect_true(is.finite(r$ld_dense))
+    # The PD-only reader declines this matrix; the inertia route reads it.
+    expect_true(is.na(r$ld_block_schur))
+    expect_lt(.rel(r$ld_block_schur_step, r$ld_dense),  1e-8)
+    expect_lt(.rel(r$ld_block_schur_step, r$ld_direct), 1e-9)
+    expect_lt(r$max_dstep, 1e-8)
+    # The inner Newton step reads the same factor, so the auto curvature rule
+    # steps on the observed Hessian here, with no ridge.
+    expect_true(r$newton_ok)
+    expect_true(r$newton_block_schur)
+    expect_lt(r$max_dstep_newton, 1e-8)
+  }
+})
+
+test_that("the inertia route is exact for two pins and a coupled capacitance", {
+  skip_on_cran()
+  Sinv <- matrix(c(2.0, 0.8, 0.8, 1.5), 2L, 2L)
+  for (seed in 61:63) {
+    A <- .s2z_make_A_indef(n = 110L, blocks = c(40L, 40L), eps = 0.1, seed = seed)
+    for (cpl in list(NULL, Sinv / 40)) {
+      r <- .s2z_run_indef(A, list(list(start = 0L,  n = 40L, coef = 1.0),
+                                  list(start = 40L, n = 40L, coef = 0.5)),
+                          coupling = cpl)
+      expect_true(r$field_indefinite)
+      expect_true(r$ok)
+      expect_lt(.rel(r$ld_block_schur_step, r$ld_dense), 1e-8)
+      expect_lt(r$max_dstep, 1e-8)
+      expect_true(r$newton_block_schur)
+      expect_lt(r$max_dstep_newton, 1e-8)
+    }
   }
 })

@@ -12,9 +12,12 @@
 #
 # What is NOT asserted, and why: per-group coverage of the simulated b_g. The RE
 # design columns here are a subset of the fixed design's, so the stationarity
-# conditions of the penalized mode force sum_g b_g = 0 exactly (summing the b
-# score equations leaves sum_g [Sigma^-1 b_g] = 0, the data term having been
-# cancelled by the beta equations). One simulated draw of G groups has a non-zero
+# conditions of the penalized mode force sum_g [Sigma^-1 b_g] = Lambda beta
+# (summing the b score equations, the data term having been cancelled by the
+# beta equations, leaves only the fixed-effect prior precision Lambda). Under a
+# diffuse fixed-effect prior that is sum_g b_g = 0 to the Newton tolerance; under
+# the default N(0, 2.5) it is ~1e-3 off (gcol33/tulpa#869), so the identity is
+# asserted on a fit given the diffuse prior. One simulated draw of G groups has a non-zero
 # group mean, and that direction is absorbed by the intercept -- it is not
 # identified from the data. Correlation with the truth is invariant to that
 # shift, so it is the recovery statistic used throughout; the group-mean
@@ -56,10 +59,46 @@ expect_ranef_recovers <- function(r, sim) {
   expect_gt(cor(r$estimate[slo], sim$b2), 0.85)
 }
 
+# No block in this file reads the outer Pareto-k diagnostic of a re_cov_nested
+# fit. It runs after the posterior and draw synthesis with the RNG state
+# restored, so turning it off leaves the reported fit bit-for-bit unchanged and
+# drops its importance-sample inner solves.
+.rrc_nested_ctl <- list(diagnose_k = FALSE)
+
+# The single-term fits on the default data that several blocks below read. The
+# Gibbs fit runs at the chain length the cross-backend agreement needs, which
+# is also long enough for the per-backend recovery assertions.
+.rrc_nested_fit <- fixture_once(function() {
+  tulpa(y ~ x + (1 + x | site), data = make_ranef_re_data()$d,
+        family = "poisson", mode = "re_cov_nested", control = .rrc_nested_ctl)
+})
+.rrc_gibbs_fit <- fixture_once(function() {
+  tulpa(y ~ x + (1 + x | site), data = make_ranef_re_data()$d,
+        family = "poisson", mode = "re_cov_gibbs",
+        control = list(seed = 4L, n_iter = 1000L, warmup = 500L))
+})
+
+
+test_that("mixture summary drops zero-weight and non-finite nodes", {
+  set.seed(13)
+  mu <- matrix(rnorm(15), 5L, 3L)
+  va <- matrix(runif(15, 0.1, 1), 5L, 3L)
+  w  <- c(0.3, 0, 0.3, 0.2, 0.2)
+  mu[4L, 1L] <- NA_real_                            # kills the whole node row
+  s <- tulpa:::.nl_gauss_mixture_summary(mu, va, w)
+  keep <- c(1L, 3L, 5L)
+  wk <- w[keep] / sum(w[keep])
+  expect_equal(s$mean, as.numeric(crossprod(wk, mu[keep, , drop = FALSE])))
+  expect_null(tulpa:::.nl_gauss_mixture_summary(mu, va, rep(0, 5L)))
+})
+
+skip_on_cran_budget()
+
 
 # --- tier 1: the Gaussian-mixture summary the nested path reports through -----
 
 test_that("a one-node mixture is exactly that Gaussian", {
+  skip_on_cran_budget()
   s <- tulpa:::.nl_gauss_mixture_summary(
     matrix(c(1.5, -2), 1L, 2L), matrix(c(0.25, 4), 1L, 2L), 1,
     probs = c(0.025, 0.5, 0.975))
@@ -71,6 +110,7 @@ test_that("a one-node mixture is exactly that Gaussian", {
 
 
 test_that("mixture quantiles invert the mixture CDF and moments obey total variance", {
+  skip_on_cran_budget()
   set.seed(11)
   ng <- 7L; np <- 3L
   mu <- matrix(rnorm(ng * np, 0, 1.5), ng, np)
@@ -96,6 +136,7 @@ test_that("mixture quantiles invert the mixture CDF and moments obey total varia
 
 
 test_that("mixture summary withholds spread when the variances are unusable", {
+  skip_on_cran_budget()
   set.seed(12)
   mu <- matrix(rnorm(12), 4L, 3L)
   va <- matrix(runif(12, 0.1, 1), 4L, 3L)
@@ -111,21 +152,8 @@ test_that("mixture summary withholds spread when the variances are unusable", {
 })
 
 
-test_that("mixture summary drops zero-weight and non-finite nodes", {
-  set.seed(13)
-  mu <- matrix(rnorm(15), 5L, 3L)
-  va <- matrix(runif(15, 0.1, 1), 5L, 3L)
-  w  <- c(0.3, 0, 0.3, 0.2, 0.2)
-  mu[4L, 1L] <- NA_real_                            # kills the whole node row
-  s <- tulpa:::.nl_gauss_mixture_summary(mu, va, w)
-  keep <- c(1L, 3L, 5L)
-  wk <- w[keep] / sum(w[keep])
-  expect_equal(s$mean, as.numeric(crossprod(wk, mu[keep, , drop = FALSE])))
-  expect_null(tulpa:::.nl_gauss_mixture_summary(mu, va, rep(0, 5L)))
-})
-
-
 test_that("a stated ranef_unavailable reason is reported instead of an empty table", {
+  skip_on_cran_budget()
   fit <- structure(list(
     re_layout = list(list(group_var = "g", levels = c("1", "2"),
                           coef_labels = "(Intercept)")),
@@ -136,14 +164,15 @@ test_that("a stated ranef_unavailable reason is reported instead of an empty tab
   expect_error(ranef(fit), "no per-group random effects")
 })
 
+skip_on_cran()
+
 
 # --- tier 2: the backends themselves -----------------------------------------
 
 test_that("ranef() on a re_cov_nested fit reports the grid-marginalized group posterior", {
   skip_on_cran()
   sim <- make_ranef_re_data()
-  fit <- tulpa(y ~ x + (1 + x | site), data = sim$d, family = "poisson",
-               mode = "re_cov_nested")
+  fit <- .rrc_nested_fit()
 
   expect_equal(fit$backend, "re_cov_nested")
   r <- ranef(fit)
@@ -164,11 +193,16 @@ test_that("ranef() on a re_cov_nested fit reports the grid-marginalized group po
   expect_equal(dim(fit$re_var_nodes), c(fit$n_grid, 2L * sim$G))
   expect_true(all(is.finite(fit$re_var_nodes) & fit$re_var_nodes > 0))
 
-  # The identity the Details of this file open with: the mode pins the group mean
-  # of each coefficient at zero, to the Newton tolerance.
-  expect_equal(mean(r$estimate[grepl("^site\\[", r$term)]), 0,
+  # The identity the Details of this file open with: under a diffuse
+  # fixed-effect prior the mode pins the group mean of each coefficient at zero,
+  # to the Newton tolerance.
+  r0 <- ranef(tulpa(y ~ x + (1 + x | site), data = sim$d, family = "poisson",
+                    mode = "re_cov_nested",
+                    beta_prior = list(mean = 0, sd = 100),
+                    control = .rrc_nested_ctl))
+  expect_equal(mean(r0$estimate[grepl("^site\\[", r0$term)]), 0,
                tolerance = 1e-4)
-  expect_equal(mean(r$estimate[grepl("^site\\.x\\[", r$term)]), 0,
+  expect_equal(mean(r0$estimate[grepl("^site\\.x\\[", r0$term)]), 0,
                tolerance = 1e-4)
 })
 
@@ -176,9 +210,7 @@ test_that("ranef() on a re_cov_nested fit reports the grid-marginalized group po
 test_that("ranef() on a re_cov_gibbs fit summarizes the sampled random effects", {
   skip_on_cran()
   sim <- make_ranef_re_data()
-  fit <- tulpa(y ~ x + (1 + x | site), data = sim$d, family = "poisson",
-               mode = "re_cov_gibbs",
-               control = list(seed = 4L, n_iter = 500L, warmup = 250L))
+  fit <- .rrc_gibbs_fit()
 
   expect_equal(fit$backend, "re_cov_gibbs")
   r <- ranef(fit)
@@ -198,13 +230,10 @@ test_that("ranef() on a re_cov_gibbs fit summarizes the sampled random effects",
 test_that("the RE-covariance backends agree with the EB mode on the group effects", {
   skip_on_cran()
   sim <- make_ranef_re_data()
-  common <- list(formula = y ~ x + (1 + x | site), data = sim$d,
-                 family = "poisson")
-  nested <- ranef(do.call(tulpa, c(common, list(mode = "re_cov_nested"))))
-  eb     <- ranef(do.call(tulpa, c(common, list(mode = "eb"))))
-  gibbs  <- ranef(do.call(tulpa, c(common, list(
-    mode = "re_cov_gibbs",
-    control = list(seed = 4L, n_iter = 1000L, warmup = 500L)))))
+  nested <- ranef(.rrc_nested_fit())
+  eb     <- ranef(tulpa(y ~ x + (1 + x | site), data = sim$d,
+                        family = "poisson", mode = "eb"))
+  gibbs  <- ranef(.rrc_gibbs_fit())
 
   # Three independently written paths (grid mixture, plug-in mode, MCMC). A
   # per-group ordering error in any one breaks this, whatever the labels say.
@@ -244,7 +273,8 @@ test_that("ranef() keeps the block order with several random-effect terms", {
     fit <- tulpa(y ~ x + (1 + x | site) + (1 | rep), data = d2,
                  family = "poisson", mode = md,
                  control = if (md == "re_cov_gibbs")
-                   list(seed = 5L, n_iter = 500L, warmup = 250L) else list())
+                   list(seed = 5L, n_iter = 500L, warmup = 250L)
+                 else .rrc_nested_ctl)
     r <- ranef(fit)
     expect_equal(nrow(r), 2L * sim$G + H, info = md)
     # The site block comes first (both its coefficients interleaved per group),
@@ -263,7 +293,8 @@ test_that("the AGHQ inner marginal says why it has no group effects", {
   skip_on_cran()
   sim <- make_ranef_re_data(G = 10L, npg = 20L)
   fit <- tulpa(y ~ x + (1 + x | site), data = sim$d, family = "poisson",
-               mode = "re_cov_nested", control = list(re_cov = "aghq"))
+               mode = "re_cov_nested",
+               control = c(list(re_cov = "aghq"), .rrc_nested_ctl))
 
   expect_null(fit$re_nodes)
   expect_type(fit$ranef_unavailable, "character")

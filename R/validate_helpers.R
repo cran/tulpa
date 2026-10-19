@@ -6,7 +6,7 @@
 #' column-existence checks and coordinate preparation blocks.
 #'
 #' @name validate_helpers
-#' @keywords internal
+#' @noRd
 NULL
 
 #' Assert that named columns exist in `data`.
@@ -120,10 +120,38 @@ assert_columns_exist <- function(vars, data, role = "Required") {
   matrix(as.numeric(x), nrow(x), 2L)
 }
 
+# Coordinates reaching a spatial field: every value finite, and -- where they
+# are about to be standardised -- no column constant, since scale() divides by
+# its SD. Each case used to reach a kernel as "NA/NaN/Inf in foreign function
+# call (arg 1)" (gcol33/tulpa#909). `where` names the caller or the columns.
+#' @keywords internal
+#' @noRd
+.check_coords_finite <- function(coords, where, scale = FALSE) {
+  coords <- as.matrix(coords)
+  bad <- !is.finite(suppressWarnings(as.numeric(coords)))
+  if (any(bad)) {
+    rows <- unique(((which(bad) - 1L) %% nrow(coords)) + 1L)
+    stop(where, ": the coordinates contain ", sum(bad), " missing or ",
+         "non-finite value(s) (NA / NaN / Inf), first at row ", rows[1L],
+         ". Remove or impute them before fitting.", call. = FALSE)
+  }
+  if (isTRUE(scale) && nrow(coords) > 0L) {
+    sds <- apply(coords, 2L, stats::sd)
+    const <- which(!(sds > 0))
+    if (length(const)) {
+      nm <- colnames(coords)[const] %||% paste0("column ", const)
+      stop(where, ": coordinate ", paste0("`", nm, "`", collapse = ", "),
+           " is constant, so it cannot be standardised (scale_coords = TRUE ",
+           "divides by its SD). Drop it from the coordinates, or pass ",
+           "scale_coords = FALSE.", call. = FALSE)
+    }
+  }
+  invisible(TRUE)
+}
+
 #' Extract a coordinate matrix, check for missing values, optionally scale.
 #'
-#' Wraps the coord-validation pattern shared by `validate_hsgp()` and
-#' `validate_hsgp_multiscale()`.
+#' The coord-validation step of `validate_hsgp()`.
 #'
 #' @param coord_vars Character vector of coordinate column names.
 #' @param data Data frame.
@@ -134,13 +162,69 @@ assert_columns_exist <- function(vars, data, role = "Required") {
 prepare_coords <- function(coord_vars, data, scale_coords = FALSE) {
   assert_columns_exist(coord_vars, data, role = "Coordinate")
   coords <- as.matrix(data[, coord_vars, drop = FALSE])
-  if (any(is.na(coords))) {
-    stop("Coordinate columns contain missing values", call. = FALSE)
-  }
+  .check_coords_finite(coords, "Coordinate columns", scale = scale_coords)
   if (isTRUE(scale_coords)) {
-    coords <- scale(coords)
+    coords <- .scale_coords_isotropic(coords)
   }
   coords
+}
+
+#' Standardize spatial coordinates by one common factor.
+#'
+#' Each column is centred on its own mean and every column is divided by the
+#' SAME scale, the root mean of the column variances. `scale()` divided lon and
+#' lat by their own spreads, which stretches one axis against the other and
+#' turns an isotropic kernel anisotropic in the data's geometry
+#' (gcol33/tulpa#907); one factor keeps every distance proportional to the
+#' user's, so a fitted range converts back to data units by that one factor
+#' (`.coord_scale()`). The attributes are the ones `scale()` sets --
+#' `scaled:center` per column and `scaled:scale` (the common factor, repeated
+#' per column) -- so a reader re-applying the training standardization to new
+#' coordinates is unchanged.
+#'
+#' @param coords Numeric coordinate matrix.
+#' @return The standardized matrix, carrying `scaled:center` / `scaled:scale`.
+#' @keywords internal
+#' @noRd
+.scale_coords_isotropic <- function(coords) {
+  coords <- as.matrix(coords)
+  storage.mode(coords) <- "double"
+  ctr <- colMeans(coords)
+  s <- if (nrow(coords) > 1L) sqrt(mean(apply(coords, 2L, stats::var))) else NA
+  if (!is.finite(s) || s <= 0) s <- 1
+  out <- sweep(coords, 2L, ctr, "-") / s
+  attr(out, "scaled:center") <- ctr
+  attr(out, "scaled:scale") <- rep(s, ncol(coords))
+  out
+}
+
+#' The factor a spec's coordinates were divided by (1 when they were not), which
+#' converts a distance the kernel measured -- a range, a lengthscale -- back to
+#' the user's coordinate units.
+#' @param spec A validated spatial spec carrying `coords_matrix`.
+#' @keywords internal
+#' @noRd
+.coord_scale <- function(spec) {
+  s <- attr(spec$coords_matrix, "scaled:scale")
+  if (!isTRUE(spec$scale_coords) || !length(s) || !is.finite(s[1L]) || s[1L] <= 0)
+    return(1)
+  s[1L]
+}
+
+#' A standardized coordinate matrix mapped back to the user's units, via the
+#' attributes `.scale_coords_isotropic()` (or `scale()`) set; returned as is when
+#' it carries none.
+#' @keywords internal
+#' @noRd
+.unscale_coords <- function(coords) {
+  if (is.null(coords)) return(NULL)
+  ctr <- attr(coords, "scaled:center")
+  scl <- attr(coords, "scaled:scale")
+  if (is.null(ctr) || is.null(scl)) return(coords)
+  out <- sweep(sweep(unclass(as.matrix(coords)), 2L, scl, "*"), 2L, ctr, "+")
+  attr(out, "scaled:center") <- NULL
+  attr(out, "scaled:scale") <- NULL
+  out
 }
 
 #' Coerce a variable argument given as a formula or a string to a bare name.
@@ -194,6 +278,47 @@ prepare_coords <- function(coord_vars, data, scale_coords = FALSE) {
   )
 }
 
+# What each areal field does at a node with no neighbours, so the constructors,
+# adjacency() and check_adjacency() report an island the same way
+# (gcol33/tulpa#962). An intrinsic field's island is a one-node component, and
+# the per-component augmentation (tulpa/sum_to_zero.h) gives its value the
+# field's own precision; the default BYM2 scaling gives it unit structured
+# variance (.bym2_component_scaling); D - rho W is zero on its row, so a proper
+# CAR field leaves it without a prior.
+.ISOLATED_NODE_HANDLING <- c(
+  icar       = "an ICAR field gives each one its own N(0, 1 / tau) level",
+  bym2       = paste("a BYM2 field gives each one unit variance on its",
+                     "structured part"),
+  car_proper = paste("a proper CAR field puts no prior on it (D - rho W is",
+                     "zero there)")
+)
+
+# The handling key of a field type, NULL for a type that takes no adjacency.
+.isolated_node_field <- function(type) {
+  switch(tolower(type),
+         icar = , car = , besag = , rsr = "icar",
+         bym2 = "bym2",
+         car_proper = "car_proper",
+         NULL)
+}
+
+.isolated_node_text <- function(n_isolated,
+                                fields = names(.ISOLATED_NODE_HANDLING)) {
+  paste0(n_isolated, " isolated node(s) with no neighbours; ",
+         paste(.ISOLATED_NODE_HANDLING[fields], collapse = "; "), ".")
+}
+
+# A field that gives an island a proper prior reports it as a message; a
+# proper CAR field leaves it without one and warns.
+.report_isolated_nodes <- function(n_isolated, field) {
+  if (n_isolated == 0L) return(invisible())
+  if (is.null(field)) field <- names(.ISOLATED_NODE_HANDLING)
+  text <- .isolated_node_text(n_isolated, field)
+  if ("car_proper" %in% field) warning(text, call. = FALSE)
+  else message(text)
+  invisible()
+}
+
 #' Validate an adjacency argument passed to a field constructor.
 #'
 #' `spatial_car()`, `spatial_bym2()` and `spatial()` each carried their own
@@ -212,10 +337,13 @@ prepare_coords <- function(coord_vars, data, scale_coords = FALSE) {
 #' @param x The adjacency argument: a matrix, a `Matrix`, or a
 #'   `tulpa_adjacency`.
 #' @param arg Name of the argument, used in the messages.
+#' @param field The field the graph is for (`"icar"`, `"bym2"`,
+#'   `"car_proper"`; see `.isolated_node_field()`), which sets how an isolated
+#'   node is reported. `NULL` reports every field's handling.
 #' @return The bare adjacency matrix.
 #' @keywords internal
 #' @noRd
-.validate_adjacency_arg <- function(x, arg = "adjacency") {
+.validate_adjacency_arg <- function(x, arg = "adjacency", field = NULL) {
   if (inherits(x, "tulpa_adjacency")) return(x$adjacency)
   # The gate is idempotent: a spec built by a spatial_*() constructor carries a
   # graph this has already passed, and the front door re-runs it on whatever
@@ -230,6 +358,18 @@ prepare_coords <- function(coord_vars, data, scale_coords = FALSE) {
   if (!report$square) {
     stop("`", arg, "` must be square (got ", report$nrow, " x ",
          report$ncol, ").", call. = FALSE)
+  }
+  if (!report$finite) {
+    stop("`", arg, "` has ", report$n_nonfinite, " missing or non-finite ",
+         "entr", if (report$n_nonfinite == 1L) "y" else "ies",
+         " (NA / NaN / Inf); an adjacency must be 0 / 1 (or non-negative ",
+         "weights) everywhere.", call. = FALSE)
+  }
+  if (!report$nonneg) {
+    stop("`", arg, "` has ", report$n_negative, " negative entr",
+         if (report$n_negative == 1L) "y" else "ies", "; an adjacency weight ",
+         "must be non-negative (D - W is not a precision otherwise).",
+         call. = FALSE)
   }
   if (!report$symmetric) {
     stop("`", arg, "` must be symmetric (max |W - t(W)| = ",
@@ -249,15 +389,60 @@ prepare_coords <- function(coord_vars, data, scale_coords = FALSE) {
     warning("`", arg, "` has entries other than 0/1 (weighted graph).",
             call. = FALSE)
   }
-  if (report$n_isolated > 0L) {
-    warning(report$n_isolated, " isolated node(s) with no neighbours; an ",
-            "ICAR/CAR field is improper on disconnected nodes.",
-            call. = FALSE)
-  }
+  .report_isolated_nodes(report$n_isolated, field)
   attr(x, "tulpa_adjacency_checked") <- TRUE
   x
 }
 
+
+# Scalar-argument checks shared by the constructors and post-fit methods, each
+# naming the argument the caller set. `x` is refused unless it is ONE finite
+# number, so an NA, a character, a vector or a NULL reaches the user as that
+# message rather than as "missing value where TRUE/FALSE needed" from the first
+# comparison it meets.
+#' @keywords internal
+.arg_repr <- function(x) {
+  if (is.null(x)) return("NULL")
+  s <- paste(deparse(x, width.cutoff = 60L, nlines = 1L), collapse = "")
+  if (nchar(s) > 60L) paste0(substr(s, 1L, 57L), "...") else s
+}
+
+#' @keywords internal
+.is_scalar_num <- function(x) {
+  is.numeric(x) && length(x) == 1L && is.finite(x)
+}
+
+# One number in the open unit interval: a probability, an interval level, a
+# window fraction.
+#' @keywords internal
+.check_unit_interval <- function(x, arg) {
+  if (!.is_scalar_num(x) || x <= 0 || x >= 1) {
+    stop("`", arg, "` must be a single number in (0, 1); got ", .arg_repr(x),
+         ".", call. = FALSE)
+  }
+  invisible(x)
+}
+
+# One finite number (a location); `positive = TRUE` also demands > 0 (a scale).
+#' @keywords internal
+.check_scalar <- function(x, arg, positive = FALSE) {
+  if (!.is_scalar_num(x) || (positive && x <= 0)) {
+    stop("`", arg, "` must be a single ", if (positive) "positive" else "finite",
+         " number; got ", .arg_repr(x), ".", call. = FALSE)
+  }
+  invisible(x)
+}
+
+# One whole number >= `min` (a count, a grid size). A fractional value is
+# refused rather than truncated, which is what as.integer() would do with it.
+#' @keywords internal
+.check_count <- function(x, arg, min = 1L) {
+  if (!.is_scalar_num(x) || x != round(x) || x < min) {
+    stop("`", arg, "` must be a single whole number >= ", min, "; got ",
+         .arg_repr(x), ".", call. = FALSE)
+  }
+  invisible(as.integer(x))
+}
 
 # Penalized-complexity anchors: P(sigma > U) = alpha calibrates the exponential
 # rate lambda = -log(alpha) / U, which exists only for U > 0 and alpha in
@@ -268,7 +453,8 @@ prepare_coords <- function(coord_vars, data, scale_coords = FALSE) {
 # name the argument the user set. C++ carries the same predicate
 # (pc_anchors_valid, src/pc_prior.h) for specs assembled without this door.
 #' @keywords internal
-.check_pc_anchors <- function(U, alpha, arg_U, arg_alpha, where) {
+.check_pc_anchors <- function(U, alpha, arg_U, arg_alpha, where,
+                              tail = paste0("P(sigma > ", arg_U, ")")) {
   if (!is.numeric(U) || length(U) != 1L || !is.finite(U) || U <= 0) {
     stop(where, ": `", arg_U, "` must be a single positive number; got ",
          format(U), ".", call. = FALSE)
@@ -276,8 +462,70 @@ prepare_coords <- function(coord_vars, data, scale_coords = FALSE) {
   if (!is.numeric(alpha) || length(alpha) != 1L || !is.finite(alpha) ||
       alpha <= 0 || alpha >= 1) {
     stop(where, ": `", arg_alpha, "` is the tail probability ",
-         "P(sigma > ", arg_U, ") and must lie in (0, 1); got ",
-         format(alpha), ".", call. = FALSE)
+         tail, " and must lie in (0, 1); got ", format(alpha), ".",
+         call. = FALSE)
   }
   invisible(TRUE)
+}
+
+
+# The number of adaptive Gauss-Hermite nodes per group: a single whole number
+# >= 1. `as.integer()` truncated 2.5 to 2 and ran a quadrature the caller did
+# not ask for (gcol33/tulpa#886). Returns it as an integer.
+#' @keywords internal
+.check_n_quad <- function(n_quad) {
+  if (!is.numeric(n_quad) || length(n_quad) != 1L || !is.finite(n_quad) ||
+      n_quad < 1 || n_quad != round(n_quad)) {
+    stop("`n_quad` must be a single whole number >= 1; got ",
+         paste(format(n_quad), collapse = ", "), ".", call. = FALSE)
+  }
+  as.integer(n_quad)
+}
+
+
+# A model with random effects only (`y ~ 0 + (1 | g)`) has an empty fixed
+# design. The sampler and conditional-Laplace backends carry it; the fitters
+# that summarize or integrate over a fixed-effect block do not, and failed on
+# the empty block in their own words ("'names' attribute [1] must be the same
+# length as the vector [0]", "subscript out of bounds", "0 x 0 matrix";
+# gcol33/tulpa#881). They refuse it here, naming the backends that fit it.
+#' @keywords internal
+.require_fixed_effects <- function(X, where) {
+  if (NCOL(X) >= 1L) return(invisible(TRUE))
+  stop(where, "() needs at least one fixed-effect column, and the design has ",
+       "none (a formula such as y ~ 0 + (1 | g)). Keep an intercept ",
+       "(y ~ 1 + (1 | g)), or fit the random-effects-only model with mode = ",
+       "'hmc', 'mala', 'imh_laplace', 'vi' or 'laplace'.", call. = FALSE)
+}
+
+# The LKJ(eta) density det(R)^(eta - 1) / c_d is a density only for eta > 0:
+# its normaliser is a product of Beta functions B(eta + (d - k - 1) / 2, ...),
+# which at d = 2 is B(eta, eta) and is not finite for eta <= 0. A non-positive
+# shape therefore reached the outer integration as a NaN log-prior at every
+# node and surfaced as "every integration node returned a non-finite
+# log-marginal" (gcol33/tulpa#894).
+#' @keywords internal
+.check_lkj_eta <- function(eta, arg, where) {
+  if (!is.numeric(eta) || length(eta) != 1L || !is.finite(eta) || eta <= 0) {
+    stop(where, ": `", arg, "` is the LKJ shape and must be a single ",
+         "positive number; got ", format(eta), ".", call. = FALSE)
+  }
+  invisible(TRUE)
+}
+
+# The same check for an anchor pair passed as one `c(U, alpha)` argument (the
+# SPDE `prior_range` / `prior_sigma`), naming that argument and its elements.
+# `param` and `lower` say which tail the pair calibrates: P(sigma > U) for a
+# scale, P(range < U) for a range.
+#' @keywords internal
+.check_pc_anchor_pair <- function(pair, arg, where, param = "sigma",
+                                  lower = FALSE) {
+  if (!is.numeric(pair) || length(pair) != 2L) {
+    stop(where, ": `", arg, "` must be a length-2 numeric c(U, alpha); got ",
+         "length ", length(pair), ".", call. = FALSE)
+  }
+  .check_pc_anchors(pair[[1L]], pair[[2L]],
+                    paste0(arg, "[1]"), paste0(arg, "[2]"), where,
+                    tail = paste0("P(", param, if (lower) " < " else " > ",
+                                  arg, "[1])"))
 }

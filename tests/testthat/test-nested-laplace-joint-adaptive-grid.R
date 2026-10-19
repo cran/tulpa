@@ -15,6 +15,8 @@
 # Helpers (chain ICAR adjacency + joint sim — mirrors -joint-icar)            #
 # --------------------------------------------------------------------------- #
 
+skip_on_cran()
+
 .chain_adj <- function(n_s) {
     nbr <- lapply(seq_len(n_s),
                   function(s) setdiff(c(s - 1L, s + 1L), c(0L, n_s + 1L)))
@@ -52,7 +54,7 @@
          truth = list(sd_pos = sd_pos, alpha = alpha_true))
 }
 
-.fit_joint_icar <- function(sim, alpha_grid, adaptive_grid) {
+.fit_joint_icar <- function(sim, alpha_grid, adaptive_grid, control = list()) {
     adj <- .chain_adj(sim$n_s)
     arm_occ <- list(
         y = as.numeric(sim$occur), n_trials = rep(1L, sim$N),
@@ -83,8 +85,9 @@
                 field_coef = list(name = "alpha", grid = alpha_grid)))
         ),
         prior = prior,
-        control = list(adaptive_grid = adaptive_grid,
-                       var_of_means_consistency = FALSE)
+        control = utils::modifyList(
+            list(adaptive_grid = adaptive_grid,
+                 var_of_means_consistency = FALSE), control)
     )
 }
 
@@ -115,10 +118,17 @@ test_that("adaptive_grid = TRUE extends alpha when boundary carries mass", {
     # `auto_grid()` declares these nodes a default rather than a statement of
     # where the fit integrates, which is what makes the axis extendable: a grid
     # the caller wrote down plainly is a bound and is only densified
-    # (gcol33/tulpa#658, asserted in test-joint-axis-refinable.R).
+    # (gcol33/tulpa#658, asserted in test-joint-axis-refinable.R). A default
+    # axis is also one the placement pass lays at the outer mode, which moves
+    # this one off the edge before refinement sees it (gcol33/tulpa#925), so
+    # the boundary rung is read with placement held off.
     ag <- auto_grid(c(0.2, 0.4, 0.6))
-    fit_F <- .fit_joint_icar(sim, alpha_grid = ag, adaptive_grid = FALSE)
-    fit_T <- .fit_joint_icar(sim, alpha_grid = ag, adaptive_grid = TRUE)
+    held <- list(auto_recenter = FALSE)
+    fit_F <- .fit_joint_icar(sim, alpha_grid = ag, adaptive_grid = FALSE,
+                             control = held)
+    fit_T <- .fit_joint_icar(sim, alpha_grid = ag, adaptive_grid = TRUE,
+                             control = held)
+    fit_P <- .fit_joint_icar(sim, alpha_grid = ag, adaptive_grid = FALSE)
 
     # Refinement metadata is populated.
     expect_false(is.null(fit_T$adaptive_grid_info))
@@ -132,20 +142,32 @@ test_that("adaptive_grid = TRUE extends alpha when boundary carries mass", {
     expect_gt(max(fit_T$theta_grid[, "alpha"]),
               max(fit_F$theta_grid[, "alpha"]) + 1e-6)
 
-    # Mode-tracked path: new cells = new axis points (slice), not new ×
-    # other_cartesian. With sigma_grid = 3 levels (icar, no rho axis), the
-    # legacy cartesian path would have added `n_new_axis_pts * 3` cells;
-    # the slice path adds exactly `n_new_axis_pts`. Three boundary-side
-    # extension points => 3 new cells, 3 kernel solves, total 9 + 3 = 12.
-    expect_equal(length(fit_T$log_marginal) - length(fit_F$log_marginal),
-                  sum(fit_T$adaptive_grid_info$n_points_added))
-    expect_lte(sum(fit_T$adaptive_grid_info$n_points_added), 6L)
+    # Each extension point is a new level of the tensor, laid in every row of
+    # the other axes that holds the posterior (gcol33/tulpa#932): every row
+    # carrying more than `level_row_tail` of the fit's weight holds it.
+    others <- setdiff(colnames(fit_T$theta_grid), "alpha")
+    key <- function(g) do.call(paste, lapply(others, function(a) g[, a]))
+    old_lev <- unique(fit_F$theta_grid[, "alpha"])
+    new_lev <- setdiff(unique(fit_T$theta_grid[, "alpha"]), old_lev)
+    expect_gt(length(new_lev), 0L)
+    expect_lte(length(new_lev), sum(fit_T$adaptive_grid_info$n_points_added))
+    w <- fit_T$weights; w[!is.finite(w)] <- 0
+    row_w <- tapply(w, key(fit_T$theta_grid), sum)
+    heavy <- names(row_w)[row_w > .nl_diag("level_row_tail")]
+    expect_gt(length(heavy), 0L)
+    for (lv in new_lev) {
+        at <- fit_T$theta_grid[, "alpha"] == lv
+        expect_true(all(heavy %in% key(fit_T$theta_grid[at, , drop = FALSE])))
+    }
 
     # Posterior alpha mean moves outward (FALSE truncated at alpha_max =
     # 0.6; TRUE lets mass past that ceiling toward alpha_true = 2.0).
     # 0.4 is well above MCSE for n=600, sigma=1.
     expect_lt(fit_F$theta_mean[["alpha"]], 0.6 + 1e-6)
     expect_gt(fit_T$theta_mean[["alpha"]], fit_F$theta_mean[["alpha"]] + 0.4)
+    # Placement reaches the same side on its own.
+    expect_identical(fit_P$outer_grid_placement, "auto_recentered")
+    expect_gt(fit_P$theta_mean[["alpha"]], fit_F$theta_mean[["alpha"]] + 0.4)
 })
 
 
@@ -160,12 +182,64 @@ test_that("adaptive_grid = TRUE leaves grid alone when boundary is empty", {
     # Wide grid: well past alpha_true = 2.0 (boundary near 4 has
     # negligible weight under any seed of this simulator).
     sp_wide <- c(0.1, 0.3, 0.6, 1.0, 1.5, 2.5, 4.0)
+    # The field SD's nodes are another stated axis the pass would visit, so it
+    # is held and the test reads the copy axis alone.
+    held <- list(axis_refine = c(sigma = "none"))
     fit_F <- .fit_joint_icar(sim, alpha_grid = sp_wide,
-                              adaptive_grid = FALSE)
+                              adaptive_grid = FALSE, control = held)
     fit_T <- .fit_joint_icar(sim, alpha_grid = sp_wide,
-                              adaptive_grid = TRUE)
+                              adaptive_grid = TRUE, control = held)
 
     expect_null(fit_T$adaptive_grid_info)
     expect_equal(length(fit_T$log_marginal), length(fit_F$log_marginal))
     expect_equal(fit_T$theta_mean[["alpha"]], fit_F$theta_mean[["alpha"]])
+})
+
+test_that("refinement rounds solve the same cells on the outer team as serially", {
+    skip_on_cran()
+    # A round's cells are independent, so running them on the fit's outer
+    # width changes only the warm start each Newton solve begins from.
+    sim <- .simulate_joint_icar_strong(seed = 6)
+    ag <- auto_grid(c(0.2, 0.4, 0.6))
+    fit_w <- function(w) .fit_joint_icar(
+        sim, alpha_grid = ag, adaptive_grid = TRUE,
+        control = list(auto_recenter = FALSE, n_threads_outer = w))
+    f1 <- fit_w(1L)
+    f2 <- fit_w(2L)
+    expect_gt(sum(nzchar(f1$refining_axis)), 0L)
+    key <- function(f) apply(signif(f$theta_grid, 10), 1, paste, collapse = ":")
+    m <- match(key(f1), key(f2))
+    expect_false(anyNA(m))
+    expect_identical(nrow(f1$theta_grid), nrow(f2$theta_grid))
+    expect_equal(f2$log_marginal[m], f1$log_marginal, tolerance = 1e-7)
+    expect_equal(f2$theta_ci_lo, f1$theta_ci_lo, tolerance = 1e-7)
+    expect_equal(f2$theta_ci_hi, f1$theta_ci_hi, tolerance = 1e-7)
+})
+
+test_that("a refined cell's convergence and log-determinant flags are recorded with the cell", {
+    skip_on_cran()
+    sim <- .simulate_joint_icar_strong(seed = 6)
+    fit <- .fit_joint_icar(sim, alpha_grid = auto_grid(c(0.2, 0.4, 0.6)),
+                           adaptive_grid = TRUE,
+                           control = list(auto_recenter = FALSE))
+    expect_gt(sum(nzchar(fit$refining_axis)), 0L)
+    expect_length(fit$converged, nrow(fit$theta_grid))
+    expect_length(fit$s2z_log_det_fallback, nrow(fit$theta_grid))
+    expect_length(fit$s2z_field_indefinite, nrow(fit$theta_grid))
+    # A cap the refined cells cannot meet is visible on them, and the fit says
+    # how much of the posterior sits on cells without a mode.
+    expect_warning(
+        capped <- .fit_joint_icar(sim, alpha_grid = auto_grid(c(0.2, 0.4, 0.6)),
+                                  adaptive_grid = TRUE,
+                                  control = list(auto_recenter = FALSE,
+                                                 max_iter = 1L)),
+        "without reaching a mode")
+    added <- nzchar(capped$refining_axis)
+    expect_length(capped$converged, nrow(capped$theta_grid))
+    expect_false(any(capped$converged[added]))
+    # A cell the screen dropped was never solved, so it is not counted as one
+    # that stopped short of its mode.
+    solved <- added & !capped$prune_mask
+    expect_true(any(solved))
+    expect_true(all(which(solved) %in% capped$nonconverged_cells))
 })

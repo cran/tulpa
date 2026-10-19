@@ -43,8 +43,10 @@
          Xpos = Xpos, y_pos = y_pos, spi_pos = as.integer(spi_pos))
 }
 
+# The prune fields and the moments compared below are all set before the outer
+# Pareto-k diagnostic runs, so these fits leave it off.
 .fit_joint_prune <- function(sim, prune, prune_tol = 1e-3,
-                              n_threads_outer = 1L) {
+                              n_threads_outer = 1L, screen_iters = NULL) {
     adj <- .chain_adj(sim$n_s)
     arm_occ <- list(
         y = as.numeric(sim$occur), n_trials = rep(1L, sim$N),
@@ -68,153 +70,28 @@
     tulpa_nested_laplace_joint(
         responses = list(occ = arm_occ, pos = arm_pos),
         prior = prior,
-        control = list(n_threads = 1L, n_threads_outer = n_threads_outer,
-                       prune = prune, prune_tol = prune_tol,
-                       adaptive_grid = FALSE, var_of_means_consistency = FALSE)
+        control = c(list(n_threads = 1L, n_threads_outer = n_threads_outer,
+                         prune = prune, prune_tol = prune_tol, diagnose_k = FALSE,
+                         adaptive_grid = FALSE, var_of_means_consistency = FALSE),
+                    if (!is.null(screen_iters)) list(screen_iters = screen_iters))
     )
 }
 
-test_that("prune = FALSE leaves no prune fields in the result", {
-    skip_on_cran()
-    sim <- .sim_joint_bym2(8101L)
-    fit <- .fit_joint_prune(sim, prune = FALSE)
-    expect_null(fit$prune_mask)
-    expect_null(fit$prune_cheap_log_marginal)
-    expect_null(fit$prune_n_pruned)
-    expect_null(fit$prune_tol)
-})
-
-test_that("prune = TRUE populates prune fields and marks pruned cells", {
-    skip_on_cran()
-    sim <- .sim_joint_bym2(8101L)
-    # Aggressive tol to force at least one prune on this 45-cell grid.
-    fit <- .fit_joint_prune(sim, prune = TRUE, prune_tol = 0.05)
-
-    expect_type(fit$prune_mask, "logical")
-    expect_length(fit$prune_mask, length(fit$log_marginal))
-    expect_type(fit$prune_cheap_log_marginal, "double")
-    expect_length(fit$prune_cheap_log_marginal, length(fit$log_marginal))
-    expect_type(fit$prune_n_pruned, "integer")
-    expect_equal(fit$prune_n_pruned, sum(fit$prune_mask))
-    expect_equal(fit$prune_tol, 0.05)
-
-    # Pilot cell is never pruned.
-    k_pilot <- length(fit$log_marginal) %/% 2L + 1L  # 1-based
-    expect_false(fit$prune_mask[k_pilot])
-
-    # Pruned cells must have log_marginal = -Inf and n_iter = 0. Surviving
-    # cells must have finite log_marginal (i.e. the full Newton ran).
-    pruned <- which(fit$prune_mask)
-    kept   <- which(!fit$prune_mask)
-    if (length(pruned) > 0L) {
-        expect_true(all(fit$log_marginal[pruned] == -Inf),
-                    info = "pruned cells must carry log_marginal = -Inf")
-        expect_true(all(fit$n_iter[pruned] == 0L),
-                    info = "pruned cells must carry n_iter = 0")
+# One fit per seed and setting, shared by every block that reads it.
+.prune_cache <- new.env(parent = emptyenv())
+.prune_fit <- function(seed, ...) {
+    key <- paste(deparse(list(seed, ...)), collapse = "")
+    if (is.null(.prune_cache[[key]])) {
+        .prune_cache[[key]] <- .fit_joint_prune(.sim_joint_bym2(seed), ...)
     }
-    expect_true(all(is.finite(fit$log_marginal[kept])),
-                info = "kept cells must have a finite log_marginal")
-})
+    .prune_cache[[key]]
+}
 
-test_that("prune_tol = 0 with prune = TRUE is the no-prune path", {
-    skip_on_cran()
-    sim <- .sim_joint_bym2(8101L)
-    fit_off <- .fit_joint_prune(sim, prune = FALSE)
-    fit_zero <- .fit_joint_prune(sim, prune = TRUE, prune_tol = 0.0)
-
-    # prune_tol = 0 short-circuits the cheap pass entirely — no point
-    # screening when nothing can be pruned. The kernel emits no prune
-    # fields in that case (identical to prune = FALSE).
-    expect_null(fit_zero$prune_mask)
-    expect_null(fit_zero$prune_cheap_log_marginal)
-    expect_null(fit_zero$prune_n_pruned)
-    expect_null(fit_zero$prune_tol)
-
-    # Posterior moments must match the no-prune fit to numerical noise.
-    expect_equal(fit_zero$log_marginal, fit_off$log_marginal,
-                 tolerance = 1e-8)
-    expect_equal(fit_zero$weights, fit_off$weights, tolerance = 1e-8)
-    expect_equal(fit_zero$theta_mean, fit_off$theta_mean, tolerance = 1e-8)
-    expect_equal(fit_zero$theta_sd, fit_off$theta_sd, tolerance = 1e-6)
-})
-
-test_that("prune posterior matches no-prune across seeds (conservative tol)", {
-    # At prune_tol = 1e-3 the screen drops cells holding < 0.1% of cheap-
-    # pass mass. Surviving cells carry essentially all the posterior mass,
-    # so theta_mean / theta_sd / derived alpha quantiles must match the no-
-    # prune fit within numerical noise across seeds.
-    #
-    # The cheap-pass uses a rank-faithful chained-lattice screen (each cell's
-    # short Newton run warm-started from the previous screened cell's quasi-
-    # mode) rather than full Newton convergence, so it is not bit-equal to
-    # the full pass. Empirically the cheap-pass posterior matches the full-
-    # Newton posterior to ~1e-3 on means and ~1e-2 on SDs at this workload.
-    # We assert absolute tolerances rather than expect_equal's default
-    # relative ones because SD values can be small (~0.05) where 1% relative
-    # is sub-noise.
-    skip_on_cran()
-    seeds <- 8200L + seq_len(5L)
-    for (seed in seeds) {
-        sim <- .sim_joint_bym2(seed)
-        fit_off <- .fit_joint_prune(sim, prune = FALSE)
-        fit_on  <- .fit_joint_prune(sim, prune = TRUE, prune_tol = 1e-3)
-
-        # Absolute tolerances: 5e-3 on means (sigma, rho, alpha all in
-        # ~[0.1, 2]), 1e-2 on SDs (typically ~[0.02, 0.3]).
-        expect_lt(max(abs(fit_on$theta_mean - fit_off$theta_mean)),
-                  5e-3,
-                  label = sprintf("seed=%d theta_mean max-abs-diff", seed))
-        expect_lt(max(abs(fit_on$theta_sd - fit_off$theta_sd)),
-                  1e-2,
-                  label = sprintf("seed=%d theta_sd max-abs-diff", seed))
-
-        # Derived alpha quantiles (median + 95% interval) should be
-        # unchanged within MC noise when no real mass is lost.
-        if (!is.null(fit_off$alpha_quantiles) &&
-            !is.null(fit_on$alpha_quantiles)) {
-            expect_lt(max(abs(fit_on$alpha_quantiles -
-                              fit_off$alpha_quantiles)),
-                      2e-2,
-                      label = sprintf("seed=%d alpha_quantiles max-abs-diff",
-                                       seed))
-        }
-    }
-})
-
-test_that("prune composes with outer-grid parallelism", {
-    # The pruning machinery lives in run_nested_laplace_grid, so the
-    # parallel and serial paths both honour the prune mask. Sanity check
-    # that prune + n_threads_outer give identical results to prune serial,
-    # because the cheap pass runs single-threaded before the parallel fan-
-    # out and the mask drives both paths.
-    skip_on_cran()
-    skip_if_not(parallel::detectCores() >= 2L,
-                "needs multi-core to exercise the parallel path")
-    n_outer <- max(2L, min(4L, parallel::detectCores() - 1L))
-
-    sim <- .sim_joint_bym2(8301L)
-    fit_s <- .fit_joint_prune(sim, prune = TRUE, prune_tol = 1e-3,
-                              n_threads_outer = 1L)
-    fit_p <- .fit_joint_prune(sim, prune = TRUE, prune_tol = 1e-3,
-                              n_threads_outer = n_outer)
-
-    # Same mask, same pruned-cell count.
-    expect_identical(fit_p$prune_mask, fit_s$prune_mask)
-    expect_identical(fit_p$prune_n_pruned, fit_s$prune_n_pruned)
-
-    # Converged log-marginals on kept cells must match to numerical noise.
-    kept <- !fit_s$prune_mask
-    expect_lt(max(abs(fit_p$log_marginal[kept] - fit_s$log_marginal[kept])),
-              1e-4,
-              label = "parallel vs serial log_marginal on kept cells")
-    expect_lt(max(abs(fit_p$theta_mean - fit_s$theta_mean)), 1e-4,
-              label = "parallel vs serial theta_mean")
-    expect_lt(max(abs(fit_p$theta_sd - fit_s$theta_sd)), 1e-3,
-              label = "parallel vs serial theta_sd")
-})
+skip_on_cran_budget()
 
 
 test_that("a refined grid's per-cell lists track it when the first cell was pruned", {
+  skip_on_cran_budget()
   # A pruned cell is never solved, so it carries no precision and no covariance
   # block. Deciding from cell 1 whether the fit holds them at all reads a
   # pruned cell whenever the screen dropped the grid's first corner: the
@@ -251,4 +128,198 @@ test_that("a refined grid's per-cell lists track it when the first cell was prun
   # filled in.
   expect_null(out$Q_csc_p_per_grid[[1L]])
   expect_null(out$cov_block_per_grid[[1L]])
+})
+
+skip_on_cran()
+
+test_that("a per-cell warm-started batch solves the same cells in parallel", {
+    # gcol33/tulpa#920: the outer Pareto-k batch hands every draw its own warm
+    # start, so the parallel driver fans it out with no serial pilot cell. Each
+    # cell is solved from its own row either way, so the diagnostic is the
+    # same at one outer thread and at two. The point k-hat is read off the
+    # batch's importance ratios; the bootstrap around it adds no solve, so it
+    # is left off.
+    skip_on_cran()
+    sim <- .sim_joint_bym2(8101L)
+    fit_k <- function(kt) {
+        adj <- .chain_adj(sim$n_s)
+        tulpa_nested_laplace_joint(
+            responses = list(occ = list(
+                y = as.numeric(sim$occur), n_trials = rep(1L, sim$N),
+                X = sim$Xocc, spatial_idx = sim$spatial_idx,
+                family = "binomial", phi = 1.0)),
+            prior = list(type = "icar", n_spatial_units = adj$n_spatial_units,
+                         adj_row_ptr = adj$adj_row_ptr,
+                         adj_col_idx = adj$adj_col_idx,
+                         n_neighbors = adj$n_neighbors,
+                         sigma_grid = c(0.3, 0.6, 1.0, 1.6)),
+            control = list(n_threads = 1L, diagnose_k = TRUE, k_samples = 200L,
+                           k_bootstrap = 0L, k_threads = kt,
+                           auto_recenter = FALSE, progress = FALSE))
+    }
+    one <- fit_k(1L)
+    two <- fit_k(2L)
+    expect_true(is.finite(one$pareto_k))
+    expect_identical(two$pareto_k, one$pareto_k)
+    expect_identical(two$pareto_k_is_ess, one$pareto_k_is_ess)
+})
+
+test_that("the screen ranks a cell by its second-order converged estimate", {
+    # gcol33/tulpa#919: a truncated screen reads lowest where its inner mode has
+    # furthest to go from its warm start, so it ranked the outer mode of the
+    # full 25 km occu_cover fit below a plateau that converges in a few steps.
+    # The screen's value is the truncated log-marginal plus half the Newton
+    # decrement where it stopped; on the cells solved in full it sits nearer
+    # the converged log-marginal than the truncated value it corrects.
+    skip_on_cran()
+    fit <- .prune_fit(8101L, prune = TRUE, prune_tol = 1e-12, screen_iters = 1L)
+    dec <- fit$prune_screen_decrement
+    expect_length(dec, length(fit$log_marginal))
+    kept <- !fit$prune_mask & is.finite(dec)
+    expect_gt(sum(kept), 5L)
+    expect_true(all(dec[kept] >= 0))
+
+    # The screen reads the kernel's own scale; the fit's log-marginal carries
+    # the hyperprior R folded in.
+    folded <- tulpa:::.nl_log_hyperprior_folded(fit, length(fit$log_marginal))
+    full <- (fit$log_marginal - folded)[kept]
+    est  <- fit$prune_cheap_log_marginal[kept]
+    raw  <- est - 0.5 * dec[kept]
+    moved <- abs(raw - full) > 1e-6
+    expect_gt(sum(moved), 0L)
+    expect_lt(sum(abs(est - full)[moved]), sum(abs(raw - full)[moved]))
+})
+
+test_that("prune = FALSE leaves no prune fields in the result", {
+    skip_on_cran()
+    fit <- .prune_fit(8101L, prune = FALSE)
+    expect_null(fit$prune_mask)
+    expect_null(fit$prune_cheap_log_marginal)
+    expect_null(fit$prune_n_pruned)
+    expect_null(fit$prune_tol)
+})
+
+test_that("prune = TRUE populates prune fields and marks pruned cells", {
+    skip_on_cran()
+    # Aggressive tol to force at least one prune on this 45-cell grid.
+    fit <- .prune_fit(8101L, prune = TRUE, prune_tol = 0.05)
+
+    expect_type(fit$prune_mask, "logical")
+    expect_length(fit$prune_mask, length(fit$log_marginal))
+    expect_type(fit$prune_cheap_log_marginal, "double")
+    expect_length(fit$prune_cheap_log_marginal, length(fit$log_marginal))
+    expect_type(fit$prune_n_pruned, "integer")
+    expect_equal(fit$prune_n_pruned, sum(fit$prune_mask))
+    expect_equal(fit$prune_tol, 0.05)
+
+    # Pilot cell is never pruned.
+    k_pilot <- length(fit$log_marginal) %/% 2L + 1L  # 1-based
+    expect_false(fit$prune_mask[k_pilot])
+
+    # Pruned cells must have log_marginal = -Inf and n_iter = 0. Surviving
+    # cells must have finite log_marginal (i.e. the full Newton ran).
+    pruned <- which(fit$prune_mask)
+    kept   <- which(!fit$prune_mask)
+    if (length(pruned) > 0L) {
+        expect_true(all(fit$log_marginal[pruned] == -Inf),
+                    info = "pruned cells must carry log_marginal = -Inf")
+        expect_true(all(fit$n_iter[pruned] == 0L),
+                    info = "pruned cells must carry n_iter = 0")
+    }
+    expect_true(all(is.finite(fit$log_marginal[kept])),
+                info = "kept cells must have a finite log_marginal")
+})
+
+test_that("prune_tol = 0 with prune = TRUE is the no-prune path", {
+    skip_on_cran()
+    fit_off <- .prune_fit(8101L, prune = FALSE)
+    fit_zero <- .prune_fit(8101L, prune = TRUE, prune_tol = 0.0)
+
+    # prune_tol = 0 short-circuits the cheap pass entirely — no point
+    # screening when nothing can be pruned. The kernel emits no prune
+    # fields in that case (identical to prune = FALSE).
+    expect_null(fit_zero$prune_mask)
+    expect_null(fit_zero$prune_cheap_log_marginal)
+    expect_null(fit_zero$prune_n_pruned)
+    expect_null(fit_zero$prune_tol)
+
+    # Posterior moments must match the no-prune fit to numerical noise.
+    expect_equal(fit_zero$log_marginal, fit_off$log_marginal,
+                 tolerance = 1e-8)
+    expect_equal(fit_zero$weights, fit_off$weights, tolerance = 1e-8)
+    expect_equal(fit_zero$theta_mean, fit_off$theta_mean, tolerance = 1e-8)
+    expect_equal(fit_zero$theta_sd, fit_off$theta_sd, tolerance = 1e-6)
+})
+
+test_that("prune posterior matches no-prune across seeds (conservative tol)", {
+    # At prune_tol = 1e-3 the screen drops cells holding < 0.1% of cheap-
+    # pass mass. Surviving cells carry essentially all the posterior mass,
+    # so theta_mean / theta_sd / derived alpha quantiles must match the no-
+    # prune fit within numerical noise across seeds.
+    #
+    # The cheap-pass uses a rank-faithful chained-lattice screen (each cell's
+    # short Newton run warm-started from the previous screened cell's quasi-
+    # mode) rather than full Newton convergence, so it is not bit-equal to
+    # the full pass. Empirically the cheap-pass posterior matches the full-
+    # Newton posterior to ~1e-3 on means and ~1e-2 on SDs at this workload.
+    # We assert absolute tolerances rather than expect_equal's default
+    # relative ones because SD values can be small (~0.05) where 1% relative
+    # is sub-noise.
+    skip_on_cran()
+    seeds <- 8200L + seq_len(5L)
+    for (seed in seeds) {
+        fit_off <- .prune_fit(seed, prune = FALSE)
+        fit_on  <- .prune_fit(seed, prune = TRUE, prune_tol = 1e-3)
+
+        # Absolute tolerances: 5e-3 on means (sigma, rho, alpha all in
+        # ~[0.1, 2]), 1e-2 on SDs (typically ~[0.02, 0.3]).
+        expect_lt(max(abs(fit_on$theta_mean - fit_off$theta_mean)),
+                  5e-3,
+                  label = sprintf("seed=%d theta_mean max-abs-diff", seed))
+        expect_lt(max(abs(fit_on$theta_sd - fit_off$theta_sd)),
+                  1e-2,
+                  label = sprintf("seed=%d theta_sd max-abs-diff", seed))
+
+        # Derived alpha quantiles (median + 95% interval) should be
+        # unchanged within MC noise when no real mass is lost.
+        if (!is.null(fit_off$alpha_quantiles) &&
+            !is.null(fit_on$alpha_quantiles)) {
+            expect_lt(max(abs(fit_on$alpha_quantiles -
+                              fit_off$alpha_quantiles)),
+                      2e-2,
+                      label = sprintf("seed=%d alpha_quantiles max-abs-diff",
+                                       seed))
+        }
+    }
+})
+
+test_that("prune composes with outer-grid parallelism", {
+    # The pruning machinery lives in run_nested_laplace_grid, so the
+    # parallel and serial paths both honour the prune mask. Sanity check
+    # that prune + n_threads_outer give identical results to prune serial,
+    # because the cheap pass runs single-threaded before the parallel fan-
+    # out and the mask drives both paths.
+    skip_on_cran()
+    skip_if_not(parallel::detectCores() >= 2L,
+                "needs multi-core to exercise the parallel path")
+    n_outer <- max(2L, min(4L, parallel::detectCores() - 1L))
+
+    fit_s <- .prune_fit(8201L, prune = TRUE, prune_tol = 1e-3)
+    fit_p <- .prune_fit(8201L, prune = TRUE, prune_tol = 1e-3,
+                        n_threads_outer = n_outer)
+
+    # Same mask, same pruned-cell count, on a seed where the screen drops cells.
+    expect_gt(fit_s$prune_n_pruned, 0L)
+    expect_identical(fit_p$prune_mask, fit_s$prune_mask)
+    expect_identical(fit_p$prune_n_pruned, fit_s$prune_n_pruned)
+
+    # Converged log-marginals on kept cells must match to numerical noise.
+    kept <- !fit_s$prune_mask
+    expect_lt(max(abs(fit_p$log_marginal[kept] - fit_s$log_marginal[kept])),
+              1e-4,
+              label = "parallel vs serial log_marginal on kept cells")
+    expect_lt(max(abs(fit_p$theta_mean - fit_s$theta_mean)), 1e-4,
+              label = "parallel vs serial theta_mean")
+    expect_lt(max(abs(fit_p$theta_sd - fit_s$theta_sd)), 1e-3,
+              label = "parallel vs serial theta_sd")
 })

@@ -24,6 +24,8 @@
 # A region-grouped IID latent keeps the random effect identified (several sites
 # per region) while leaving each site one detection observation, as in a real
 # single-season design.
+skip_on_cran()
+
 sim_occu <- function(seed, n_regions = 40L, sites_per_region = 5L,
                      beta = c(-0.1, 0.8), sigma_u = 0.6, p_det = 0.4) {
   set.seed(seed)
@@ -104,7 +106,7 @@ test_that("occupancy fit exposes calibrated fitted_eta / fitted_eta_var", {
   expect_true(all(is.finite(f$fitted_eta)))
   expect_true(all(is.finite(f$fitted_eta_var)))
   expect_true(all(f$fitted_eta_var >= 0))
-  expect_true(all(is.finite(f$log_marginal)))
+  expect_cells_solved(f)
 })
 
 test_that("occupancy with det_prob == 1 reduces to a logit Bernoulli", {

@@ -136,7 +136,35 @@ test_that("the dense gate refuses a block its scatter cannot resolve", {
     }
 })
 
+test_that("dense and sparse agree on a pure INDEXED_SINGLE spec", {
+    # The one place the two scatters can be pinned to each other. Without it a
+    # divergence between them would show only as a fit-level difference.
+    arms_norm <- .gk_arms(seed = 31L)
+    p_tot <- sum(vapply(arms_norm, function(a) ncol(a$X), integer(1)))
+    set.seed(3L)
+    fx <- .gk_icar(arms_norm)
+    blk <- .gk_block(fx$spec, arms_norm)
+    n_x <- p_tot + fx$n_latent
+    set.seed(41L)
+    x0 <- rnorm(n_x, sd = 0.35)
+    d <- .gk_eval(arms_norm, blk, x0, sparse = FALSE)
+    s <- .gk_eval(arms_norm, blk, x0, sparse = TRUE)
+    expect_equal(s$logpost, d$logpost, tolerance = 1e-10)
+    expect_equal(s$grad, d$grad, tolerance = 1e-10)
+})
+
+# A projected areal field (gcol33/tulpa#940) reaches arm k as A_k z: the
+# projector replaces the unit gather and turns the block INDEXED_MULTI.
+.gk_incidence <- function(idx, n_s) {
+    S <- matrix(0, length(idx), n_s)
+    S[cbind(seq_along(idx), idx)] <- 1
+    S
+}
+
+skip_on_cran_budget()
+
 test_that("the sparse gate matches central FD on every contribution kind", {
+    skip_on_cran_budget()
     arms_norm <- .gk_arms()
     p_tot <- sum(vapply(arms_norm, function(a) ncol(a$X), integer(1)))
     set.seed(3L)
@@ -153,6 +181,7 @@ test_that("the sparse gate matches central FD on every contribution kind", {
 })
 
 test_that("the sparse gate carries a per-row block weight once", {
+    skip_on_cran_budget()
     # An areal SVC block rides a per-row covariate, eta_i += w_i * u[s_i]. The
     # per-observation sparse scatter multiplied that weight in twice on the
     # INDEXED_SINGLE branch, so the field's gradient and curvature were those of
@@ -170,19 +199,48 @@ test_that("the sparse gate carries a per-row block weight once", {
     expect_equal(r$grad, d$grad, tolerance = 1e-10)
 })
 
-test_that("dense and sparse agree on a pure INDEXED_SINGLE spec", {
-    # The one place the two scatters can be pinned to each other. Without it a
-    # divergence between them would show only as a fit-level difference.
-    arms_norm <- .gk_arms(seed = 31L)
+test_that("a projector equal to the unit incidence is the gathered field", {
+    skip_on_cran_budget()
+    arms_norm <- .gk_arms(seed = 37L)
+    p_tot <- sum(vapply(arms_norm, function(a) ncol(a$X), integer(1)))
+    set.seed(3L)
+    for (type in c("icar", "bym2")) {
+        fx <- .gk_icar(arms_norm)
+        fx$spec$type <- type
+        if (type == "bym2") fx$spec$rho_grid <- c(0.4, 0.7)
+        n_lat <- if (type == "bym2") 2L * fx$n_latent else fx$n_latent
+        gathered <- .gk_block(fx$spec, arms_norm)
+        proj_spec <- fx$spec
+        proj_spec$projector <- lapply(fx$spec$spatial_idx, .gk_incidence,
+                                      n_s = fx$n_latent)
+        proj_spec$spatial_idx <- NULL
+        projected <- .gk_block(proj_spec, arms_norm)
+        set.seed(43L)
+        x0 <- rnorm(p_tot + n_lat, sd = 0.35)
+        g <- .gk_eval(arms_norm, gathered, x0, sparse = TRUE)
+        p <- .gk_eval(arms_norm, projected, x0, sparse = TRUE)
+        expect_equal(p$logpost, g$logpost, tolerance = 1e-10, info = type)
+        expect_equal(p$grad, g$grad, tolerance = 1e-10, info = type)
+    }
+})
+
+test_that("the sparse gate matches central FD on a dense projector", {
+    skip_on_cran_budget()
+    arms_norm <- .gk_arms(seed = 47L)
     p_tot <- sum(vapply(arms_norm, function(a) ncol(a$X), integer(1)))
     set.seed(3L)
     fx <- .gk_icar(arms_norm)
+    # Restricted spatial regression: A_k = P_k S_k with P_k the residual
+    # projector of arm k's design, dense and with zero row sums.
+    fx$spec$projector <- lapply(seq_along(arms_norm), function(k) {
+        X <- arms_norm[[k]]$X
+        P <- diag(nrow(X)) - X %*% solve(crossprod(X), t(X))
+        P %*% .gk_incidence(fx$spec$spatial_idx[[k]], fx$n_latent)
+    })
+    fx$spec$spatial_idx <- NULL
     blk <- .gk_block(fx$spec, arms_norm)
-    n_x <- p_tot + fx$n_latent
-    set.seed(41L)
-    x0 <- rnorm(n_x, sd = 0.35)
-    d <- .gk_eval(arms_norm, blk, x0, sparse = FALSE)
-    s <- .gk_eval(arms_norm, blk, x0, sparse = TRUE)
-    expect_equal(s$logpost, d$logpost, tolerance = 1e-10)
-    expect_equal(s$grad, d$grad, tolerance = 1e-10)
+    r <- .gk_fd_check(arms_norm, blk, p_tot + fx$n_latent, sparse = TRUE)
+    expect_gt(max(abs(r$grad[(p_tot + 1L):(p_tot + fx$n_latent)])), 1e-8)
+    expect_error(.gk_eval(arms_norm, blk, r$x, sparse = FALSE),
+                 "not INDEXED_SINGLE")
 })

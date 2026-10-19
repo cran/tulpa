@@ -22,7 +22,10 @@
   store_beta <- combine != "none"
   store_cov  <- combine == "law_of_total_cov"
 
-  function(new_cells, warm_start = NULL, store_extras = store_beta) {
+  # A caller's `inner_fit` has no cheap pass, so every cell is solved and
+  # `screen` is not read.
+  function(new_cells, warm_start = NULL, store_extras = store_beta,
+           screen = NULL) {
     n_new <- nrow(new_cells)
     log_marg <- rep(-Inf, n_new)
     extras   <- if (isTRUE(store_extras)) vector("list", n_new) else NULL
@@ -177,15 +180,16 @@
 #'   * `var_of_means_consistency` (`FALSE`) -- run a post-integration
 #'     consistency pass: for refinable axes whose marginal has collapsed onto
 #'     too few nodes to carry a spread, bisect the gaps between adjacent nodes
-#'     that carry the axis's mass, with slice points in the modal cell's row,
-#'     and repeat until the axis reaches `var_of_means_min_ess` or has taken
-#'     `.nl_diag("axis_refine_nodes")` new nodes. One kernel call per round.
+#'     that carry the axis's mass, each new point a level laid in every row of
+#'     the other axes that holds the posterior, and repeat until the axis reaches `var_of_means_min_ess`
+#'     or has taken `.nl_diag("axis_refine_nodes")` new levels. One kernel call
+#'     per round.
 #'   * `var_of_means_min_ess` (`.nl_diag("axis_sd_ess")`) -- the quadrature
 #'     effective sample size an axis marginal has to reach for the pass to
 #'     leave it alone. Read off the weights, so the trigger is not one SD
 #'     estimator compared against the other.
 #'
-#' @return A list of class `c("tulpa_hyper_grid", "tulpa_fit", "list")` with:
+#' @return A list of class `c("tulpa_fit", "list")` with:
 #'   * `theta_grid` -- numeric matrix `[n_cells x n_axes]` of outer-grid
 #'     hyperparameter values; columns named after the axes.
 #'   * `theta_names` -- character vector of axis names.
@@ -229,12 +233,27 @@
 #'   [tulpa_nested_laplace_joint()] for the family-specific outer-grid
 #'   driver that this helper generalises.
 #' @examples
-#' \dontrun{
-#' # Integrate an inner fit over a hyperparameter grid: inner_fit(theta) returns
-#' # a per-cell fit and hyper_specs names the axes. tulpa_nested_laplace() is the
-#' # packaged driver built on this.
-#' res <- tulpa_hyper_grid(hyper_specs, inner_fit)
+#' # Integrate a Gaussian linear model's residual SD: inner_fit(hypers) returns
+#' # the per-cell log marginal and the conditional fixed-effect posterior, and
+#' # the axis spec names the grid. tulpa_nested_laplace() is the packaged driver
+#' # built on this.
+#' set.seed(1)
+#' n <- 40L; X <- cbind(1, rnorm(n)); y <- as.numeric(X %*% c(0.5, -1) + rnorm(n))
+#' XtX <- crossprod(X); Xty <- crossprod(X, y)
+#' inner_fit <- function(hypers) {
+#'   sigma <- as.numeric(hypers["sigma"])
+#'   V <- chol2inv(chol(XtX / sigma^2 + diag(1e-4, 2)))
+#'   mu <- as.numeric(V %*% (Xty / sigma^2))
+#'   list(log_marginal = -n * log(sigma) - 0.5 * sum((y - X %*% mu)^2) / sigma^2 +
+#'          0.5 * as.numeric(determinant(V)$modulus),
+#'        beta_mean = stats::setNames(mu, c("b0", "b1")), beta_cov = V)
 #' }
+#' specs <- list(hyper_axis_spec("sigma", grid = exp(seq(log(0.5), log(2),
+#'                                                       length.out = 9)),
+#'                               log_scale = TRUE, bounds = c(0, Inf)))
+#' res <- tulpa_hyper_grid(specs, inner_fit, n_draws = 500L, seed = 1L)
+#' res$theta_median
+#' res$beta
 #' @export
 tulpa_hyper_grid <- function(hyper_specs, inner_fit,
                              combine = c("law_of_total_cov",
@@ -347,7 +366,7 @@ tulpa_hyper_grid <- function(hyper_specs, inner_fit,
       log_marginal  <- consistency$log_marginal
       extras_list   <- consistency$extras
       refining_axis <- consistency$refining_axis
-      # The consistency pass appends slice cells, so the per-cell log-prior
+      # The consistency pass appends cells, so the per-cell log-prior
       # vector is stale; recompute on the merged grid or ds$picks indexes past
       # its end -> NA into the returned $log_prior (as the refine pass does).
       log_prior_cell <- if (is.null(hp_fn)) rep(0, nrow(theta_grid))
@@ -373,8 +392,7 @@ tulpa_hyper_grid <- function(hyper_specs, inner_fit,
   # for. Last, so it reads the final grid and the final measure.
   res_partial <- .nl_attach_axis_sd(
     list(theta_grid = theta_grid, log_marginal = log_marginal,
-         log_quad = log_quad, theta_sd = theta_sd),
-    refining = refining_axis)
+         log_quad = log_quad, theta_sd = theta_sd))
   theta_sd <- res_partial$theta_sd
 
   # Each axis's support as the caller DECLARED it, so the outer cell edges the
@@ -502,6 +520,6 @@ tulpa_hyper_grid <- function(hyper_specs, inner_fit,
     adaptive_grid_info            = adaptive_info,
     var_of_means_consistency_info = consistency_info
   )
-  class(out) <- c("tulpa_hyper_grid", "tulpa_fit", "list")
+  class(out) <- c("tulpa_fit", "list")
   out
 }
